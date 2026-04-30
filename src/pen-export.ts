@@ -84,7 +84,12 @@ type PenFillSingle =
   | { type: 'image'; enabled?: boolean; url?: string; mode?: string }
   | { type: 'gradient'; enabled?: boolean };
 type PenFill = PenFillSingle | PenFillSingle[]; // 다중 layer는 array
-type PenStroke = { align: 'inside' | 'outside' | 'center'; thickness: number; fill?: string };
+type PenStroke = {
+  align: 'inside' | 'outside' | 'center';
+  /** 균일 두께면 number, 비대칭(예: 하단만)이면 부분 객체 — Pencil 스키마 호환 */
+  thickness: number | { top?: number; right?: number; bottom?: number; left?: number };
+  fill?: string;
+};
 type PenEffect = {
   type: 'shadow' | 'blur';
   shadowType?: 'inner' | 'outer';
@@ -145,13 +150,24 @@ function mapNodeType(type: string): PenNode['type'] | null {
   }
 }
 
-/** rgba(0..1) → "#rrggbbaa" 8자리 hex */
+/** rgba(0..1) → "#rrggbbaa" 8자리 hex (Pencil reference 관찰: fill/stroke는 항상 8자 유지) */
 function colorToHex(c: { r?: number; g?: number; b?: number; a?: number }): string {
   const r = clampByte(c.r ?? 0);
   const g = clampByte(c.g ?? 0);
   const b = clampByte(c.b ?? 0);
   const a = clampByte(c.a ?? 1);
   return '#' + [r, g, b, a].map((n) => n.toString(16).padStart(2, '0')).join('');
+}
+
+/** rgba(0..1) → "#rrggbb" or "#rrggbbaa" — alpha=1.0면 6자.
+ *  Pencil reference의 effect.color에만 사용. */
+function colorToHexShortAlpha(c: { r?: number; g?: number; b?: number; a?: number }): string {
+  const r = clampByte(c.r ?? 0);
+  const g = clampByte(c.g ?? 0);
+  const b = clampByte(c.b ?? 0);
+  const a = clampByte(c.a ?? 1);
+  const base = '#' + [r, g, b].map((n) => n.toString(16).padStart(2, '0')).join('');
+  return a === 255 ? base : base + a.toString(16).padStart(2, '0');
 }
 
 /** Figma paint(`{color, opacity}`) → "#rrggbbaa" 합성 hex.
@@ -192,7 +208,9 @@ function paintToFillSingle(paint: Record<string, unknown>): PenFillSingle | null
       type: 'image',
       enabled,
       url: '', // 이미지 hash는 sidecar에서 추적
-      mode: paint.scaleMode === 'FIT' ? 'fit' : paint.scaleMode === 'TILE' ? 'tile' : 'fill',
+      // Figma scaleMode → Pencil mode. 정적 매핑 — Pencil reference도 일관성이 떨어짐(같은 FILL이 어떤 곳은 'fill' 어떤 곳은 'stretch')
+      // 가장 흔한 케이스 우선: FIT → 'fit', 그 외 'fill'.
+      mode: paint.scaleMode === 'FIT' ? 'fit' : 'fill',
     };
   }
   if (t === 'GRADIENT_LINEAR' || t === 'GRADIENT_RADIAL' || t === 'GRADIENT_ANGULAR') {
@@ -227,7 +245,23 @@ function strokeFromNode(data: Record<string, unknown>): PenStroke | undefined {
       : data.strokeAlign === 'OUTSIDE'
         ? 'outside'
         : 'center';
-  const result: PenStroke = { align, thickness: data.strokeWeight };
+
+  // 비대칭 stroke: borderStrokeWeightsIndependent === true → border{Top,Right,Bottom,Left}Weight 사용.
+  // 정의된 면만 thickness 객체에 포함 (Pencil이 빠진 면 = 두께 0으로 해석).
+  let thickness: PenStroke['thickness'] = data.strokeWeight;
+  if (data.borderStrokeWeightsIndependent === true) {
+    const t = data.borderTopWeight as number | undefined;
+    const r = data.borderRightWeight as number | undefined;
+    const b = data.borderBottomWeight as number | undefined;
+    const l = data.borderLeftWeight as number | undefined;
+    const obj: { top?: number; right?: number; bottom?: number; left?: number } = {};
+    if (typeof t === 'number') obj.top = t;
+    if (typeof r === 'number') obj.right = r;
+    if (typeof b === 'number') obj.bottom = b;
+    if (typeof l === 'number') obj.left = l;
+    if (Object.keys(obj).length > 0) thickness = obj;
+  }
+  const result: PenStroke = { align, thickness };
   const strokes = data.strokePaints as Array<Record<string, unknown>> | undefined;
   const first = strokes?.find((s) => s.visible !== false);
   if (first?.type === 'SOLID' && first.color) {
@@ -248,7 +282,7 @@ function effectFromNode(data: Record<string, unknown>): PenEffect | undefined {
     return {
       type: 'shadow',
       shadowType: t === 'INNER_SHADOW' ? 'inner' : 'outer',
-      color: color ? colorToHex(color) : undefined,
+      color: color ? colorToHexShortAlpha(color) : undefined,
       offset: { x: offset?.x ?? 0, y: offset?.y ?? 0 },
       blur: (first.radius as number) ?? 0,
     };
@@ -305,19 +339,21 @@ function layoutFromNode(data: Record<string, unknown>): {
     }
   }
 
-  // alignment (Pencil: justifyContent / alignItems)
+  // alignment — Pencil 스키마는 'start' | 'center' | 'end' | 'space_between' | 'space_around' / 'start' | 'center' | 'end'
+  // (CSS의 'flex-start'/'flex-end'가 아님 — schema 그대로 'start'/'end' 사용)
   const stackAlign = data.stackPrimaryAlignItems as string | undefined;
-  if (stackAlign === 'MIN') out.justifyContent = 'flex-start';
+  if (stackAlign === 'MIN') out.justifyContent = 'start';
   else if (stackAlign === 'CENTER') out.justifyContent = 'center';
-  else if (stackAlign === 'MAX') out.justifyContent = 'flex-end';
-  else if (stackAlign === 'SPACE_BETWEEN' || stackAlign === 'SPACE_EVENLY')
-    out.justifyContent = 'space-between';
+  else if (stackAlign === 'MAX') out.justifyContent = 'end';
+  else if (stackAlign === 'SPACE_BETWEEN') out.justifyContent = 'space_between';
+  else if (stackAlign === 'SPACE_EVENLY') out.justifyContent = 'space_around';
 
   const stackCounter = data.stackCounterAlignItems as string | undefined;
-  if (stackCounter === 'MIN') out.alignItems = 'flex-start';
+  if (stackCounter === 'MIN') out.alignItems = 'start';
   else if (stackCounter === 'CENTER') out.alignItems = 'center';
-  else if (stackCounter === 'MAX') out.alignItems = 'flex-end';
-  else if (stackCounter === 'BASELINE') out.alignItems = 'baseline';
+  else if (stackCounter === 'MAX') out.alignItems = 'end';
+  // BASELINE은 Pencil 스키마에 없음 — 'start'로 fallback
+  else if (stackCounter === 'BASELINE') out.alignItems = 'start';
 
   return out;
 }
@@ -813,6 +849,7 @@ function convertNode(
   parentData?: Record<string, unknown>,
   parentIsInstanceReplaced: boolean = false,
   propAssignments?: Map<string, boolean>,
+  nodeIndex?: Map<string, TreeNode>,
 ): PenNode | null {
   // ★ INSTANCE를 master로 대체 (Pencil 동작과 일치)
   // INSTANCE는 master의 시각 정보(fill/stroke)와 자식을 가져오되
@@ -859,6 +896,20 @@ function convertNode(
           //   여러 INSTANCE가 같은 master를 참조해도 각 확장본의 자손이 충돌하지 않음.
           //   nested INSTANCE의 경우 inner expansion 시 다시 한 번 prefix가 추가되어 깊이별 unique 보장.
           scaledChildren = scaledChildren.map((c) => prefixGuids(c, n.guidStr));
+          // master 루트 자체를 타겟팅하는 symbolOverride (guidPath: [masterGuid]) → merged.data에 적용.
+          // 예: cornerRadius, strokePaints, borderStrokeWeightsIndependent, borderRightWeight 등.
+          const rootOverrideFields: Record<string, unknown> = {};
+          if (Array.isArray(symbolOverrides)) {
+            for (const o of symbolOverrides) {
+              const gp = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+              if (Array.isArray(gp) && gp.length === 1 && gp[0]?.sessionID === sid.sessionID && gp[0]?.localID === sid.localID) {
+                for (const k of Object.keys(o)) {
+                  if (k === 'guidPath') continue;
+                  rootOverrideFields[k] = o[k];
+                }
+              }
+            }
+          }
           // 사이즈가 다르면 INSTANCE 치환된 자식들이 위치 명시 (Pencil 동작)
           const sizesDiffer =
             !!masterSize && !!instSize &&
@@ -880,6 +931,7 @@ function convertNode(
             children: scaledChildren,
             data: {
               ...masterData,
+              ...rootOverrideFields,                       // master root 타겟 symbolOverrides 먼저
               size: finalSize,
               transform: instData.transform, // INSTANCE 위치
               // INSTANCE 자체의 visible:false / opacity는 master 값을 override
@@ -911,7 +963,7 @@ function convertNode(
           // 부모 propAssignments도 합치되 INSTANCE 자체 값이 우선 (가까운 instance가 override).
           const instAssignments = buildPropAssignmentMap(instData);
           const mergedAssignments = mergeAssignments(propAssignments, instAssignments);
-          return convertNode(merged, vectorPathMap, symbolIndex, parentData, parentIsInstanceReplaced, mergedAssignments);
+          return convertNode(merged, vectorPathMap, symbolIndex, parentData, parentIsInstanceReplaced, mergedAssignments, nodeIndex);
         }
       }
     }
@@ -1001,11 +1053,23 @@ function convertNode(
     if (typeof characters === 'string') out.content = characters;
 
     const td = data.textData as Record<string, unknown> | undefined;
-    const fontName = (data.fontName ?? td?.fontName) as { family?: string; style?: string } | undefined;
+
+    // styleIdForText 해결: Figma는 공유 텍스트 스타일을 별개 노드로 저장하고, 사용처는 GUID로 참조함.
+    //   text 노드의 자체 fontName/fontSize 등은 stale일 수 있어 (Figma UI에서 Regular로 보이지만 파일엔 다른 값 등)
+    //   styleIdForText가 있으면 그 노드의 값을 우선 적용 (Pencil 동작과 일치).
+    const styleId = (data.styleIdForText as { guid?: { sessionID?: number; localID?: number } } | undefined)?.guid;
+    let styleData: Record<string, unknown> | undefined;
+    if (styleId && typeof styleId.sessionID === 'number' && typeof styleId.localID === 'number' && nodeIndex) {
+      const styleNode = nodeIndex.get(`${styleId.sessionID}:${styleId.localID}`);
+      if (styleNode) styleData = styleNode.data as Record<string, unknown>;
+    }
+    const styleTd = styleData?.textData as Record<string, unknown> | undefined;
+
+    const fontName = (styleData?.fontName ?? styleTd?.fontName ?? data.fontName ?? td?.fontName) as { family?: string; style?: string } | undefined;
     if (fontName?.family) out.fontFamily = fontName.family;
     if (fontName?.style) out.fontWeight = fontWeightName(fontName.style);
 
-    const fontSize = (data.fontSize as number) ?? (td?.fontSize as number | undefined);
+    const fontSize = (styleData?.fontSize as number) ?? (styleTd?.fontSize as number) ?? (data.fontSize as number) ?? (td?.fontSize as number | undefined);
     if (typeof fontSize === 'number') out.fontSize = fontSize;
 
     // lineHeight: Pencil schema는 fontSize 배수 (ratio).
@@ -1013,7 +1077,7 @@ function convertNode(
     //   Figma PERCENT {value: 100}  → font default = omit
     //   Figma PERCENT {value: v}    → v/100
     //   Figma PIXELS  {value: v}    → v/fontSize
-    const lh = (data.lineHeight ?? td?.lineHeight) as { units?: string; value?: number } | undefined;
+    const lh = (styleData?.lineHeight ?? styleTd?.lineHeight ?? data.lineHeight ?? td?.lineHeight) as { units?: string; value?: number } | undefined;
     if (lh && typeof lh.value === 'number' && lh.value > 0) {
       if (lh.units === 'PERCENT') {
         if (lh.value !== 100) out.lineHeight = lh.value / 100;  // 100% = default → omit
@@ -1028,7 +1092,7 @@ function convertNode(
     //   Figma PERCENT {value: -0.5} for fontSize 16 → (-0.5/100)*16 = -0.08 px
     //   Figma PIXELS  {value: -1.28}                 → 그대로 -1.28 px
     //   value 0 → 모두 omit (font default)
-    const ls = (data.letterSpacing ?? td?.letterSpacing) as { units?: string; value?: number } | undefined;
+    const ls = (styleData?.letterSpacing ?? styleTd?.letterSpacing ?? data.letterSpacing ?? td?.letterSpacing) as { units?: string; value?: number } | undefined;
     if (ls && typeof ls.value === 'number' && ls.value !== 0) {
       if (ls.units === 'PERCENT' && typeof fontSize === 'number') {
         out.letterSpacing = (ls.value / 100) * fontSize;
@@ -1108,7 +1172,7 @@ function convertNode(
     }
     const kids: PenNode[] = [];
     for (const c of kidsToWalk) {
-      const converted = convertNode(c, vectorPathMap, symbolIndex, data, propagateShowPos, propAssignments);
+      const converted = convertNode(c, vectorPathMap, symbolIndex, data, propagateShowPos, propAssignments, nodeIndex);
       if (converted) kids.push(converted);
     }
     if (kids.length > 0) out.children = kids;
@@ -1224,6 +1288,8 @@ export async function generatePenExport(inputs: PenExportInputs): Promise<PenExp
 
   const vectorPathMap = buildVectorPathMap(tree, decoded);
   const symbolIndex = buildSymbolIndex(tree.allNodes);
+  // styleIdForText 등의 cross-tree 참조 lookup용
+  const nodeIndex = tree.allNodes;
   const sourceFigSha256 = createHash('sha256').update(container.canvasFig).digest('hex');
 
   // CPU 변환(convertNode + reassignPenIds)은 페이지 순서대로 직렬 처리 → 결정적 ID 순서 보장.
@@ -1245,7 +1311,7 @@ export async function generatePenExport(inputs: PenExportInputs): Promise<PenExp
     const safeName = (page.name ?? `page-${idx}`).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 80);
     const pageChildren: PenNode[] = [];
     for (const c of page.children) {
-      const converted = convertNode(c, vectorPathMap, symbolIndex);
+      const converted = convertNode(c, vectorPathMap, symbolIndex, undefined, false, undefined, nodeIndex);
       if (converted) pageChildren.push(converted);
     }
     // 좌표 정규화: top-level bbox를 (0,0)에 정렬 → pencil.dev 기본 뷰포트에 즉시 보임
