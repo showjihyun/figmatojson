@@ -1,0 +1,45 @@
+{
+  "name": "figma-reverse",
+  "version": "0.1.0",
+  "description": ".fig (Figma) 파일 역공학 → 구조화된 JSON + 에셋 export 파이프라인",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "figma-reverse": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node --enable-source-maps dist/cli.js",
+    "extract": "tsx src/cli.ts",
+    "extract:sample": "tsx src/cli.ts \"docs/메타리치 화면 UI Design.fig\" --no-document --minify",
+    "extract:bvp": "tsx src/cli.ts docs/bvp.fig --no-document --minify",
+    "dashboard": "tsx src/cli.ts html-report ./extracted ./dashboard",
+    "dashboard:single": "tsx src/cli.ts html-report ./extracted ./dashboard.html --single-file",
+    "round-trip": "tsx src/cli.ts round-trip-html ./extracted",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf dist output extracted dashboard"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.17",
+    "fzstd": "^0.1.1",
+    "kiwi-schema": "^0.5.0",
+    "pako": "^2.1.0"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.7",
+    "@types/node": "^22.10.0",
+    "@types/pako": "^2.0.3",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.5"
+  },
+  "optionalDependencies": {
+    "fig-kiwi": "^0.0.1"
+  }
+}

@@ -1,0 +1,42 @@
+# Build / generated outputs
+dist/
+output/
+extracted/
+dashboard/
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+
+# Skill installations (regenerable from skills-lock.json)
+/skills/
+/.agents/
+
+# But keep project-specific skills authored in this repo
+.claude/skills/*
+!.claude/skills/figma-cli/
+!.claude/skills/figma-internals/
+!.claude/skills/figma-pen-export/
+
+# Local Claude permissions (user-specific)
+.claude/settings.local.json
+
+# Local issue tracker workspace (created by /to-prd, /to-issues, etc.)
+.scratch/
+
+# Tool-managed local directories
+.gstack/
+.kiro/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs / ad-hoc
+logs/
+*.log
+*.tmp
