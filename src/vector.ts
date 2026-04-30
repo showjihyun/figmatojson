@@ -201,22 +201,29 @@ function decodeAt(bytes: Uint8Array, startOffset: number): DecodeAttempt {
           break;
         }
         case 0x03: {
-          if (offset + 24 > bytes.length) throw new Error(`truncated CUBIC`);
-          path += `C${fmt(view.getFloat32(offset, true))} ${fmt(view.getFloat32(offset + 4, true))} ${fmt(view.getFloat32(offset + 8, true))} ${fmt(view.getFloat32(offset + 12, true))} ${fmt(view.getFloat32(offset + 16, true))} ${fmt(view.getFloat32(offset + 20, true))} `;
-          offset += 24;
-          commandCount++;
-          break;
-        }
-        case 0x04: {
+          // Figma binary command 0x03 = QUAD (4 floats = 16 bytes)
+          // (이전엔 CUBIC으로 잘못 해석 → 0x04와 의미가 swap돼 있던 게 root cause)
           if (offset + 16 > bytes.length) throw new Error(`truncated QUAD`);
           path += `Q${fmt(view.getFloat32(offset, true))} ${fmt(view.getFloat32(offset + 4, true))} ${fmt(view.getFloat32(offset + 8, true))} ${fmt(view.getFloat32(offset + 12, true))} `;
           offset += 16;
           commandCount++;
           break;
         }
+        case 0x04: {
+          // Figma binary command 0x04 = CUBIC (6 floats = 24 bytes). 아이콘 곡선 대부분이 이 cmd로 인코딩됨.
+          if (offset + 24 > bytes.length) throw new Error(`truncated CUBIC`);
+          path += `C${fmt(view.getFloat32(offset, true))} ${fmt(view.getFloat32(offset + 4, true))} ${fmt(view.getFloat32(offset + 8, true))} ${fmt(view.getFloat32(offset + 12, true))} ${fmt(view.getFloat32(offset + 16, true))} ${fmt(view.getFloat32(offset + 20, true))} `;
+          offset += 24;
+          commandCount++;
+          break;
+        }
         case 0x05: {
           path += 'Z ';
           commandCount++;
+          break;
+        }
+        case 0x00: {
+          // Subpath separator / no-op marker. 다음 cmd로 계속 진행.
           break;
         }
         default: {

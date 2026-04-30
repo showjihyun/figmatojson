@@ -49,24 +49,39 @@ describe('extractVectors / decodeCommandsBlob', () => {
     expect(results[0]!.svg).toContain('Z');
   });
 
-  it('decodes CUBIC_TO (6 floats)', () => {
+  // Figma binary command 0x04 = CUBIC (24 bytes), 0x03 = QUAD (16 bytes)
+  // (이전에는 swap돼 있어 모든 아이콘 곡선이 직선/근사로 렌더되던 root cause)
+  it('decodes CUBIC (cmd 0x04, 6 floats) — Figma\'s native cubic bezier', () => {
     const blob = new Uint8Array([
       0x01, ...f32(0), ...f32(0),
-      0x03, ...f32(1), ...f32(2), ...f32(3), ...f32(4), ...f32(5), ...f32(6),
+      0x04, ...f32(1), ...f32(2), ...f32(3), ...f32(4), ...f32(5), ...f32(6),
     ]);
     const root = vectorNode('1:2', 0);
     const results = extractVectors(root, [{ bytes: blob }]);
     expect(results[0]!.svg).toContain('C1 2 3 4 5 6');
   });
 
-  it('decodes QUAD (4 floats)', () => {
+  it('decodes QUAD (cmd 0x03, 4 floats)', () => {
     const blob = new Uint8Array([
       0x01, ...f32(0), ...f32(0),
-      0x04, ...f32(1), ...f32(2), ...f32(3), ...f32(4),
+      0x03, ...f32(1), ...f32(2), ...f32(3), ...f32(4),
     ]);
     const root = vectorNode('1:3', 0);
     const results = extractVectors(root, [{ bytes: blob }]);
     expect(results[0]!.svg).toContain('Q1 2 3 4');
+  });
+
+  it('treats cmd 0x00 as subpath separator (no-op) and continues parsing', () => {
+    // 0x00 between two valid commands shouldn't cut the path off.
+    const blob = new Uint8Array([
+      0x01, ...f32(0), ...f32(0),
+      0x00,                                                    // subpath separator
+      0x02, ...f32(10), ...f32(10),                            // line that should still be decoded
+    ]);
+    const root = vectorNode('1:4', 0);
+    const results = extractVectors(root, [{ bytes: blob }]);
+    expect(results[0]!.svg).toContain('M0 0');
+    expect(results[0]!.svg).toContain('L10 10');
   });
 
   it('handles trailing 1-byte (winding flag) gracefully (best-effort)', () => {
