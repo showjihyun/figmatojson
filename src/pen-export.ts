@@ -279,12 +279,15 @@ function effectFromNode(data: Record<string, unknown>): PenEffect | undefined {
   if (t === 'DROP_SHADOW' || t === 'INNER_SHADOW') {
     const color = first.color as { r?: number; g?: number; b?: number; a?: number } | undefined;
     const offset = first.offset as { x?: number; y?: number } | undefined;
+    // Pencil reference 관찰: blur = Figma radius × 0.875 (= 7/8). 정확한 이유는 불명이나
+    // Pencil 자체의 컨버터가 일관되게 이 비율로 변환 (radius 4 → 3.5, 8 → 7 등).
+    const radius = (first.radius as number) ?? 0;
     return {
       type: 'shadow',
       shadowType: t === 'INNER_SHADOW' ? 'inner' : 'outer',
       color: color ? colorToHexShortAlpha(color) : undefined,
       offset: { x: offset?.x ?? 0, y: offset?.y ?? 0 },
-      blur: (first.radius as number) ?? 0,
+      blur: radius * 0.875,
     };
   }
   if (t === 'LAYER_BLUR' || t === 'BACKGROUND_BLUR') {
@@ -805,14 +808,22 @@ function buildPropAssignmentMap(
   instData: Record<string, unknown>,
 ): Map<string, boolean> | undefined {
   const cpa = instData.componentPropAssignments as
-    | Array<{ defID?: { sessionID?: number; localID?: number }; value?: { boolValue?: boolean } }>
+    | Array<{
+        defID?: { sessionID?: number; localID?: number };
+        value?: { boolValue?: boolean };
+        varValue?: { value?: { boolValue?: boolean }; dataType?: string };
+      }>
     | undefined;
   if (!Array.isArray(cpa) || cpa.length === 0) return undefined;
   const out = new Map<string, boolean>();
   for (const a of cpa) {
     const d = a.defID;
     if (!d || typeof d.sessionID !== 'number' || typeof d.localID !== 'number') continue;
-    const v = a.value?.boolValue;
+    // Figma stores the boolean in either `value.boolValue` (직접 세팅) 또는
+    // `varValue.value.boolValue` (variant/default 경유). 둘 다 체크해야 안 빠짐.
+    const directV = a.value?.boolValue;
+    const varV = a.varValue?.value?.boolValue;
+    const v = typeof directV === 'boolean' ? directV : (typeof varV === 'boolean' ? varV : undefined);
     if (typeof v !== 'boolean') continue;
     out.set(`${d.sessionID}:${d.localID}`, v);
   }
