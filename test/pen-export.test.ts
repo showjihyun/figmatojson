@@ -119,6 +119,101 @@ function findByName(root: PenNodeOut | { children?: PenNodeOut[] }, name: string
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe('pen-export visibility', () => {
+  it('text style values match pencil.dev reference (fontWeight string, textAlignVertical "middle", omit defaults)', async () => {
+    const out = await runExport({
+      guid: { sessionID: 0, localID: 1 },
+      type: 'DOCUMENT',
+      children: [{
+        guid: { sessionID: 0, localID: 2 },
+        type: 'CANVAS',
+        name: 'Page',
+        children: [
+          {
+            guid: { sessionID: 1, localID: 1 },
+            type: 'TEXT',
+            name: 'boldText',
+            data: {
+              transform: { m02: 0, m12: 0 },
+              size: { x: 50, y: 14 },
+              fontSize: 16,
+              fontName: { family: 'Pretendard', style: 'Bold' },
+              textAlignVertical: 'CENTER',
+              // PERCENT 100 = font default → omit
+              lineHeight: { value: 100, units: 'PERCENT' },
+              letterSpacing: { value: 0, units: 'PERCENT' },
+            },
+          },
+          {
+            guid: { sessionID: 1, localID: 3 },
+            type: 'TEXT',
+            name: 'tightText',
+            data: {
+              transform: { m02: 0, m12: 0 },
+              size: { x: 50, y: 14 },
+              fontSize: 16,
+              fontName: { family: 'Pretendard', style: 'Regular' },
+              // -0.5% letterSpacing should become (-0.5/100) * 16 = -0.08 px
+              letterSpacing: { value: -0.5, units: 'PERCENT' },
+              // RAW 1 = explicit "1x fontSize" → emit as 1
+              lineHeight: { value: 1, units: 'RAW' },
+            },
+          },
+          {
+            guid: { sessionID: 1, localID: 2 },
+            type: 'TEXT',
+            name: 'mediumText',
+            data: {
+              transform: { m02: 0, m12: 0 },
+              size: { x: 50, y: 14 },
+              fontName: { family: 'Pretendard', style: 'Medium' },
+            },
+          },
+        ],
+      }],
+    });
+
+    const bold = findByName(out, 'boldText')[0]! as Record<string, unknown>;
+    expect(bold.fontWeight).toBe('700');               // Bold → "700" (string), not "bold" or 700
+    expect(bold.textAlignVertical).toBe('middle');     // CENTER → "middle", not "center"
+    expect(bold.lineHeight).toBeUndefined();            // PERCENT 100 (= font default) → omit
+    expect(bold.letterSpacing).toBeUndefined();         // 0 → omit
+
+    const medium = findByName(out, 'mediumText')[0]! as Record<string, unknown>;
+    expect(medium.fontWeight).toBe('500');              // Medium → "500" (string), not 500 (number)
+
+    const tight = findByName(out, 'tightText')[0]! as Record<string, unknown>;
+    // PERCENT -0.5 letterSpacing × fontSize 16 = -0.08 px
+    expect(tight.letterSpacing).toBeCloseTo(-0.08, 5);
+    // RAW 1 lineHeight (explicit) → emit as 1
+    expect(tight.lineHeight).toBe(1);
+  });
+
+  it('stroke fill applies paint-level opacity into the alpha channel', async () => {
+    const out = await runExport({
+      guid: { sessionID: 0, localID: 1 },
+      type: 'DOCUMENT',
+      children: [{
+        guid: { sessionID: 0, localID: 2 },
+        type: 'CANVAS',
+        name: 'Page',
+        children: [{
+          guid: { sessionID: 1, localID: 1 },
+          type: 'FRAME',
+          name: 'lined',
+          data: {
+            size: { x: 100, y: 50 },
+            strokeWeight: 1,
+            strokeAlign: 'INSIDE',
+            // Figma stores fully-opaque white but the paint itself has 10% opacity
+            strokePaints: [{ type: 'SOLID', color: { r: 1, g: 1, b: 1, a: 1 }, opacity: 0.1, visible: true }],
+          },
+        }],
+      }],
+    });
+    const lined = findByName(out, 'lined')[0]! as { stroke?: { fill?: string } };
+    expect(lined.stroke?.fill).toBe('#ffffff1a');       // 0.1 alpha → 0x1a, NOT 0xff
+  });
+
   it('emits CSS-relevant properties: gap, clip, textGrowth (regression — pencil.dev needs these for proper styling)', async () => {
     // 3 bugs found via reference comparison: gap (used wrong Figma field name),
     //   clip (used wrong field name), textGrowth (not emitted at all).

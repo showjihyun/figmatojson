@@ -55,7 +55,8 @@ interface PenNode {
   content?: string;
   fontFamily?: string;
   fontSize?: number;
-  fontWeight?: string | number;
+  /** Pencil 스키마 호환: 항상 string. 'normal' (=400) 또는 numeric string ('100'~'900'). 'bold'는 출력 X. */
+  fontWeight?: string;
   lineHeight?: number;
   letterSpacing?: number;
   textAlign?: string;
@@ -152,6 +153,17 @@ function colorToHex(c: { r?: number; g?: number; b?: number; a?: number }): stri
   const a = clampByte(c.a ?? 1);
   return '#' + [r, g, b, a].map((n) => n.toString(16).padStart(2, '0')).join('');
 }
+
+/** Figma paint(`{color, opacity}`) → "#rrggbbaa" 합성 hex.
+ *  Figma는 color.a (색 자체의 알파) + paint.opacity (페인트 레이어 투명도)를 분리 저장 →
+ *  최종 알파 = color.a × paint.opacity. 둘 중 하나만 보면 stroke/fill 색이 진하게 나옴. */
+function paintToHex(paint: { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number }): string | null {
+  if (!paint.color) return null;
+  const c = paint.color;
+  const colorA = c.a ?? 1;
+  const paintA = typeof paint.opacity === 'number' ? paint.opacity : 1;
+  return colorToHex({ r: c.r, g: c.g, b: c.b, a: colorA * paintA });
+}
 function clampByte(v: number): number {
   return Math.max(0, Math.min(255, Math.round(v * 255)));
 }
@@ -168,7 +180,8 @@ function paintToFillSingle(paint: Record<string, unknown>): PenFillSingle | null
   const t = paint.type;
   const enabled = paint.visible !== false;
   if (t === 'SOLID' && paint.color) {
-    const hex = colorToHex(paint.color as { r?: number; g?: number; b?: number; a?: number });
+    const hex = paintToHex(paint as { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number });
+    if (!hex) return null;
     if (enabled) return hex; // 활성화된 단순 색은 hex string만 (Pencil 동일)
     return { type: 'color', color: hex, enabled: false };
   }
@@ -218,7 +231,8 @@ function strokeFromNode(data: Record<string, unknown>): PenStroke | undefined {
   const strokes = data.strokePaints as Array<Record<string, unknown>> | undefined;
   const first = strokes?.find((s) => s.visible !== false);
   if (first?.type === 'SOLID' && first.color) {
-    result.fill = colorToHex(first.color as { r?: number; g?: number; b?: number; a?: number });
+    const hex = paintToHex(first as { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number });
+    if (hex) result.fill = hex;
   }
   return result;
 }
@@ -435,18 +449,20 @@ function getPadding(data: Record<string, unknown>): {
   };
 }
 
-function fontWeightName(fontStyle?: string): string | number {
-  // Pencil convention: 400 → 'normal', 700 → 'bold', 그 외는 number
+/** Figma fontName.style ("Bold", "Medium", etc.) → Pencil 호환 fontWeight (`StringOrVariable`).
+ *  Pencil reference 관찰: 모두 string. 400만 'normal', 나머진 모두 numeric string ("700", "500"…).
+ *  ※ 'bold'를 출력하지 말 것 — reference는 "Bold"도 "700"으로 표기. */
+function fontWeightName(fontStyle?: string): string {
   if (!fontStyle) return 'normal';
   const lc = fontStyle.toLowerCase();
-  if (lc.includes('thin')) return 100;
-  if (lc.includes('extra light') || lc.includes('extralight')) return 200;
-  if (lc.includes('light')) return 300;
-  if (lc.includes('semi bold') || lc.includes('semibold')) return 600;
-  if (lc.includes('extra bold') || lc.includes('extrabold')) return 800;
-  if (lc.includes('black') || lc.includes('heavy')) return 900;
-  if (lc.includes('bold')) return 'bold'; // Pencil은 'bold' string
-  if (lc.includes('medium')) return 500;
+  if (lc.includes('thin')) return '100';
+  if (lc.includes('extra light') || lc.includes('extralight')) return '200';
+  if (lc.includes('light')) return '300';
+  if (lc.includes('semi bold') || lc.includes('semibold')) return '600';
+  if (lc.includes('extra bold') || lc.includes('extrabold')) return '800';
+  if (lc.includes('black') || lc.includes('heavy')) return '900';
+  if (lc.includes('bold')) return '700';
+  if (lc.includes('medium')) return '500';
   if (lc.includes('regular') || lc.includes('normal')) return 'normal';
   return 'normal';
 }
@@ -949,10 +965,11 @@ function convertNode(
   const fills = data.fillPaints as Array<Record<string, unknown>> | undefined;
   if (fills && fills.length > 0) {
     if (penType === 'text') {
-      // text는 fill을 단순 color (hex)로 (visible solid 첫 번째)
+      // text는 fill을 단순 color (hex)로 (visible solid 첫 번째). paint.opacity까지 합성.
       const solid = fills.find((f) => f.type === 'SOLID' && f.visible !== false);
       if (solid?.color) {
-        out.fill = colorToHex(solid.color as { r?: number; g?: number; b?: number; a?: number });
+        const hex = paintToHex(solid as { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number });
+        if (hex) out.fill = hex;
       }
     } else {
       const fill = paintsToFill(fills);
@@ -991,18 +1008,41 @@ function convertNode(
     const fontSize = (data.fontSize as number) ?? (td?.fontSize as number | undefined);
     if (typeof fontSize === 'number') out.fontSize = fontSize;
 
+    // lineHeight: Pencil schema는 fontSize 배수 (ratio).
+    //   Figma RAW {value: v}        → 그대로 (이미 ratio)
+    //   Figma PERCENT {value: 100}  → font default = omit
+    //   Figma PERCENT {value: v}    → v/100
+    //   Figma PIXELS  {value: v}    → v/fontSize
     const lh = (data.lineHeight ?? td?.lineHeight) as { units?: string; value?: number } | undefined;
     if (lh && typeof lh.value === 'number' && lh.value > 0) {
-      out.lineHeight = lh.units === 'PERCENT' ? lh.value / 100 : lh.value;
+      if (lh.units === 'PERCENT') {
+        if (lh.value !== 100) out.lineHeight = lh.value / 100;  // 100% = default → omit
+      } else if (lh.units === 'PIXELS' && typeof fontSize === 'number' && fontSize > 0) {
+        out.lineHeight = lh.value / fontSize;
+      } else {
+        // RAW (default in Figma) — 이미 ratio, 그대로 emit (1, 1.3, 1.5 등)
+        out.lineHeight = lh.value;
+      }
     }
+    // letterSpacing: Pencil schema는 픽셀.
+    //   Figma PERCENT {value: -0.5} for fontSize 16 → (-0.5/100)*16 = -0.08 px
+    //   Figma PIXELS  {value: -1.28}                 → 그대로 -1.28 px
+    //   value 0 → 모두 omit (font default)
     const ls = (data.letterSpacing ?? td?.letterSpacing) as { units?: string; value?: number } | undefined;
-    if (ls && typeof ls.value === 'number') {
-      out.letterSpacing = ls.units === 'PERCENT' ? ls.value / 100 : ls.value;
+    if (ls && typeof ls.value === 'number' && ls.value !== 0) {
+      if (ls.units === 'PERCENT' && typeof fontSize === 'number') {
+        out.letterSpacing = (ls.value / 100) * fontSize;
+      } else {
+        out.letterSpacing = ls.value;
+      }
     }
     const ah = data.textAlignHorizontal as string | undefined;
     if (ah && ah !== 'LEFT') out.textAlign = ah.toLowerCase();
+    // textAlignVertical: Figma는 'CENTER', Pencil 스키마는 'middle' (어휘 차이 — 모르고 lowercase 하면 'center'가 되어 무시됨)
     const av = data.textAlignVertical as string | undefined;
-    if (av && av !== 'TOP') out.textAlignVertical = av.toLowerCase();
+    if (av === 'CENTER') out.textAlignVertical = 'middle';
+    else if (av === 'BOTTOM') out.textAlignVertical = 'bottom';
+    // 'TOP' (default) → omit
     // textGrowth — Pencil 스키마는 width/height가 적용되려면 이걸 명시해야 함.
     //   WIDTH_AND_HEIGHT → "auto" (default, omit)
     //   HEIGHT           → "fixed-width"        (width 고정, height는 텍스트 길이로 계산, wrap 가능)
