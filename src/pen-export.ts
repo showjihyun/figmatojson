@@ -60,6 +60,11 @@ interface PenNode {
   letterSpacing?: number;
   textAlign?: string;
   textAlignVertical?: string;
+  /** Pencil 스키마: width/height가 적용되려면 이걸 명시해야 함.
+   *  - 'fixed-width'        — width 고정, height 자동 계산 (wrap 가능)
+   *  - 'fixed-width-height' — 둘 다 고정 (overflow 가능)
+   *  - 'auto'(default, omit) — wrap 없음, width/height는 콘텐츠 크기 */
+  textGrowth?: 'fixed-width' | 'fixed-width-height';
   // path-specific
   geometry?: string;
   // frame-specific (v2.11에서 부분만)
@@ -265,8 +270,9 @@ function layoutFromNode(data: Record<string, unknown>): {
   if (stackMode === 'VERTICAL') out.layout = 'vertical';
   // HORIZONTAL은 layout 키 안 넣음
 
-  const itemSpacing = data.itemSpacing as number | undefined;
-  if (typeof itemSpacing === 'number' && itemSpacing > 0) out.gap = itemSpacing;
+  // Figma의 실제 필드는 `stackSpacing` (`itemSpacing`이 아님 — 흔한 착각)
+  const stackSpacing = data.stackSpacing as number | undefined;
+  if (typeof stackSpacing === 'number' && stackSpacing > 0) out.gap = stackSpacing;
 
   // padding 단축형 — Figma 필드: stackHorizontalPadding/stackVerticalPadding이 기본,
   // stackPaddingTop/Right/Bottom/Left가 per-side override.
@@ -997,6 +1003,13 @@ function convertNode(
     if (ah && ah !== 'LEFT') out.textAlign = ah.toLowerCase();
     const av = data.textAlignVertical as string | undefined;
     if (av && av !== 'TOP') out.textAlignVertical = av.toLowerCase();
+    // textGrowth — Pencil 스키마는 width/height가 적용되려면 이걸 명시해야 함.
+    //   WIDTH_AND_HEIGHT → "auto" (default, omit)
+    //   HEIGHT           → "fixed-width"        (width 고정, height는 텍스트 길이로 계산, wrap 가능)
+    //   NONE / TRUNCATE  → "fixed-width-height" (둘 다 고정, overflow 가능)
+    const tar = data.textAutoResize as string | undefined;
+    if (tar === 'HEIGHT') out.textGrowth = 'fixed-width';
+    else if (tar === 'NONE' || tar === 'TRUNCATE') out.textGrowth = 'fixed-width-height';
   } else if (penType === 'path') {
     // INSTANCE 확장으로 prefix가 붙은 경우 ("22:200/4:18548") 마지막 segment(원본 master guid)로 lookup.
     // vectorPathMap은 vector 추출 단계에서 원본 GUID로 키잉됨.
@@ -1006,7 +1019,11 @@ function convertNode(
   } else if (penType === 'frame') {
     const layout = layoutFromNode(data);
     Object.assign(out, layout);
-    if (data.clipsContent === true) out.clip = true;
+    // Figma의 클리핑은 `frameMaskDisabled`로 제어됨. 값이 false면 마스크가 ON → clip:true.
+    // (이름이 헷갈리지만 "frame mask disabled = false" → 마스크 활성화).
+    // 일부 노드엔 legacy `clipsContent` 필드가 남아있어 fallback.
+    if (data.frameMaskDisabled === false) out.clip = true;
+    else if (data.clipsContent === true) out.clip = true;
   }
 
   // children 재귀 (INSTANCE는 위에서 이미 master로 대체됨)

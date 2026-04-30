@@ -119,6 +119,101 @@ function findByName(root: PenNodeOut | { children?: PenNodeOut[] }, name: string
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe('pen-export visibility', () => {
+  it('emits CSS-relevant properties: gap, clip, textGrowth (regression — pencil.dev needs these for proper styling)', async () => {
+    // 3 bugs found via reference comparison: gap (used wrong Figma field name),
+    //   clip (used wrong field name), textGrowth (not emitted at all).
+    // Pencil.dev needs each for: spacing between flex children, overflow handling,
+    //   and width/height to take effect on text.
+    const out = await runExport({
+      guid: { sessionID: 0, localID: 1 },
+      type: 'DOCUMENT',
+      children: [
+        {
+          guid: { sessionID: 0, localID: 2 },
+          type: 'CANVAS',
+          name: 'Page',
+          children: [
+            {
+              // (a) frame with stackSpacing:8 → expect gap:8
+              // (b) frame with frameMaskDisabled:false → expect clip:true
+              guid: { sessionID: 1, localID: 1 },
+              type: 'FRAME',
+              name: 'gappedClipped',
+              data: {
+                size: { x: 100, y: 50 },
+                stackMode: 'HORIZONTAL',
+                stackSpacing: 8,
+                frameMaskDisabled: false,
+              },
+              children: [
+                {
+                  // (c) TEXT with textAutoResize:HEIGHT → expect textGrowth:"fixed-width"
+                  guid: { sessionID: 1, localID: 2 },
+                  type: 'TEXT',
+                  name: 'wrappingText',
+                  data: {
+                    transform: { m02: 0, m12: 0 },
+                    size: { x: 80, y: 14 },
+                    textAutoResize: 'HEIGHT',
+                  },
+                },
+                {
+                  // textAutoResize NONE → fixed-width-height
+                  guid: { sessionID: 1, localID: 3 },
+                  type: 'TEXT',
+                  name: 'fixedText',
+                  data: {
+                    transform: { m02: 0, m12: 0 },
+                    size: { x: 80, y: 14 },
+                    textAutoResize: 'NONE',
+                  },
+                },
+                {
+                  // textAutoResize WIDTH_AND_HEIGHT → omit (default 'auto')
+                  guid: { sessionID: 1, localID: 4 },
+                  type: 'TEXT',
+                  name: 'autoText',
+                  data: {
+                    transform: { m02: 0, m12: 0 },
+                    size: { x: 80, y: 14 },
+                    textAutoResize: 'WIDTH_AND_HEIGHT',
+                  },
+                },
+              ],
+            },
+            {
+              // frame with frameMaskDisabled:true → no clip emitted
+              guid: { sessionID: 1, localID: 5 },
+              type: 'FRAME',
+              name: 'unclipped',
+              data: {
+                transform: { m02: 200, m12: 0 },
+                size: { x: 100, y: 50 },
+                frameMaskDisabled: true,
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const gappedClipped = findByName(out, 'gappedClipped')[0]!;
+    expect((gappedClipped as { gap?: number }).gap).toBe(8);
+    expect((gappedClipped as { clip?: boolean }).clip).toBe(true);
+
+    const unclipped = findByName(out, 'unclipped')[0]!;
+    expect((unclipped as { clip?: boolean }).clip).toBeUndefined();
+
+    const wrap = findByName(out, 'wrappingText')[0]!;
+    expect((wrap as { textGrowth?: string }).textGrowth).toBe('fixed-width');
+
+    const fixed = findByName(out, 'fixedText')[0]!;
+    expect((fixed as { textGrowth?: string }).textGrowth).toBe('fixed-width-height');
+
+    const auto = findByName(out, 'autoText')[0]!;
+    expect((auto as { textGrowth?: string }).textGrowth).toBeUndefined(); // 'auto' is default → omit
+  });
+
   it('emits enabled:false for direct visible:false on master node', async () => {
     const out = await runExport({
       guid: { sessionID: 0, localID: 1 },
