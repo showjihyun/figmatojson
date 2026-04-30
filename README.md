@@ -2,7 +2,7 @@
 
 # figma-reverse
 
-**Reverse-engineer `.fig` files into structured JSON, Pencil `.pen`, and editable HTML.**
+**Reverse-engineer `.fig` files into structured JSON, pencil.dev `.pen`, and editable HTML.**
 Fully offline. Fully reversible. No Figma API, no account, no cloud.
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
@@ -27,7 +27,7 @@ Figma's `.fig` format is **closed and undocumented**. The official REST API need
 `figma-reverse` cracks the format open locally, end to end:
 
 - 🔓 **Decode** — ZIP container → `fig-kiwi` archive → schema → message → tree of 35,000+ nodes
-- 📤 **Export** — readable JSON, Pencil-compatible `.pen` files, browsable HTML dashboards
+- 📤 **Export** — readable JSON, pencil.dev-compatible `.pen` files, browsable HTML dashboards
 - 🔁 **Repack** — go back to a valid `.fig` byte-for-byte, or with edits applied
 - 🤖 **AI-ready** — JSON outputs slot directly into RAG / LLM workflows; sample design encodes to ~140 KB of compact JSON per page
 
@@ -39,7 +39,7 @@ Built for designers exporting backups, engineers migrating off Figma, RAG pipeli
 
 - **🌐 Offline-first** — single `.fig` file in, structured outputs out. No network calls, no auth.
 - **🔍 Full pipeline visibility** — every stage (`01_container/` → `05_tree/`) dumped to disk for debugging
-- **🎨 Pencil.dev compatible** — generates valid `.pen` files for direct import (page-seeded base62 IDs, viewport-normalized, globally unique)
+- **🎨 pencil.dev compatible** — generates valid `.pen` files for direct import (page-seeded base62 IDs, viewport-normalized, globally unique)
 - **♻️ Reversible** — three repack modes: byte-identical, kiwi semantic, JSON edit-and-rebuild
 - **⚡ Async I/O** — `Promise.all`-parallel reads / writes; pen export of a 35K-node file in ~1.7s
 - **🔬 Type-safe** — strict TypeScript, no `any`, fully typed kiwi schema
@@ -58,7 +58,7 @@ npm install
 # Extract a .fig file → output/ + extracted/
 npx tsx src/cli.ts extract path/to/your.fig
 
-# Convert to Pencil .pen (one per Figma page)
+# Convert to pencil.dev .pen (one per Figma page)
 npx tsx src/cli.ts pen-export path/to/your.fig
 
 # Browse the result in HTML
@@ -86,7 +86,7 @@ your.fig (6 MB)
    ├─► extracted/your/                    (debugging breadcrumbs)
    │   ├── 01_container/  …  05_tree/     ← every pipeline stage on disk
    │   ├── 07_editable/figma.editable.html ← single-file HTML w/ embedded .fig
-   │   └── 08_pen/<n>_<name>.pen          ← Pencil v2.11 native
+   │   └── 08_pen/<n>_<name>.pen          ← pencil.dev v2.11 native
    │       └── <n>_<name>.pen.json        ← + Figma round-trip metadata
    │
    ├─► dashboard/                         (browsable UI)
@@ -160,7 +160,7 @@ npx tsx src/cli.ts extract <input.fig> [--minify] [--no-document] [--include-raw
 # Repack   — extracted/ → .fig
 npx tsx src/cli.ts repack <extracted-dir> <out.fig> [--mode byte|kiwi|json] [--original <orig.fig>]
 
-# Pen      — .fig → Pencil .pen + .pen.json (per page)
+# Pen      — .fig → pencil.dev .pen + .pen.json (per page)
 npx tsx src/cli.ts pen-export <input.fig>
 
 # HTML     — extracted+output → browser dashboard
@@ -186,7 +186,7 @@ npx tsx src/cli.ts editable-html <input.fig> --single-file
 
 Decoded message: **35,660 nodes**, **568 schema types**, **archive version 106**, **6,094 binary blobs**, **1,599 vector paths** extracted as SVG.
 
-Pencil match against reference: **99.6%** (1,392 of 1,397 nodes) — see [SPEC.md §8](./docs/SPEC.md) for the 5 known edge cases.
+pencil.dev match against reference: **99.6%** (1,392 of 1,397 nodes) — see [SPEC.md §8](./docs/SPEC.md) for the 5 known edge cases.
 
 ---
 
@@ -205,7 +205,7 @@ src/
 ├── verify.ts              # Stage 9 — invariant report
 ├── intermediate.ts        # All `extracted/<n>_<name>/` dumps
 ├── repack.ts              # Reverse pipeline (byte / kiwi / json)
-├── pen-export.ts          # Pencil .pen exporter (the dense one)
+├── pen-export.ts          # pencil.dev .pen exporter (the dense one)
 ├── html-export.ts         # Dashboard generator
 └── editable-html.ts       # Single-file HTML with embedded .fig
 
@@ -274,6 +274,6 @@ For Claude Code users: this repo ships with three project skills in `.claude/ski
 - **[Evan Wallace](https://github.com/evanw/kiwi)** — kiwi binary schema
 - **[Albert Sikkema](https://albertsikkema.com/)** — Figma Make `.make` container analysis (key prior art)
 - **[easylogic](https://easylogic.studio/)** — fig-kiwi npm package + early reference parser
-- **[Pencil](https://pencil.dev/)** — `.pen` v2.11 schema target
+- **[pencil.dev](https://pencil.dev/)** — `.pen` v2.11 schema target
 
 Built with [Claude Code](https://claude.com/claude-code) — see commit history for the AI/human collaboration trail.
