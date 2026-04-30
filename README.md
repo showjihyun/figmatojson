@@ -43,7 +43,7 @@ Built for designers exporting backups, engineers migrating off Figma, RAG pipeli
 - **♻️ Reversible** — three repack modes: byte-identical, kiwi semantic, JSON edit-and-rebuild
 - **⚡ Async I/O** — `Promise.all`-parallel reads / writes; pen export of a 35K-node file in ~1.7s
 - **🔬 Type-safe** — strict TypeScript, no `any`, fully typed kiwi schema
-- **🧪 Tested** — 87 unit + e2e tests, including byte-identical roundtrip, lossless JSON round-trip, ID uniqueness, visibility resolution
+- **🧪 Tested** — 93 unit + e2e tests including a CSS coverage regression guard that diffs every property against pencil.dev's reference conversion (currently 98.98% match across 1,865 property comparisons)
 - **📐 Spec-driven** — every output format has a `docs/specs/*.spec.md` with invariants
 
 ---
@@ -248,6 +248,10 @@ Includes:
 - visibility resolution (3 mechanisms × variants)
 - ID uniqueness (within page + globally across pages)
 - viewport normalization for pencil.dev import
+- **CSS coverage regression guard** (`test/pen-css-coverage.test.ts`) — diffs the
+  produced `.pen` against pencil.dev's reference conversion property-by-property.
+  Asserts text styling is 100% match (proves `styleIdForText` resolution works)
+  and per-type mismatch counts stay below calibrated thresholds.
 
 ---
 
