@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { extractVectors, decodeCommandsBlob } from './vector.js';
+import { decodeCommandsBlob, parseVectorNetworkBlob, vectorNetworkToPath } from './vector.js';
 import type { DecodedFig } from './decoder.js';
 import type { BuildTreeResult, ContainerResult, TreeNode } from './types.js';
 
@@ -172,13 +172,84 @@ function colorToHexShortAlpha(c: { r?: number; g?: number; b?: number; a?: numbe
 
 /** Figma paint(`{color, opacity}`) → "#rrggbbaa" 합성 hex.
  *  Figma는 color.a (색 자체의 알파) + paint.opacity (페인트 레이어 투명도)를 분리 저장 →
- *  최종 알파 = color.a × paint.opacity. 둘 중 하나만 보면 stroke/fill 색이 진하게 나옴. */
-function paintToHex(paint: { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number }): string | null {
-  if (!paint.color) return null;
-  const c = paint.color;
+ *  최종 알파 = color.a × paint.opacity. 둘 중 하나만 보면 stroke/fill 색이 진하게 나옴.
+ *
+ *  colorVar(Figma Variables alias) 우선:
+ *    Override 결과로 paint.color가 placeholder({r:1,g:1,b:1,a:1})로 stamp 되어 있어도
+ *    colorVar.dataType === 'ALIAS'이면 alias chain을 resolve해 실제 값을 사용 (pencil.dev 동작).
+ */
+function paintToHex(
+  paint: {
+    color?: { r?: number; g?: number; b?: number; a?: number };
+    opacity?: number;
+    colorVar?: {
+      value?: { alias?: { guid?: { sessionID?: number; localID?: number } } };
+      dataType?: string;
+    };
+  },
+  varResolver?: ColorVarResolver,
+): string | null {
+  let c = paint.color;
+  // colorVar alias 우선 — Figma의 default-stamped color 보다 더 신뢰할 수 있음.
+  if (paint.colorVar?.dataType === 'ALIAS' && varResolver) {
+    const alias = paint.colorVar.value?.alias?.guid;
+    if (alias && typeof alias.sessionID === 'number' && typeof alias.localID === 'number') {
+      const resolved = varResolver(`${alias.sessionID}:${alias.localID}`);
+      if (resolved) c = resolved;
+    }
+  }
+  if (!c) return null;
   const colorA = c.a ?? 1;
   const paintA = typeof paint.opacity === 'number' ? paint.opacity : 1;
   return colorToHex({ r: c.r, g: c.g, b: c.b, a: colorA * paintA });
+}
+
+type RgbaColor = { r?: number; g?: number; b?: number; a?: number };
+type ColorVarResolver = (varId: string) => RgbaColor | null;
+
+/** allNodes에서 VARIABLE 노드들을 모아 alias chain을 풀어주는 resolver를 만든다.
+ *  결과는 캐시되어 동일 varId 재요청 시 즉시 반환. */
+function buildColorVarResolver(allNodes: Map<string, TreeNode>): ColorVarResolver {
+  const cache = new Map<string, RgbaColor | null>();
+  function resolve(varId: string, depth = 0): RgbaColor | null {
+    if (cache.has(varId)) return cache.get(varId)!;
+    if (depth > 16) return null;
+    const node = allNodes.get(varId);
+    if (!node || node.type !== 'VARIABLE') {
+      cache.set(varId, null);
+      return null;
+    }
+    const data = node.data as Record<string, unknown>;
+    const dvs = data.variableDataValues as
+      | { entries?: Array<{ modeID?: unknown; variableData?: Record<string, unknown> }> }
+      | undefined;
+    const entries = dvs?.entries ?? [];
+    // 첫 entry 사용 (mode 다중 지원은 추후. Pencil도 단일 mode resolved 값을 사용)
+    const entry = entries[0];
+    if (!entry?.variableData) {
+      cache.set(varId, null);
+      return null;
+    }
+    const vd = entry.variableData as { dataType?: string; value?: Record<string, unknown> };
+    if (vd.dataType === 'ALIAS') {
+      const alias = (vd.value?.alias as { guid?: { sessionID?: number; localID?: number } } | undefined)?.guid;
+      if (!alias || typeof alias.sessionID !== 'number' || typeof alias.localID !== 'number') {
+        cache.set(varId, null);
+        return null;
+      }
+      const result = resolve(`${alias.sessionID}:${alias.localID}`, depth + 1);
+      cache.set(varId, result);
+      return result;
+    }
+    if (vd.dataType === 'COLOR') {
+      const cv = (vd.value?.colorValue ?? vd.value) as RgbaColor | undefined;
+      cache.set(varId, cv ?? null);
+      return cv ?? null;
+    }
+    cache.set(varId, null);
+    return null;
+  }
+  return resolve;
 }
 function clampByte(v: number): number {
   return Math.max(0, Math.min(255, Math.round(v * 255)));
@@ -192,11 +263,17 @@ function clampByte(v: number): number {
  * - IMAGE → { type: 'image', enabled, url, mode }
  * - GRADIENT → { type: 'gradient', enabled }
  */
-function paintToFillSingle(paint: Record<string, unknown>): PenFillSingle | null {
+function paintToFillSingle(
+  paint: Record<string, unknown>,
+  varResolver?: ColorVarResolver,
+): PenFillSingle | null {
   const t = paint.type;
   const enabled = paint.visible !== false;
   if (t === 'SOLID' && paint.color) {
-    const hex = paintToHex(paint as { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number });
+    const hex = paintToHex(
+      paint as { color?: RgbaColor; opacity?: number; colorVar?: { value?: { alias?: { guid?: { sessionID?: number; localID?: number } } }; dataType?: string } },
+      varResolver,
+    );
     if (!hex) return null;
     if (enabled) return hex; // 활성화된 단순 색은 hex string만 (Pencil 동일)
     return { type: 'color', color: hex, enabled: false };
@@ -204,13 +281,21 @@ function paintToFillSingle(paint: Record<string, unknown>): PenFillSingle | null
   if (t === 'IMAGE') {
     const image = paint.image as { hash?: unknown } | undefined;
     void image;
+    // Figma imageScaleMode → Pencil mode 매핑.
+    // 주의: 필드명은 `imageScaleMode` (NOT `scaleMode`). Figma 내부 명명 일관성 부족.
+    // pencil.dev reference: FIT → "fit", FILL → "fill", STRETCH/CROP → "stretch", TILE → "tile".
+    // 기본값은 "fill" (Figma의 가장 흔한 default).
+    const sm = (paint.imageScaleMode ?? paint.scaleMode) as string | undefined;
+    const mode =
+      sm === 'FIT' ? 'fit' :
+      sm === 'STRETCH' || sm === 'CROP' ? 'stretch' :
+      sm === 'TILE' ? 'tile' :
+      'fill';
     return {
       type: 'image',
       enabled,
       url: '', // 이미지 hash는 sidecar에서 추적
-      // Figma scaleMode → Pencil mode. 정적 매핑 — Pencil reference도 일관성이 떨어짐(같은 FILL이 어떤 곳은 'fill' 어떤 곳은 'stretch')
-      // 가장 흔한 케이스 우선: FIT → 'fit', 그 외 'fill'.
-      mode: paint.scaleMode === 'FIT' ? 'fit' : 'fill',
+      mode,
     };
   }
   if (t === 'GRADIENT_LINEAR' || t === 'GRADIENT_RADIAL' || t === 'GRADIENT_ANGULAR') {
@@ -225,10 +310,13 @@ function paintToFillSingle(paint: Record<string, unknown>): PenFillSingle | null
  * - 1개: 단일 PenFillSingle
  * - 2+: array
  */
-function paintsToFill(paints: Array<Record<string, unknown>>): PenFill | null {
+function paintsToFill(
+  paints: Array<Record<string, unknown>>,
+  varResolver?: ColorVarResolver,
+): PenFill | null {
   const layers: PenFillSingle[] = [];
   for (const p of paints) {
-    const layer = paintToFillSingle(p);
+    const layer = paintToFillSingle(p, varResolver);
     if (layer !== null) layers.push(layer);
   }
   if (layers.length === 0) return null;
@@ -236,7 +324,10 @@ function paintsToFill(paints: Array<Record<string, unknown>>): PenFill | null {
   return layers;
 }
 
-function strokeFromNode(data: Record<string, unknown>): PenStroke | undefined {
+function strokeFromNode(
+  data: Record<string, unknown>,
+  varResolver?: ColorVarResolver,
+): PenStroke | undefined {
   // strokeWeight가 있으면 stroke 정보 출력 (Pencil 동작 — strokePaints 없어도 thickness/align만 표시)
   if (typeof data.strokeWeight !== 'number' || data.strokeWeight <= 0) return undefined;
   const align =
@@ -265,7 +356,10 @@ function strokeFromNode(data: Record<string, unknown>): PenStroke | undefined {
   const strokes = data.strokePaints as Array<Record<string, unknown>> | undefined;
   const first = strokes?.find((s) => s.visible !== false);
   if (first?.type === 'SOLID' && first.color) {
-    const hex = paintToHex(first as { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number });
+    const hex = paintToHex(
+      first as { color?: RgbaColor; opacity?: number; colorVar?: { value?: { alias?: { guid?: { sessionID?: number; localID?: number } } }; dataType?: string } },
+      varResolver,
+    );
     if (hex) result.fill = hex;
   }
   return result;
@@ -562,10 +656,20 @@ function applySymbolOverrides(
     if (direct) {
       const merged = { ...modifiedData };
       for (const o of direct) {
-        // visible/size/etc: override 필드를 master data에 덮어씀
+        // visible/size/etc: override 필드를 master data에 덮어씀.
+        // textData/symbolData 같은 nested 객체는 override가 부분 키만 갖고 있으므로 deep-merge.
         for (const k of Object.keys(o)) {
           if (k === 'guidPath') continue;
-          (merged as Record<string, unknown>)[k] = o[k];
+          const ov = o[k];
+          if (
+            (k === 'textData' || k === 'symbolData') &&
+            ov && typeof ov === 'object' && !Array.isArray(ov) &&
+            merged[k] && typeof merged[k] === 'object' && !Array.isArray(merged[k])
+          ) {
+            merged[k] = { ...(merged[k] as Record<string, unknown>), ...(ov as Record<string, unknown>) };
+          } else {
+            (merged as Record<string, unknown>)[k] = ov;
+          }
         }
       }
       modifiedData = merged;
@@ -576,7 +680,20 @@ function applySymbolOverrides(
         ...o,
         guidPath: { guids: (o.guidPath?.guids ?? []).slice(1) },
       }));
-      modifiedChildren = applySymbolOverrides(c.children, nextLevel);
+      // ★ c가 INSTANCE이고 children이 비어 있으면(아직 expansion 전) override를
+      //   c의 symbolData.symbolOverrides 배열에 합쳐서 추후 expansion 시 적용되도록 함.
+      //   예: Dropdown(15:279) symbolOverrides가 [option INSTANCE 11:524, text 11:506]을 타겟팅.
+      //   11:524는 dropdown master 안의 option INSTANCE — 자기 expansion 시 11:506 override가
+      //   필요한데 우리가 빈 children에 recurse만 하면 override가 유실됨.
+      if (c.type === 'INSTANCE' && c.children.length === 0) {
+        const dataRec = (modifiedData === c.data ? { ...modifiedData } : modifiedData) as Record<string, unknown>;
+        const sd = (dataRec.symbolData as Record<string, unknown> | undefined) ?? {};
+        const existing = (sd.symbolOverrides as unknown[] | undefined) ?? [];
+        dataRec.symbolData = { ...sd, symbolOverrides: [...existing, ...nextLevel] };
+        modifiedData = dataRec;
+      } else {
+        modifiedChildren = applySymbolOverrides(c.children, nextLevel);
+      }
     }
     if (modifiedData === c.data && modifiedChildren === c.children) return c;
     return { ...c, data: modifiedData as never, children: modifiedChildren };
@@ -938,6 +1055,7 @@ function convertNode(
   parentIsInstanceReplaced: boolean = false,
   propAssignments?: Map<string, boolean>,
   nodeIndex?: Map<string, TreeNode>,
+  varResolver?: ColorVarResolver,
 ): PenNode | null {
   // ★ INSTANCE를 master로 대체 (Pencil 동작과 일치)
   // INSTANCE는 master의 시각 정보(fill/stroke)와 자식을 가져오되
@@ -947,7 +1065,18 @@ function convertNode(
     const instData = n.data as Record<string, unknown>;
     const sd = instData.symbolData as Record<string, unknown> | undefined;
     if (sd && typeof sd === 'object') {
-      const sid = sd.symbolID as { sessionID?: number; localID?: number } | undefined;
+      // Figma "swap instance": overriddenSymbolID가 있으면 그게 우선 (instance가 다른 master를 참조).
+      // 없으면 기본 symbolID. 둘 다 sessionID/localID 객체.
+      const overriddenSid = (instData.overriddenSymbolID ?? sd.overriddenSymbolID) as
+        | { sessionID?: number; localID?: number }
+        | undefined;
+      const baseSid = sd.symbolID as { sessionID?: number; localID?: number } | undefined;
+      const sid =
+        overriddenSid &&
+        typeof overriddenSid.sessionID === 'number' &&
+        typeof overriddenSid.localID === 'number'
+          ? overriddenSid
+          : baseSid;
       if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
         const masterGuid = `${sid.sessionID}:${sid.localID}`;
         const master = symbolIndex.get(masterGuid);
@@ -1056,7 +1185,7 @@ function convertNode(
           // 부모 propAssignments도 합치되 INSTANCE 자체 값이 우선 (가까운 instance가 override).
           const instAssignments = buildPropAssignmentMap(instData);
           const mergedAssignments = mergeAssignments(propAssignments, instAssignments);
-          return convertNode(merged, vectorPathMap, symbolIndex, parentData, parentIsInstanceReplaced, mergedAssignments, nodeIndex);
+          return convertNode(merged, vectorPathMap, symbolIndex, parentData, parentIsInstanceReplaced, mergedAssignments, nodeIndex, varResolver);
         }
       }
     }
@@ -1078,29 +1207,94 @@ function convertNode(
   if (n.name) out.name = n.name;
   if (!effectiveVisible) out.enabled = false;
 
-  // 위치 — 부모가 auto-layout이면 omit (Pencil convention)
+  // 위치 — 부모가 auto-layout이면 omit (Pencil convention).
+  // 부모가 non-auto-layout일 때는 좌표가 0이어도 명시 (rectangle 'image 2', 'div.block' 케이스 — pencil.dev 동작).
   const omitPos = shouldOmitPosition(data, parentData, parentIsInstanceReplaced, n.type, effectiveVisible);
   if (!omitPos) {
     const transform = data.transform as { m02?: number; m12?: number } | undefined;
     if (transform) {
-      if (typeof transform.m02 === 'number' && transform.m02 !== 0) out.x = transform.m02;
-      if (typeof transform.m12 === 'number' && transform.m12 !== 0) out.y = transform.m12;
+      if (typeof transform.m02 === 'number') out.x = transform.m02;
+      if (typeof transform.m12 === 'number') out.y = transform.m12;
+    } else {
+      // transform 없음 → (0,0) 명시
+      out.x = 0;
+      out.y = 0;
     }
   }
 
-  // 사이즈 — axis별 omit (Pencil convention)
-  // 부모가 auto-layout이고 자식이 layoutAlign='STRETCH' 또는 layoutGrow=1 → 'fill_container'
+  // 사이즈 — pencil.dev 의 `uw` 함수 룰 (역공학으로 확인):
+  //   - Fixed: 숫자 size 그대로
+  //   - FillContainer: parent 가 layout 인지에 따라 `fill_container(N)` 또는 `fill_container`
+  //     (parent in layout && self affects layout → no fallback;  else → fallback N)
+  //   - FitContent: self has layout AND has children that affect layout AND not fill_container
+  //                 → `fit_content` (fallback 없음)
+  //                 else → `fit_content(N)` (fallback 있음 — content 가 비어있을 때 표시할 size)
+  // affectsLayout = (visible !== false) && (stackPositioning !== ABSOLUTE)
   const size = data.size as { x?: number; y?: number } | undefined;
   const dimOmit = omitDimensions(data, n.type, parentData);
   const fillContainer = computeFillContainer(data, parentData, n.type);
+  // hasLayout: 자기가 auto-layout container 인가?
+  const myStack = data.stackMode as string | undefined;
+  const hasLayout = !!myStack && myStack !== 'NONE' && myStack !== 'GRID';
+  // 자식 중 affectsLayout(visible & not absolute) AND axis 별 sizing 이 fill_container 가 아닌 것이 있는지
+  //   pencil 의 `e.children.some(s => s.layout.affectsLayout() && s.layout.sizingBehavior[axis] !== FillContainer)`
+  //   visibility 체크 3 경로:
+  //     (a) 직접 visible:false
+  //     (b) parent INSTANCE 의 propAssignments → 자식 propRefs(VISIBLE) → false
+  //     (c) 자식 INSTANCE 의 자기 componentPropAssignments → 자기 master root 의 VISIBLE 토글 false
+  //         (드물지만 발생 — Button 안의 icon INSTANCE 가 자기 prop 으로 자기를 hide)
+  function hasContentChildOnAxis(axis: 'x' | 'y'): boolean {
+    if (!hasLayout) return false;
+    for (const c of n.children) {
+      const cd = c.data as Record<string, unknown>;
+      const visible = cd.visible !== false;
+      const hiddenByProp = !!propAssignments && isHiddenByPropAssignment(cd, propAssignments);
+      // (c) 자식이 INSTANCE 면 자기 propAssignments + master propRefs 도 확인
+      let hiddenBySelfProp = false;
+      if (c.type === 'INSTANCE') {
+        const selfAssignments = buildPropAssignmentMap(cd);
+        if (selfAssignments && symbolIndex) {
+          const sd = cd.symbolData as { symbolID?: { sessionID?: number; localID?: number } } | undefined;
+          const sid = sd?.symbolID;
+          if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
+            const master = symbolIndex.get(`${sid.sessionID}:${sid.localID}`);
+            if (master && isHiddenByPropAssignment(master.data as Record<string, unknown>, selfAssignments)) {
+              hiddenBySelfProp = true;
+            }
+          }
+        }
+      }
+      const absolute = cd.stackPositioning === 'ABSOLUTE';
+      if (!visible || hiddenByProp || hiddenBySelfProp || absolute) continue;
+      const cFC = computeFillContainer(cd, data, c.type);
+      const isFill = axis === 'x' ? cFC.width : cFC.height;
+      if (!isFill) return true;
+    }
+    return false;
+  }
   if (size || fillContainer.width || fillContainer.height) {
-    // Pencil fill_container(N) 표기: 위치가 명시될 때만 (N)을 붙임 (해당 축 size)
+    // width
     if (fillContainer.width) {
       out.width = !omitPos && typeof size?.x === 'number' ? `fill_container(${size.x})` : 'fill_container';
-    } else if (size && typeof size.x === 'number' && !dimOmit.width) out.width = size.x;
+    } else if (dimOmit.width && hasLayout) {
+      // FitContent: 콘텐츠 자식 있으면 fallback 없음 (omit), 없으면 fit_content(N)
+      if (!hasContentChildOnAxis('x') && typeof size?.x === 'number') {
+        out.width = `fit_content(${size.x})`;
+      }
+    } else if (size && typeof size.x === 'number' && !dimOmit.width) {
+      out.width = size.x;
+    }
+    // height (동일 규칙)
     if (fillContainer.height) {
       out.height = !omitPos && typeof size?.y === 'number' ? `fill_container(${size.y})` : 'fill_container';
-    } else if (size && typeof size.y === 'number' && !dimOmit.height) out.height = size.y;
+    } else if (dimOmit.height && hasLayout) {
+      const hasContent = hasContentChildOnAxis('y');
+      if (!hasContent && typeof size?.y === 'number') {
+        out.height = `fit_content(${size.y})`;
+      }
+    } else if (size && typeof size.y === 'number' && !dimOmit.height) {
+      out.height = size.y;
+    }
   }
 
   // opacity
@@ -1113,18 +1307,21 @@ function convertNode(
       // text는 fill을 단순 color (hex)로 (visible solid 첫 번째). paint.opacity까지 합성.
       const solid = fills.find((f) => f.type === 'SOLID' && f.visible !== false);
       if (solid?.color) {
-        const hex = paintToHex(solid as { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number });
+        const hex = paintToHex(
+          solid as { color?: RgbaColor; opacity?: number; colorVar?: { value?: { alias?: { guid?: { sessionID?: number; localID?: number } } }; dataType?: string } },
+          varResolver,
+        );
         if (hex) out.fill = hex;
       }
     } else {
-      const fill = paintsToFill(fills);
+      const fill = paintsToFill(fills, varResolver);
       if (fill !== null) out.fill = fill;
     }
   }
 
   // stroke — TEXT 노드는 stroke 출력 안 함 (Pencil 동작과 일치)
   if (penType !== 'text') {
-    const stroke = strokeFromNode(data);
+    const stroke = strokeFromNode(data, varResolver);
     if (stroke) out.stroke = stroke;
   }
 
@@ -1277,7 +1474,7 @@ function convertNode(
     }
     const kids: PenNode[] = [];
     for (const c of kidsToWalk) {
-      const converted = convertNode(c, vectorPathMap, symbolIndex, data, propagateShowPos, propAssignments, nodeIndex);
+      const converted = convertNode(c, vectorPathMap, symbolIndex, data, propagateShowPos, propAssignments, nodeIndex, varResolver);
       if (converted) kids.push(converted);
     }
     if (kids.length > 0) out.children = kids;
@@ -1299,16 +1496,36 @@ function buildVectorPathMap(
   const map = new Map<string, string>();
   const blobs = (decoded.message as { blobs?: Array<{ bytes: Uint8Array }> }).blobs ?? [];
   if (!tree.document) return map;
-  // (1) extractVectors가 master node 자체의 fillGeometry로부터 SVG path 추출
-  const vectors = extractVectors(tree.document, blobs);
-  for (const v of vectors) {
-    if (v.svg) {
-      const m = v.svg.match(/<path[^>]+d="([^"]+)"/);
-      if (m) map.set(v.nodeId, m[1]!);
+
+  // (1) Master VECTOR 노드: vectorData.vectorNetworkBlob 우선 (pencil.dev 와 동일).
+  //     fallback: fillGeometry.commandsBlob (legacy / vectorNetwork 이 없는 경우).
+  for (const node of tree.allNodes.values()) {
+    if (!VECTOR_TYPES.has(node.type)) continue;
+    const data = node.data as Record<string, unknown>;
+    const vd = data.vectorData as { vectorNetworkBlob?: number } | undefined;
+    let abs: string | undefined;
+    if (typeof vd?.vectorNetworkBlob === 'number') {
+      const blob = blobs[vd.vectorNetworkBlob];
+      if (blob?.bytes) {
+        const vn = parseVectorNetworkBlob(blob.bytes);
+        if (vn) abs = vectorNetworkToPath(vn);
+      }
     }
+    if (!abs) {
+      // legacy fallback — fillGeometry commandsBlob
+      const fg = data.fillGeometry as Array<{ commandsBlob?: number }> | undefined;
+      const blobIdx = fg?.[0]?.commandsBlob;
+      if (typeof blobIdx === 'number' && blobs[blobIdx]?.bytes) {
+        try { abs = decodeCommandsBlob(blobs[blobIdx].bytes); } catch { /* ignore */ }
+      }
+    }
+    if (abs) map.set(node.guidStr, absoluteToRelative(abs));
   }
-  // (2) 모든 INSTANCE의 derivedSymbolData[].fillGeometry → instance-prefix 경로로 추가
-  //   이게 Figma copy/paste가 사용하는 per-instance resolved path. 우리 Pen export도 이걸 우선 사용.
+
+  // (2) INSTANCE 별 per-instance resolved path.
+  //     pencil.dev 동작: 각 path 노드의 vectorNetworkBlob 을 master 에서 직접 가져옴.
+  //     (derivedSymbolData.fillGeometry 는 commandsBlob 인데 정밀도 손실 있음 — vectorNetwork 우선)
+  //     derivedSymbolData.fillGeometry 는 fallback (master 에 vectorNetwork 없을 때).
   for (const node of tree.allNodes.values()) {
     if (node.type !== 'INSTANCE') continue;
     const ds = (node.data as Record<string, unknown>).derivedSymbolData as
@@ -1319,19 +1536,207 @@ function buildVectorPathMap(
       | undefined;
     if (!Array.isArray(ds)) continue;
     for (const entry of ds) {
-      const fg = entry.fillGeometry;
-      if (!Array.isArray(fg) || fg.length === 0) continue;
       const guids = entry.guidPath?.guids;
       if (!Array.isArray(guids) || guids.length === 0) continue;
-      const blobIdx = fg[0]?.commandsBlob;
-      if (typeof blobIdx !== 'number' || !blobs[blobIdx]?.bytes) continue;
-      const path = decodeCommandsBlob(blobs[blobIdx].bytes);
-      if (!path) continue;
+      // entry.guidPath 의 마지막 guid = master 트리 내의 path leaf (= 실제 master VECTOR)
+      const lastGuid = guids[guids.length - 1]!;
+      const masterKey = `${lastGuid.sessionID}:${lastGuid.localID}`;
+      const masterNode = tree.allNodes.get(masterKey);
+      let abs: string | undefined;
+      // 우선순위 1: master 의 vectorNetworkBlob (pencil.dev 와 동일한 source)
+      if (masterNode) {
+        const md = masterNode.data as Record<string, unknown>;
+        const vd = md.vectorData as { vectorNetworkBlob?: number } | undefined;
+        if (typeof vd?.vectorNetworkBlob === 'number') {
+          const blob = blobs[vd.vectorNetworkBlob];
+          if (blob?.bytes) {
+            const vn = parseVectorNetworkBlob(blob.bytes);
+            if (vn) abs = vectorNetworkToPath(vn);
+          }
+        }
+      }
+      // 우선순위 2: derivedSymbolData.fillGeometry.commandsBlob (legacy / fallback)
+      if (!abs) {
+        const fg = entry.fillGeometry;
+        const blobIdx = fg?.[0]?.commandsBlob;
+        if (typeof blobIdx === 'number' && blobs[blobIdx]?.bytes) {
+          try { abs = decodeCommandsBlob(blobs[blobIdx].bytes); } catch { /* ignore */ }
+        }
+      }
+      if (!abs) continue;
       const key = node.guidStr + '/' + guids.map((g) => `${g.sessionID}:${g.localID}`).join('/');
-      map.set(key, path);
+      map.set(key, absoluteToRelative(abs));
     }
   }
   return map;
+}
+
+/** vector.ts 의 VECTOR_TYPES 미러 — 노드 타입 필터. */
+const VECTOR_TYPES = new Set([
+  'VECTOR', 'STAR', 'LINE', 'ELLIPSE',
+  'REGULAR_POLYGON', 'BOOLEAN_OPERATION', 'ROUNDED_RECTANGLE',
+]);
+
+function fmtPath(n: number): string {
+  if (!Number.isFinite(n)) return '0';
+  // toFixed 사용 (svgpath/dpe 와 동일). 단독 호출 시 단순 5자리 반올림.
+  return (+n.toFixed(5)).toString();
+}
+
+/**
+ * SVG path 의 absolute commands(M,L,C,Q,Z) 를 relative (m,l,c,q,z) 로 변환 + 5자리 반올림 +
+ * pencil.dev 인코딩 룰로 직렬화.
+ *
+ * **핵심**: 단순 좌표별 toFixed 가 아니라 svgpath/dpe 라이브러리의 **error-accumulation rounding** 사용.
+ * 매 segment 의 endpoint 마다 (원본 - 반올림된 값) = carry 를 누적하여 다음 segment 의 endpoint 에 더한 뒤 반올림.
+ * 단순 독립 반올림은 누적 위치가 드리프트할 수 있으나, carry 누적은 정확한 누적 위치 유지 + tie-case 에서
+ * pencil.dev 와 동일한 결과 보장.
+ *
+ * pencil.dev 인코딩 (v1.1.55 vpe = `dpe(t).rel().round(5).toString()` 역공학):
+ *   - 첫 M 만 absolute (대문자), 이후 모두 relative (소문자 — m, l, c, q, z)
+ *   - 명령어 letter 앞은 공백 없음
+ *   - 같은 cmd 가 연속되면 두 번째부터 letter 생략 (SVG implicit repetition; m/M 제외)
+ *   - 음수 인자는 sign 자체가 separator → 공백 X
+ *   - 양수 인자는 단일 공백으로 구분
+ */
+export function absoluteToRelative(path: string): string {
+  const tokens = path.match(/[MLCQZ]|-?\d+(?:\.\d+)?(?:e-?\d+)?/g);
+  if (!tokens) return path;
+  // 1단계: absolute → relative 변환 (full precision, 반올림 X). svgpath.rel() 등가.
+  type Seg = { cmd: string; args: number[] };
+  const rawSegs: Seg[] = [];
+  let ti = 0;
+  let curX = 0, curY = 0;
+  let firstM = true;
+  while (ti < tokens.length) {
+    const t = tokens[ti]!;
+    if (t === 'M') {
+      const x = parseFloat(tokens[++ti]!);
+      const y = parseFloat(tokens[++ti]!);
+      if (firstM) {
+        rawSegs.push({ cmd: 'M', args: [x, y] });
+        firstM = false;
+      } else {
+        rawSegs.push({ cmd: 'm', args: [x - curX, y - curY] });
+      }
+      curX = x; curY = y;
+      ti++;
+    } else if (t === 'L') {
+      const x = parseFloat(tokens[++ti]!);
+      const y = parseFloat(tokens[++ti]!);
+      rawSegs.push({ cmd: 'l', args: [x - curX, y - curY] });
+      curX = x; curY = y;
+      ti++;
+    } else if (t === 'C') {
+      const x1 = parseFloat(tokens[++ti]!);
+      const y1 = parseFloat(tokens[++ti]!);
+      const x2 = parseFloat(tokens[++ti]!);
+      const y2 = parseFloat(tokens[++ti]!);
+      const x = parseFloat(tokens[++ti]!);
+      const y = parseFloat(tokens[++ti]!);
+      rawSegs.push({
+        cmd: 'c',
+        args: [x1 - curX, y1 - curY, x2 - curX, y2 - curY, x - curX, y - curY],
+      });
+      curX = x; curY = y;
+      ti++;
+    } else if (t === 'Q') {
+      const x1 = parseFloat(tokens[++ti]!);
+      const y1 = parseFloat(tokens[++ti]!);
+      const x = parseFloat(tokens[++ti]!);
+      const y = parseFloat(tokens[++ti]!);
+      rawSegs.push({
+        cmd: 'q',
+        args: [x1 - curX, y1 - curY, x - curX, y - curY],
+      });
+      curX = x; curY = y;
+      ti++;
+    } else if (t === 'Z') {
+      rawSegs.push({ cmd: 'z', args: [] });
+      ti++;
+    } else {
+      rawSegs.push({ cmd: t, args: [] });
+      ti++;
+    }
+  }
+  // 2단계: svgpath.round(5) 와 동일한 error-accumulation 반올림.
+  //   - a, l: subpath start carry (Z 시 복원)
+  //   - c, u: 현재 위치의 누적 반올림 오차 (x, y)
+  //   - 각 segment 의 endpoint(짝수 index의 마지막 두 인자, args.length-2 / args.length-1)에
+  //     이전 carry 를 더한 뒤 toFixed(5) 로 반올림. 새 carry = 더해진값 - 반올림값.
+  //   - 그 외 인자들(control points)은 carry 를 더하지 않고 단독 toFixed(5).
+  const round5 = (n: number): number => +n.toFixed(5);
+  let a = 0, l = 0;  // subpath start carry
+  let c = 0, u = 0;  // current point carry
+  const segments: Array<{ cmd: string; args: string[] }> = [];
+  for (const seg of rawSegs) {
+    const cmd = seg.cmd;
+    const isRel = cmd === cmd.toLowerCase();
+    if (cmd === 'Z' || cmd === 'z') {
+      // Z: carry 를 subpath start carry 로 복원
+      c = a; u = l;
+      segments.push({ cmd, args: [] });
+      continue;
+    }
+    if (cmd === 'M' || cmd === 'm') {
+      // M/m: endpoint 는 args[0], args[1]. start carry 도 갱신.
+      if (isRel) {
+        seg.args[0] = (seg.args[0]! + c);
+        seg.args[1] = (seg.args[1]! + u);
+      }
+      const r0 = round5(seg.args[0]!);
+      const r1 = round5(seg.args[1]!);
+      c = seg.args[0]! - r0;
+      u = seg.args[1]! - r1;
+      a = c; l = u;
+      segments.push({ cmd, args: [(+r0).toString(), (+r1).toString()] });
+      continue;
+    }
+    // 일반 cmd (L/l/C/c/Q/q/H/h/V/v 등): endpoint 는 마지막 두 인자.
+    const d = seg.args.length;
+    if (d >= 2 && isRel) {
+      seg.args[d - 2] = (seg.args[d - 2]! + c);
+      seg.args[d - 1] = (seg.args[d - 1]! + u);
+    }
+    const lastArg2 = round5(seg.args[d - 2] ?? 0);
+    const lastArg1 = round5(seg.args[d - 1] ?? 0);
+    c = (seg.args[d - 2] ?? 0) - lastArg2;
+    u = (seg.args[d - 1] ?? 0) - lastArg1;
+    const outArgs: string[] = [];
+    for (let bi = 0; bi < d; bi++) {
+      const v = seg.args[bi]!;
+      if (bi === d - 2) outArgs.push((+lastArg2).toString());
+      else if (bi === d - 1) outArgs.push((+lastArg1).toString());
+      else outArgs.push((+round5(v)).toString());
+    }
+    segments.push({ cmd, args: outArgs });
+  }
+  // 직렬화: pencil.dev 인코딩 룰
+  //   - 같은 cmd 가 연속되면 두 번째부터 letter 생략 (SVG implicit repetition)
+  //     단 m 는 implicit l 로 해석되므로 m 연속은 압축 안 함 (안전).
+  //     M 후 다른 cmd 도 implicit L 이지만 우리는 명시적 cmd 만 emit하므로 신경 안 씀.
+  //   - 첫 인자: letter 다음에 바로 붙임 (공백 X). 단 이전 cmd 의 마지막 인자 다음일 때(letter 생략 시),
+  //              다음 인자가 음수면 sign 이 separator(공백 X), 양수면 공백.
+  //   - 후속 인자: 음수면 공백 X, 양수면 단일 공백.
+  let out = '';
+  let prevCmd = '';
+  for (const seg of segments) {
+    const sameCmd = prevCmd === seg.cmd && seg.cmd !== 'm' && seg.cmd !== 'M';
+    if (!sameCmd) {
+      out += seg.cmd;
+    }
+    for (let k = 0; k < seg.args.length; k++) {
+      const a = seg.args[k]!;
+      const needSpace =
+        k === 0
+          ? sameCmd && !a.startsWith('-') // letter 생략 후 첫 인자는 양수면 공백 필요
+          : !a.startsWith('-');
+      if (needSpace) out += ' ';
+      out += a;
+    }
+    prevCmd = seg.cmd;
+  }
+  return out;
 }
 
 /**
@@ -1343,6 +1748,18 @@ function buildVectorPathMap(
  *
  * Returns: 적용된 평행이동 (디버깅용 — __figma 메타에 기록 가능).
  */
+/**
+ * Top-level children 좌표 정규화 — pencil.dev 기본 뷰포트에서 보이도록.
+ *
+ * 정책: pencil.dev가 Figma copy/paste 결과를 처리할 때는 Figma의 원래 좌표를 그대로 보존
+ *       (음수 y, 비-제로 origin도 OK — Pencil 에디터가 bounding box 중심으로 자동 스크롤).
+ *       따라서 일반적인 Figma 좌표 (대략 [-2000, +∞]) 범위에서는 normalize 하지 않는다.
+ *
+ *       단, Figma 페이지가 극단적인 위치에 있는 경우(예: -32000)에는
+ *       Pencil 일부 뷰가 origin 근처만 렌더링하므로 origin으로 평행이동이 필요.
+ *       임계값(EXTREME_THRESHOLD)보다 더 음수일 때만 normalize.
+ */
+const EXTREME_OFFSET_THRESHOLD = -2000;
 function normalizeTopLevelToOrigin(children: PenNode[]): { dx: number; dy: number } {
   let minX = Infinity, minY = Infinity;
   for (const c of children) {
@@ -1352,9 +1769,10 @@ function normalizeTopLevelToOrigin(children: PenNode[]): { dx: number; dy: numbe
     if (y < minY) minY = y;
   }
   if (!Number.isFinite(minX) || !Number.isFinite(minY)) return { dx: 0, dy: 0 };
+  // 정상 범위 → Figma 좌표 보존 (pencil.dev paste 동작과 일치)
+  if (minX >= EXTREME_OFFSET_THRESHOLD && minY >= EXTREME_OFFSET_THRESHOLD) return { dx: 0, dy: 0 };
   const dx = -minX;
   const dy = -minY;
-  if (dx === 0 && dy === 0) return { dx: 0, dy: 0 };
   for (const c of children) {
     if (dx !== 0) c.x = (typeof c.x === 'number' ? c.x : 0) + dx;
     if (dy !== 0) c.y = (typeof c.y === 'number' ? c.y : 0) + dy;
@@ -1424,6 +1842,9 @@ export async function generatePenExport(inputs: PenExportInputs): Promise<PenExp
   const symbolIndex = buildSymbolIndex(tree.allNodes);
   // styleIdForText 등의 cross-tree 참조 lookup용
   const nodeIndex = tree.allNodes;
+  // Figma Variables (color alias chain) resolver — paint.colorVar.alias 를 실제 색으로 풀어냄.
+  // pencil.dev 가 Figma copy/paste 에서 stroke/fill 색을 정확히 가져오는 핵심 메커니즘.
+  const varResolver = buildColorVarResolver(tree.allNodes);
   const sourceFigSha256 = createHash('sha256').update(container.canvasFig).digest('hex');
 
   // CPU 변환(convertNode + reassignPenIds)은 페이지 순서대로 직렬 처리 → 결정적 ID 순서 보장.
@@ -1445,7 +1866,7 @@ export async function generatePenExport(inputs: PenExportInputs): Promise<PenExp
     const safeName = (page.name ?? `page-${idx}`).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 80);
     const pageChildren: PenNode[] = [];
     for (const c of page.children) {
-      const converted = convertNode(c, vectorPathMap, symbolIndex, undefined, false, undefined, nodeIndex);
+      const converted = convertNode(c, vectorPathMap, symbolIndex, undefined, false, undefined, nodeIndex, varResolver);
       if (converted) pageChildren.push(converted);
     }
     // 좌표 정규화: top-level bbox를 (0,0)에 정렬 → pencil.dev 기본 뷰포트에 즉시 보임
