@@ -25,5 +25,26 @@ export default defineConfig({
   build: {
     outDir: '../dist-client',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // Split heavy, rarely-changing dep groups out of the app bundle so
+        // browser cache hits across deploys and the initial parse cost is
+        // spread across parallel HTTP/2 streams. Konva is the dominant
+        // offender (~600 kB unminified). Splitting it now makes a future
+        // `React.lazy(Canvas)` cheap — Konva won't be loaded until the
+        // user actually opens a document.
+        manualChunks: {
+          konva: ['konva', 'react-konva'],
+          radix: [
+            '@radix-ui/react-dialog',
+            '@radix-ui/react-label',
+            '@radix-ui/react-select',
+            '@radix-ui/react-separator',
+            '@radix-ui/react-slot',
+            '@radix-ui/react-tabs',
+          ],
+        },
+      },
+    },
   },
 });
