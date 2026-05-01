@@ -23,6 +23,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '..', '..');
 const SAMPLE_FIG = join(REPO_ROOT, 'docs', '메타리치 화면 UI Design.fig');
+const BVP_FIG = join(REPO_ROOT, 'docs', 'bvp.fig');
 
 test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
   test.skip(!existsSync(SAMPLE_FIG), `sample missing: ${SAMPLE_FIG}`);
@@ -410,6 +411,68 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
       const messageJson = await readFile(join(tmp, 'extracted', '04_decoded', 'message.json'), 'utf8');
       expect(messageJson).toContain(`"${marker}"`);
       console.log(`[e2e-api] marker "${marker}" survived the round-trip`);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // Same round-trip on a structurally different sample (vector-heavy, has
+  // Figma variables + SECTION nodes) — guards against regressions where a
+  // change works for the metarich layout but breaks other documents.
+  test('round-trip preserves edits on bvp.fig (vector + variables + sections)', async ({ request }) => {
+    test.setTimeout(180_000);
+    if (!existsSync(BVP_FIG)) test.skip(true, `sample missing: ${BVP_FIG}`);
+
+    // 1. Upload directly via the API — UI flow is already covered by the
+    //    metarich tests; this one is an API-level regression gate.
+    const fsp = await import('node:fs/promises');
+    const buf = await fsp.readFile(BVP_FIG);
+    const upload = await request.post('http://localhost:5274/api/upload', {
+      multipart: { file: { name: 'bvp.fig', mimeType: 'application/octet-stream', buffer: buf } },
+    });
+    expect(upload.ok()).toBeTruthy();
+    const { sessionId, nodeCount } = await upload.json();
+    expect(sessionId).toBeTruthy();
+    expect(nodeCount).toBeGreaterThan(1000);
+
+    // 2. Find a TEXT node and PATCH it.
+    const doc = await request.get(`http://localhost:5274/api/doc/${sessionId}`).then((r) => r.json());
+    function findText(n: any): any | null {
+      if (n?.type === 'TEXT' && n.textData?.characters && n.guid) return n;
+      if (Array.isArray(n?.children)) for (const c of n.children) { const f = findText(c); if (f) return f; }
+      return null;
+    }
+    const textNode = findText(doc);
+    expect(textNode, 'bvp.fig should contain at least one TEXT node').toBeTruthy();
+    const guid = `${textNode.guid.sessionID}:${textNode.guid.localID}`;
+    const marker = '__BVP_RT_E2E__';
+    const patchRes = await request.patch(`http://localhost:5274/api/doc/${sessionId}`, {
+      data: { nodeGuid: guid, field: 'textData.characters', value: marker },
+    });
+    expect(patchRes.ok()).toBeTruthy();
+
+    // 3. Save → re-extract → marker present.
+    const saveRes = await request.post(`http://localhost:5274/api/save/${sessionId}`);
+    expect(saveRes.ok()).toBeTruthy();
+    const bytes = Buffer.from(await saveRes.body());
+    expect(bytes.byteLength).toBeGreaterThan(1000);
+
+    const tmp = await mkdtemp(join(tmpdir(), 'figrev-e2e-bvp-'));
+    try {
+      const dlPath = join(tmp, 'edited.fig');
+      await fsp.writeFile(dlPath, bytes);
+      const { loadContainer } = await import('../../src/container.js');
+      const { decodeFigCanvas } = await import('../../src/decoder.js');
+      const { dumpStage4Decoded } = await import('../../src/intermediate.js');
+      const container = loadContainer(dlPath);
+      const decoded = decodeFigCanvas(container.canvasFig);
+      dumpStage4Decoded(
+        { enabled: true, dir: join(tmp, 'extracted'), includeFullMessage: true, minify: true },
+        decoded,
+      );
+      const messageJson = await readFile(join(tmp, 'extracted', '04_decoded', 'message.json'), 'utf8');
+      expect(messageJson).toContain(`"${marker}"`);
+      console.log(`[bvp-rt-e2e] marker "${marker}" survived round-trip on bvp.fig`);
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
