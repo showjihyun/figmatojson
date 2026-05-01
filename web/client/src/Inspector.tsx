@@ -2,18 +2,31 @@
  * Right-side Properties panel — Figma-like sectioned editor.
  *
  * Sections (shown when applicable):
- *   - Layer        : name, visible, opacity, rotation
+ *   - Layer        : name, visible, opacity
  *   - Position/Size: X, Y, W, H, cornerRadius
  *   - Auto Layout  : direction, padding (T/R/B/L), gap, alignment
  *   - Fill         : color picker for first SOLID paint
  *   - Stroke       : color, weight, align
  *   - Text         : characters, family, weight, size, lineHeight, letterSpacing, align
  *
- * Each control debounces its patch (200ms) so dragging a slider doesn't spam
+ * Each control debounces its patch (~220ms) so dragging a slider doesn't spam
  * the backend, but every keystroke still ends up in message.json before save.
  */
-import { useMemo, useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
+import { useMemo, useState, useEffect, useRef, type ReactNode } from 'react';
+import { Eye, EyeOff } from 'lucide-react';
 import { patchNode, setInstanceTextOverride } from './api';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import {
+  Select as ShadSelect,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { cn } from '@/lib/utils';
 
 interface InspectorProps {
   page: any;
@@ -70,30 +83,24 @@ export function Inspector({ page, sessionId, selectedGuid, selectedCount, onChan
 
   if (!selectedGuid && (selectedCount ?? 0) === 0) {
     return (
-      <div style={{ padding: 16, color: '#888', fontSize: 12, lineHeight: 1.6 }}>
+      <div className="p-4 text-sm leading-relaxed text-muted-foreground">
         Click a shape on the canvas to inspect / edit.
-        <br />
-        <span style={{ color: '#666' }}>Shift+click to select multiple nodes.</span>
+        <div className="mt-1 text-xs text-muted-foreground/70">
+          Shift+click to select multiple nodes.
+        </div>
       </div>
     );
   }
   if (!selectedGuid && (selectedCount ?? 0) > 1) {
     return (
-      <div style={{ padding: 16, color: '#aaa', fontSize: 12, lineHeight: 1.7 }}>
-        <div
-          style={{
-            fontSize: 13,
-            fontWeight: 700,
-            color: '#eee',
-            marginBottom: 8,
-          }}
-        >
+      <div className="p-4 text-sm leading-relaxed">
+        <div className="mb-2 text-base font-semibold text-foreground">
           {selectedCount} nodes selected
         </div>
-        <div style={{ color: '#888' }}>
+        <div className="text-muted-foreground">
           Drag any of them on the canvas to move all selected nodes together.
         </div>
-        <div style={{ color: '#666', marginTop: 8 }}>
+        <div className="mt-2 text-xs text-muted-foreground/70">
           Per-property editing requires a single-node selection — Shift+click extras to deselect, or
           click empty canvas to clear.
         </div>
@@ -102,22 +109,14 @@ export function Inspector({ page, sessionId, selectedGuid, selectedCount, onChan
   }
   if (!node) {
     return (
-      <div style={{ padding: 16, color: '#c66', fontSize: 12 }}>
+      <div className="p-4 text-sm text-destructive">
         Selected node {selectedGuid} not found in current page.
       </div>
     );
   }
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        minHeight: 0,
-        fontSize: 12,
-      }}
-    >
+    <div className="flex h-full min-h-0 flex-col text-sm">
       <Header node={node} guid={selectedGuid!} />
       <TabbedBody node={node} sessionId={sessionId} guid={selectedGuid!} onChange={onChange} />
     </div>
@@ -135,91 +134,62 @@ function TabbedBody({
   guid: string;
   onChange: () => void;
 }) {
-  const [tab, setTab] = useState<'properties' | 'json'>('properties');
   return (
-    <>
-      <div
-        style={{
-          display: 'flex',
-          borderBottom: '1px solid #2a2a2a',
-          background: '#181818',
-          flexShrink: 0,
-        }}
-      >
-        {(['properties', 'json'] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            style={{
-              flex: 1,
-              padding: '10px 12px',
-              border: 'none',
-              borderBottom: tab === t ? '2px solid #0a84ff' : '2px solid transparent',
-              background: 'transparent',
-              color: tab === t ? '#fff' : '#888',
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: 'pointer',
-              letterSpacing: 0.3,
-              textTransform: 'uppercase',
-            }}
-          >
-            {t === 'properties' ? 'Properties' : 'JSON'}
-          </button>
-        ))}
+    <Tabs defaultValue="properties" className="flex min-h-0 flex-1 flex-col">
+      <div className="flex-shrink-0 border-b border-border bg-card px-3 py-2">
+        <TabsList className="grid w-full grid-cols-2">
+          <TabsTrigger value="properties">Properties</TabsTrigger>
+          <TabsTrigger value="json">JSON</TabsTrigger>
+        </TabsList>
       </div>
-      <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-        {tab === 'properties' ? (
-          <>
-            <Section title="Layer">
-              <LayerSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
+      <TabsContent value="properties" className="m-0 flex-1 overflow-auto">
+        <Section title="Layer">
+          <LayerSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
+        </Section>
+        {/* Component Texts section — primary entry point for editing
+            text inside INSTANCE nodes. Surface it FIRST under Layer so users
+            can find it immediately when a component is selected. */}
+        {node.type === 'INSTANCE' &&
+          Array.isArray(node._componentTexts) &&
+          node._componentTexts.length > 0 && (
+            <Section title="Component Texts">
+              <ComponentTextsSection
+                instanceGuid={guid}
+                instanceOverrides={(node._instanceOverrides ?? {}) as Record<string, string>}
+                refs={node._componentTexts}
+                sessionId={sessionId}
+                onChange={onChange}
+              />
             </Section>
-            {/* Component Texts section — the primary entry point for editing
-                text inside INSTANCE nodes (which have no clickable children
-                on the canvas). Surface it FIRST under Layer so users can
-                find it immediately when a component is selected. */}
-            {node.type === 'INSTANCE' &&
-              Array.isArray(node._componentTexts) &&
-              node._componentTexts.length > 0 && (
-                <Section title="Component Texts">
-                  <ComponentTextsSection
-                    instanceGuid={guid}
-                    instanceOverrides={(node._instanceOverrides ?? {}) as Record<string, string>}
-                    refs={node._componentTexts}
-                    sessionId={sessionId}
-                    onChange={onChange}
-                  />
-                </Section>
-              )}
-            <Section title="Position & Size">
-              <PositionSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
-            </Section>
-            {node.stackMode && node.stackMode !== 'NONE' && node.stackMode !== 'GRID' && (
-              <Section title="Auto Layout">
-                <AutoLayoutSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
-              </Section>
-            )}
-            {Array.isArray(node.fillPaints) && node.fillPaints.length > 0 && (
-              <Section title="Fill">
-                <FillSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
-              </Section>
-            )}
-            {typeof node.strokeWeight === 'number' && node.strokeWeight > 0 && (
-              <Section title="Stroke">
-                <StrokeSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
-              </Section>
-            )}
-            {node.type === 'TEXT' && (
-              <Section title="Text">
-                <TextSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
-              </Section>
-            )}
-          </>
-        ) : (
-          <JsonView node={node} />
+          )}
+        <Section title="Position & Size">
+          <PositionSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
+        </Section>
+        {node.stackMode && node.stackMode !== 'NONE' && node.stackMode !== 'GRID' && (
+          <Section title="Auto Layout">
+            <AutoLayoutSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
+          </Section>
         )}
-      </div>
-    </>
+        {Array.isArray(node.fillPaints) && node.fillPaints.length > 0 && (
+          <Section title="Fill">
+            <FillSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
+          </Section>
+        )}
+        {typeof node.strokeWeight === 'number' && node.strokeWeight > 0 && (
+          <Section title="Stroke">
+            <StrokeSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
+          </Section>
+        )}
+        {node.type === 'TEXT' && (
+          <Section title="Text">
+            <TextSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
+          </Section>
+        )}
+      </TabsContent>
+      <TabsContent value="json" className="m-0 flex-1 overflow-auto">
+        <JsonView node={node} />
+      </TabsContent>
+    </Tabs>
   );
 }
 
@@ -227,21 +197,12 @@ function TabbedBody({
 
 function Header({ node, guid }: { node: any; guid: string }) {
   return (
-    <div
-      style={{
-        padding: '12px 16px',
-        borderBottom: '1px solid #2a2a2a',
-        background: '#181818',
-        position: 'sticky',
-        top: 0,
-        zIndex: 1,
-      }}
-    >
-      <div style={{ fontSize: 10, color: '#777', letterSpacing: 0.5 }}>
-        {node.type} · {guid}
+    <div className="sticky top-0 z-10 flex-shrink-0 border-b border-border bg-card px-4 py-3">
+      <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
+        {node.type} <span className="opacity-60">· {guid}</span>
       </div>
-      <div style={{ fontSize: 13, fontWeight: 600, marginTop: 3, color: '#eee' }}>
-        {node.name ?? <span style={{ color: '#666' }}>(unnamed)</span>}
+      <div className="mt-1 text-sm font-semibold text-foreground">
+        {node.name ?? <span className="text-muted-foreground">(unnamed)</span>}
       </div>
     </div>
   );
@@ -249,57 +210,38 @@ function Header({ node, guid }: { node: any; guid: string }) {
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div style={{ borderBottom: '1px solid #2a2a2a' }}>
-      <div
-        style={{
-          padding: '10px 16px 6px',
-          fontSize: 10,
-          color: '#888',
-          letterSpacing: 0.7,
-          textTransform: 'uppercase',
-          fontWeight: 600,
-        }}
-      >
+    <div className="border-b border-border">
+      <div className="px-4 pb-1.5 pt-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
         {title}
       </div>
-      <div style={{ padding: '0 12px 10px' }}>{children}</div>
+      <div className="px-3 pb-3">{children}</div>
     </div>
   );
 }
 
-function Row({ label, children, style }: { label: string; children: ReactNode; style?: CSSProperties }) {
+function Row({ label, children, align }: { label: string; children: ReactNode; align?: 'top' }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', ...style }}>
-      <div style={{ width: 60, color: '#888', fontSize: 11 }}>{label}</div>
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6 }}>{children}</div>
+    <div
+      className={cn(
+        'flex gap-2 py-1',
+        align === 'top' ? 'items-start' : 'items-center',
+      )}
+    >
+      <div className="w-16 shrink-0 text-xs text-muted-foreground">{label}</div>
+      <div className="flex flex-1 items-center gap-1.5">{children}</div>
     </div>
   );
 }
-
-const inputStyle: CSSProperties = {
-  background: '#0c0c0c',
-  border: '1px solid #2c2c2c',
-  borderRadius: 4,
-  color: '#e8e8e8',
-  padding: '5px 8px',
-  fontSize: 12,
-  fontFamily: 'inherit',
-  outline: 'none',
-  width: '100%',
-  minWidth: 0,
-};
 
 function NumberInput({
   value,
   onCommit,
   step = 1,
-  width,
   suffix,
 }: {
   value: number | undefined;
   onCommit: (v: number) => void;
   step?: number;
-  width?: number;
   suffix?: string;
 }) {
   const [local, setLocal] = useState(value ?? 0);
@@ -307,19 +249,8 @@ function NumberInput({
     setLocal(value ?? 0);
   }, [value]);
   return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 4,
-        background: '#0c0c0c',
-        border: '1px solid #2c2c2c',
-        borderRadius: 4,
-        padding: '0 6px',
-        width: width ?? '100%',
-      }}
-    >
-      <input
+    <div className="relative flex w-full items-center">
+      <Input
         type="number"
         step={step}
         value={Number.isFinite(local) ? local : 0}
@@ -334,20 +265,13 @@ function NumberInput({
             (e.target as HTMLInputElement).blur();
           }
         }}
-        style={{
-          background: 'transparent',
-          border: 'none',
-          color: '#e8e8e8',
-          padding: '5px 0',
-          fontSize: 12,
-          fontFamily: 'inherit',
-          outline: 'none',
-          width: '100%',
-          minWidth: 0,
-          MozAppearance: 'textfield' as never,
-        }}
+        className={cn('h-8 text-sm tabular-nums', suffix && 'pr-7')}
       />
-      {suffix && <span style={{ color: '#666', fontSize: 11 }}>{suffix}</span>}
+      {suffix && (
+        <span className="pointer-events-none absolute right-2 text-xs text-muted-foreground">
+          {suffix}
+        </span>
+      )}
     </div>
   );
 }
@@ -365,17 +289,17 @@ function TextInput({
   useEffect(() => setLocal(value), [value]);
   if (multiline) {
     return (
-      <textarea
+      <Textarea
         value={local}
         rows={3}
         onChange={(e) => setLocal(e.target.value)}
         onBlur={() => local !== value && onCommit(local)}
-        style={{ ...inputStyle, resize: 'vertical', minHeight: 60, fontFamily: 'inherit' }}
+        className="min-h-[60px] resize-y text-sm"
       />
     );
   }
   return (
-    <input
+    <Input
       type="text"
       value={local}
       onChange={(e) => setLocal(e.target.value)}
@@ -387,7 +311,7 @@ function TextInput({
           (e.target as HTMLInputElement).blur();
         }
       }}
-      style={inputStyle}
+      className="h-8 text-sm"
     />
   );
 }
@@ -402,7 +326,7 @@ function ColorInput({
   const hex = rgbaToHex(value);
   const alpha = value?.a ?? 1;
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
+    <div className="flex w-full items-center gap-1.5">
       <input
         type="color"
         value={hex}
@@ -410,47 +334,41 @@ function ColorInput({
           const rgb = hexToRgb01(e.target.value);
           onCommit({ ...rgb, a: alpha });
         }}
-        style={{
-          width: 28,
-          height: 28,
-          padding: 0,
-          border: '1px solid #2c2c2c',
-          borderRadius: 4,
-          background: 'transparent',
-          cursor: 'pointer',
-        }}
+        className="h-8 w-9 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
       />
-      <input
+      <Input
         type="text"
         value={hex.toUpperCase().replace('#', '')}
         onChange={(e) => {
           const v = e.target.value.replace(/[^0-9a-fA-F]/g, '').slice(0, 6);
           if (v.length === 6) onCommit({ ...hexToRgb01(v), a: alpha });
         }}
-        style={{ ...inputStyle, fontFamily: 'Menlo, Consolas, monospace', textTransform: 'uppercase', flex: 1 }}
+        className="h-8 flex-1 font-mono text-xs uppercase tracking-tight"
       />
-      <input
-        type="number"
-        min={0}
-        max={100}
-        value={Math.round(alpha * 100)}
-        onChange={(e) => {
-          const a = Math.max(0, Math.min(100, parseFloat(e.target.value || '0'))) / 100;
-          onCommit({
-            r: value?.r ?? 0,
-            g: value?.g ?? 0,
-            b: value?.b ?? 0,
-            a,
-          });
-        }}
-        style={{ ...inputStyle, width: 56, flex: 'none', textAlign: 'right' }}
-      />
-      <span style={{ color: '#666', fontSize: 11 }}>%</span>
+      <div className="relative flex items-center">
+        <Input
+          type="number"
+          min={0}
+          max={100}
+          value={Math.round(alpha * 100)}
+          onChange={(e) => {
+            const a = Math.max(0, Math.min(100, parseFloat(e.target.value || '0'))) / 100;
+            onCommit({
+              r: value?.r ?? 0,
+              g: value?.g ?? 0,
+              b: value?.b ?? 0,
+              a,
+            });
+          }}
+          className="h-8 w-16 pr-6 text-right tabular-nums"
+        />
+        <span className="pointer-events-none absolute right-2 text-xs text-muted-foreground">%</span>
+      </div>
     </div>
   );
 }
 
-function Select<T extends string | number>({
+function Dropdown<T extends string | number>({
   value,
   options,
   onCommit,
@@ -460,20 +378,24 @@ function Select<T extends string | number>({
   onCommit: (v: T) => void;
 }) {
   return (
-    <select
+    <ShadSelect
       value={String(value ?? '')}
-      onChange={(e) => {
-        const opt = options.find((o) => String(o.value) === e.target.value);
+      onValueChange={(v) => {
+        const opt = options.find((o) => String(o.value) === v);
         if (opt) onCommit(opt.value);
       }}
-      style={inputStyle}
     >
-      {options.map((o) => (
-        <option key={String(o.value)} value={String(o.value)}>
-          {o.label}
-        </option>
-      ))}
-    </select>
+      <SelectTrigger className="h-8 w-full text-sm">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {options.map((o) => (
+          <SelectItem key={String(o.value)} value={String(o.value)}>
+            {o.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </ShadSelect>
   );
 }
 
@@ -487,23 +409,20 @@ function ToggleButtons<T extends string>({
   onCommit: (v: T) => void;
 }) {
   return (
-    <div style={{ display: 'flex', gap: 2, background: '#0c0c0c', border: '1px solid #2c2c2c', borderRadius: 4, padding: 2, width: '100%' }}>
+    <div className="flex w-full gap-0.5 rounded-md border border-input bg-background p-0.5">
       {options.map((o) => {
         const active = value === o.value;
         return (
           <button
+            type="button"
             key={String(o.value)}
             onClick={() => onCommit(o.value)}
-            style={{
-              flex: 1,
-              padding: '4px 6px',
-              fontSize: 11,
-              border: 'none',
-              borderRadius: 3,
-              cursor: 'pointer',
-              background: active ? '#0a84ff' : 'transparent',
-              color: active ? 'white' : '#aaa',
-            }}
+            className={cn(
+              'flex-1 rounded px-2 py-1 text-xs font-medium transition-colors',
+              active
+                ? 'bg-primary text-primary-foreground shadow-sm'
+                : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+            )}
           >
             {o.icon ?? o.label}
           </button>
@@ -555,8 +474,8 @@ function LayerSection({ node, sessionId, guid, onChange }: SectionProps) {
         <ToggleButtons<string>
           value={node.visible === false ? 'hidden' : 'visible'}
           options={[
-            { label: '👁 Show', value: 'visible' },
-            { label: '⊘ Hide', value: 'hidden' },
+            { label: 'Show', value: 'visible', icon: <span className="inline-flex items-center gap-1"><Eye className="h-3.5 w-3.5" />Show</span> },
+            { label: 'Hide', value: 'hidden', icon: <span className="inline-flex items-center gap-1"><EyeOff className="h-3.5 w-3.5" />Hide</span> },
           ]}
           onCommit={(v) => patch('visible', v === 'visible')}
         />
@@ -636,7 +555,7 @@ function AutoLayoutSection({ node, sessionId, guid, onChange }: SectionProps) {
         <NumberInput value={padLeft} onCommit={(v) => patch('stackPaddingLeft', v)} />
       </Row>
       <Row label="Align">
-        <Select<string>
+        <Dropdown<string>
           value={node.stackPrimaryAlignItems}
           options={[
             { label: 'Start', value: 'MIN' },
@@ -648,7 +567,7 @@ function AutoLayoutSection({ node, sessionId, guid, onChange }: SectionProps) {
         />
       </Row>
       <Row label="Counter">
-        <Select<string>
+        <Dropdown<string>
           value={node.stackCounterAlignItems}
           options={[
             { label: 'Start', value: 'MIN' },
@@ -672,7 +591,7 @@ function FillSection({ node, sessionId, guid, onChange }: SectionProps) {
   if (first.type !== 'SOLID') {
     return (
       <Row label="Type">
-        <span style={{ color: '#888', fontSize: 11 }}>{first.type ?? 'unknown'} (not editable in PoC)</span>
+        <span className="text-xs text-muted-foreground">{first.type ?? 'unknown'} (not editable in PoC)</span>
       </Row>
     );
   }
@@ -716,7 +635,7 @@ function StrokeSection({ node, sessionId, guid, onChange }: SectionProps) {
         />
       </Row>
       <Row label="Align">
-        <Select<string>
+        <Dropdown<string>
           value={node.strokeAlign ?? 'CENTER'}
           options={[
             { label: 'Inside', value: 'INSIDE' },
@@ -768,27 +687,20 @@ function ComponentTextsSection({
   const [mode, setMode] = useState<'instance' | 'master'>('instance');
   return (
     <>
-      <div
-        style={{
-          fontSize: 10,
-          color: '#888',
-          padding: '0 4px 8px',
-          lineHeight: 1.5,
-        }}
-      >
+      <div className="px-1 pb-2 text-xs leading-relaxed text-muted-foreground">
         {mode === 'instance' ? (
           <>
-            <strong style={{ color: '#a3e3a3' }}>Instance override:</strong> changes apply only to
+            <strong className="text-emerald-400">Instance override:</strong> changes apply only to
             this instance. Master and other instances stay intact.
           </>
         ) : (
           <>
-            <strong style={{ color: '#ffb86c' }}>Master:</strong> changes propagate to <em>all</em>{' '}
+            <strong className="text-orange-400">Master:</strong> changes propagate to <em>all</em>{' '}
             instances of this component.
           </>
         )}
       </div>
-      <div style={{ padding: '0 4px 8px' }}>
+      <div className="px-1 pb-2">
         <ToggleButtons<'instance' | 'master'>
           value={mode}
           options={[
@@ -835,66 +747,33 @@ function ComponentTextRow({
   const dirty = val !== displayed;
   const overridden = typeof override === 'string';
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 4,
-        padding: '6px 4px',
-        borderTop: '1px solid #1f1f1f',
-      }}
-    >
-      <div style={{ fontSize: 10, color: '#888', display: 'flex', gap: 6, alignItems: 'center' }}>
-        <span style={{ color: '#aaa', fontWeight: 600 }}>{item.name ?? 'Text'}</span>
-        {item.path && <span style={{ color: '#555' }}>· {item.path}</span>}
+    <div className="flex flex-col gap-1.5 border-t border-border px-1 py-2 first:border-t-0">
+      <div className="flex items-center gap-1.5 text-xs">
+        <span className="font-semibold text-foreground">{item.name ?? 'Text'}</span>
+        {item.path && <span className="text-muted-foreground/70">· {item.path}</span>}
         {overridden && (
-          <span
-            style={{
-              fontSize: 9,
-              padding: '1px 5px',
-              borderRadius: 3,
-              background: '#2a4a2a',
-              color: '#a3e3a3',
-              fontWeight: 600,
-              letterSpacing: 0.4,
-            }}
-          >
-            OVERRIDE
+          <span className="rounded bg-emerald-950 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-300">
+            override
           </span>
         )}
-        <span style={{ marginLeft: 'auto', fontFamily: 'Menlo, monospace', color: '#444' }}>
-          {item.guid}
-        </span>
+        <span className="ml-auto font-mono text-[10px] text-muted-foreground/60">{item.guid}</span>
       </div>
-      <textarea
+      <Textarea
         value={val}
         rows={Math.min(4, Math.max(1, val.split('\n').length))}
         onChange={(e) => setVal(e.target.value)}
-        style={{
-          ...inputStyle,
-          resize: 'vertical',
-          minHeight: 30,
-          fontFamily: 'inherit',
-        }}
+        className="min-h-[36px] resize-y text-sm"
       />
-      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+      <div className="flex justify-end gap-1.5">
         {dirty && (
-          <button
-            onClick={() => setVal(displayed)}
-            style={{
-              background: 'transparent',
-              color: '#888',
-              border: '1px solid #2c2c2c',
-              padding: '4px 10px',
-              borderRadius: 4,
-              fontSize: 11,
-              cursor: 'pointer',
-            }}
-          >
+          <Button variant="ghost" size="sm" onClick={() => setVal(displayed)}>
             Cancel
-          </button>
+          </Button>
         )}
-        <button
+        <Button
+          variant={mode === 'master' ? 'destructive' : 'default'}
+          size="sm"
+          disabled={!dirty}
           onClick={async () => {
             if (!dirty) return;
             try {
@@ -908,20 +787,9 @@ function ComponentTextRow({
               alert(`Failed: ${(err as Error).message}`);
             }
           }}
-          disabled={!dirty}
-          style={{
-            background: dirty ? (mode === 'instance' ? '#0a84ff' : '#cc7a3b') : '#1c1c1c',
-            color: dirty ? 'white' : '#555',
-            border: 'none',
-            padding: '4px 12px',
-            borderRadius: 4,
-            fontSize: 11,
-            cursor: dirty ? 'pointer' : 'default',
-            fontWeight: 600,
-          }}
         >
           Apply{mode === 'master' ? ' to Master' : ''}
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -933,7 +801,7 @@ function TextSection({ node, sessionId, guid, onChange }: SectionProps) {
   const style = node.fontName?.style ?? 'Regular';
   return (
     <>
-      <Row label="Content" style={{ alignItems: 'flex-start' }}>
+      <Row label="Content" align="top">
         <TextInput
           value={node.textData?.characters ?? ''}
           multiline
@@ -944,7 +812,7 @@ function TextSection({ node, sessionId, guid, onChange }: SectionProps) {
         <TextInput value={family} onCommit={(v) => patch('fontName.family', v)} />
       </Row>
       <Row label="Weight">
-        <Select<string>
+        <Dropdown<string>
           value={style}
           options={FONT_WEIGHT_STYLES}
           onCommit={(v) => patch('fontName.style', v)}
@@ -959,7 +827,7 @@ function TextSection({ node, sessionId, guid, onChange }: SectionProps) {
           step={1}
           onCommit={(v) => patch('lineHeight.value', v)}
         />
-        <Select<string>
+        <Dropdown<string>
           value={node.lineHeight?.units ?? 'PERCENT'}
           options={[
             { label: '%', value: 'PERCENT' },
@@ -975,7 +843,7 @@ function TextSection({ node, sessionId, guid, onChange }: SectionProps) {
           step={0.1}
           onCommit={(v) => patch('letterSpacing.value', v)}
         />
-        <Select<string>
+        <Dropdown<string>
           value={node.letterSpacing?.units ?? 'PERCENT'}
           options={[
             { label: '%', value: 'PERCENT' },
@@ -989,10 +857,10 @@ function TextSection({ node, sessionId, guid, onChange }: SectionProps) {
         <ToggleButtons<string>
           value={node.textAlignHorizontal ?? 'LEFT'}
           options={[
-            { label: '⇤', value: 'LEFT' },
-            { label: '↔', value: 'CENTER' },
-            { label: '⇥', value: 'RIGHT' },
-            { label: '⇿', value: 'JUSTIFIED' },
+            { label: 'L', value: 'LEFT' },
+            { label: 'C', value: 'CENTER' },
+            { label: 'R', value: 'RIGHT' },
+            { label: 'J', value: 'JUSTIFIED' },
           ]}
           onCommit={(v) => patch('textAlignHorizontal', v)}
         />
@@ -1001,9 +869,9 @@ function TextSection({ node, sessionId, guid, onChange }: SectionProps) {
         <ToggleButtons<string>
           value={node.textAlignVertical ?? 'TOP'}
           options={[
-            { label: '⇈', value: 'TOP' },
-            { label: '═', value: 'CENTER' },
-            { label: '⇊', value: 'BOTTOM' },
+            { label: 'Top', value: 'TOP' },
+            { label: 'Mid', value: 'CENTER' },
+            { label: 'Btm', value: 'BOTTOM' },
           ]}
           onCommit={(v) => patch('textAlignVertical', v)}
         />
@@ -1016,34 +884,12 @@ function JsonView({ node }: { node: any }) {
   const stripped = strip(node);
   const json = JSON.stringify(stripped, null, 2);
   return (
-    <div style={{ padding: 12 }}>
-      <div
-        style={{
-          fontSize: 10,
-          color: '#888',
-          textTransform: 'uppercase',
-          letterSpacing: 0.7,
-          fontWeight: 600,
-          marginBottom: 8,
-          paddingLeft: 4,
-        }}
-      >
+    <div className="p-3">
+      <div className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
         Selected node JSON · click any property tab to edit
       </div>
       <pre
-        style={{
-          margin: 0,
-          padding: 12,
-          fontSize: 11.5,
-          lineHeight: 1.55,
-          fontFamily: 'Menlo, Consolas, "Cascadia Mono", monospace',
-          background: '#0a0a0a',
-          border: '1px solid #2a2a2a',
-          borderRadius: 6,
-          color: '#bbb',
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-word',
-        }}
+        className="m-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-[#0a0a0a] p-3 font-mono text-[11.5px] leading-snug text-muted-foreground"
         dangerouslySetInnerHTML={{ __html: highlightJson(json) }}
       />
     </div>
