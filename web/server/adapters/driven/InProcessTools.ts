@@ -93,6 +93,36 @@ const CATALOGUE = [
       required: ['guid', 'r', 'g', 'b', 'a'],
     },
   },
+  {
+    name: 'set_corner_radius',
+    description: "Set cornerRadius (px). Use 0 for sharp corners.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        guid: { type: 'string' },
+        value: { type: 'number', description: 'Corner radius in pixels, >= 0.' },
+      },
+      required: ['guid', 'value'],
+    },
+  },
+  {
+    name: 'align_nodes',
+    description:
+      "Align 2+ nodes inside their collective bounding box. axis is one of " +
+      "left/center/right (horizontal) or top/middle/bottom (vertical), " +
+      "matching Figma's Align toolbar.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        guids: { type: 'array', items: { type: 'string' }, minItems: 2 },
+        axis: {
+          type: 'string',
+          enum: ['left', 'center', 'right', 'top', 'middle', 'bottom'],
+        },
+      },
+      required: ['guids', 'axis'],
+    },
+  },
 ] as const;
 
 export class InProcessTools implements ToolDispatcher {

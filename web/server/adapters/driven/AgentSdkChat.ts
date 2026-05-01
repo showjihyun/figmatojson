@@ -89,6 +89,20 @@ export class AgentSdkChat implements ChatAdapter {
           wrap('set_fill_color', async (i: { guid: string; r: number; g: number; b: number; a: number }) =>
             this.toolHook('set_fill_color', i)),
         ),
+        tool('set_corner_radius', 'Set cornerRadius in px (>= 0).',
+          { guid: z.string(), value: z.number() },
+          wrap('set_corner_radius', async (i: { guid: string; value: number }) =>
+            this.toolHook('set_corner_radius', i)),
+        ),
+        tool('align_nodes',
+          "Align 2+ nodes within their collective bbox. axis: left|center|right|top|middle|bottom.",
+          {
+            guids: z.array(z.string()),
+            axis: z.enum(['left', 'center', 'right', 'top', 'middle', 'bottom']),
+          },
+          wrap('align_nodes', async (i: { guids: string[]; axis: string }) =>
+            this.toolHook('align_nodes', i)),
+        ),
       ],
     });
 
