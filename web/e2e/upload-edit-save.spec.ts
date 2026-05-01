@@ -46,6 +46,30 @@ async function waitForDocLoaded(
 test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
   test.skip(!existsSync(SAMPLE_FIG), `sample missing: ${SAMPLE_FIG}`);
 
+  // Perf-gate test — pins time-to-first-render against the 35,660-node real
+  // sample. Doesn't try to measure FPS or interaction latency (Playwright
+  // numbers vary too much across machines for that to be useful as a gate).
+  // The budget is intentionally generous; the point is to catch catastrophic
+  // regressions like "a future change doubled mount time" without flagging
+  // run-to-run noise.
+  test('large-doc perf gate: upload + first-render under 30s for 35,660 nodes', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    await page.goto('/');
+    await expect(page.getByText('figma_reverse · Tier 2 PoC')).toBeVisible();
+
+    const tStart = Date.now();
+    await page.locator('input[type="file"][accept=".fig"]').setInputFiles(SAMPLE_FIG);
+    await waitForDocLoaded(page, 6);
+    const tFirstPaint = Date.now() - tStart;
+    console.log(`[perf-gate] upload + first paint (35,660 nodes): ${tFirstPaint}ms`);
+
+    // Budget: 30s. A clean run on the dev machine completes in ~5-8s; this
+    // accounts for cold-start and CI variance. Tightening this number is a
+    // separate exercise that needs a stable benchmark host.
+    expect(tFirstPaint).toBeLessThan(30_000);
+  });
+
   test('upload .fig, edit a text node, save back to .fig', async ({ page }) => {
     test.setTimeout(180_000);
 
