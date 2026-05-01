@@ -15,9 +15,10 @@ import type Konva from 'konva';
 
 interface CanvasProps {
   page: any;
-  selectedGuid: string | null;
-  onSelect: (guid: string | null) => void;
-  onMove?: (guid: string, x: number, y: number) => void;
+  selectedGuids: Set<string>;
+  onSelect: (guid: string | null, mode?: 'replace' | 'toggle') => void;
+  /** Drag-group: emits new positions for every selected node atomically. */
+  onMoveMany?: (updates: Array<{ guid: string; x: number; y: number }>) => void;
   onResize?: (guid: string, x: number, y: number, w: number, h: number) => void;
 }
 
@@ -62,17 +63,21 @@ const VECTOR_TYPES = new Set([
   'ROUNDED_RECTANGLE',
 ]);
 
+interface NodeShapeProps {
+  node: any;
+  selectedGuids: Set<string>;
+  onSelect: (g: string | null, mode?: 'replace' | 'toggle') => void;
+  onDragGroup?: (guid: string, dx: number, dy: number) => void;
+  dragSnapshot?: Map<string, { x: number; y: number }>;
+}
+
 function NodeShape({
   node,
-  selectedGuid,
+  selectedGuids,
   onSelect,
-  onMove,
-}: {
-  node: any;
-  selectedGuid: string | null;
-  onSelect: (g: string | null) => void;
-  onMove?: (guid: string, x: number, y: number) => void;
-}) {
+  onDragGroup,
+  dragSnapshot,
+}: NodeShapeProps) {
   if (node.visible === false) return null;
   const x = node.transform?.m02 ?? 0;
   const y = node.transform?.m12 ?? 0;
@@ -81,17 +86,35 @@ function NodeShape({
   const guid = guidStr(node.guid);
   const stroke = strokeOf(node);
   const cornerR = node.cornerRadius ?? 0;
-  const isSelected = !!guid && guid === selectedGuid;
+  const isSelected = !!guid && selectedGuids.has(guid);
 
-  // Common drag handler — emits parent-local coords to the onMove callback.
+  // Drag-end → compute delta from initial position, emit to onDragGroup
+  // which handles fanout to every selected node.
   const onDragEnd = (e: Konva.KonvaEventObject<DragEvent>): void => {
-    if (!guid || !onMove) return;
-    const t = e.target;
-    onMove(guid, t.x(), t.y());
+    if (!guid || !onDragGroup) return;
+    const initial = dragSnapshot?.get(guid);
+    if (!initial) {
+      // Fallback: no snapshot — just emit the absolute new position.
+      onDragGroup(guid, e.target.x() - x, e.target.y() - y);
+      return;
+    }
+    const dx = e.target.x() - initial.x;
+    const dy = e.target.y() - initial.y;
+    onDragGroup(guid, dx, dy);
+  };
+
+  const onShapeClick = (e: Konva.KonvaEventObject<MouseEvent | TouchEvent>): void => {
+    e.cancelBubble = true;
+    // shiftKey only exists on MouseEvent / KeyboardEvent — touch users get
+    // single-select fallback, which is fine.
+    const native = e.evt as { shiftKey?: boolean } | undefined;
+    const shift = !!native?.shiftKey;
+    onSelect(guid, shift ? 'toggle' : 'replace');
   };
 
   if (node.type === 'TEXT') {
-    const chars = node.textData?.characters ?? '';
+    // Render-time text override (per-instance) wins over master textData.
+    const chars = (node._renderTextOverride as string | undefined) ?? node.textData?.characters ?? '';
     const fontSize = node.fontSize ?? 12;
     const fontFamily = node.fontName?.family ?? 'Inter';
     const fillColor = (() => {
@@ -113,21 +136,14 @@ function NodeShape({
         width={w || undefined}
         height={h || undefined}
         draggable={isSelected}
-        onClick={(e) => {
-          e.cancelBubble = true;
-          onSelect(guid);
-        }}
-        onTap={(e) => {
-          e.cancelBubble = true;
-          onSelect(guid);
-        }}
+        onClick={onShapeClick}
+        onTap={onShapeClick}
         onDragEnd={onDragEnd}
         listening
       />
     );
   }
 
-  // VECTOR family: render as Konva.Path if we have geometry; else colored rect.
   if (VECTOR_TYPES.has(node.type) && typeof node._path === 'string' && node._path.length > 0) {
     const pathFill = colorOfWithDefault(node, 'transparent');
     return (
@@ -135,14 +151,8 @@ function NodeShape({
         x={x}
         y={y}
         draggable={isSelected}
-        onClick={(e) => {
-          e.cancelBubble = true;
-          onSelect(guid);
-        }}
-        onTap={(e) => {
-          e.cancelBubble = true;
-          onSelect(guid);
-        }}
+        onClick={onShapeClick}
+        onTap={onShapeClick}
         onDragEnd={onDragEnd}
       >
         <Path
@@ -157,21 +167,23 @@ function NodeShape({
   }
 
   const fill = colorOf(node);
-  const isContainer = Array.isArray(node.children) && node.children.length > 0;
+  // Children to render: native children (FRAME etc.) OR an INSTANCE's
+  // expanded master tree (`_renderChildren`). The latter lets buttons /
+  // icons / labels actually appear inside an instance — without it,
+  // INSTANCE shows as a bare colored rect.
+  const renderableChildren =
+    Array.isArray(node.children) && node.children.length > 0
+      ? node.children
+      : (node._renderChildren as any[] | undefined) ?? [];
+  const hasChildren = renderableChildren.length > 0;
 
   return (
     <Group
       x={x}
       y={y}
       draggable={isSelected}
-      onClick={(e) => {
-        e.cancelBubble = true;
-        onSelect(guid);
-      }}
-      onTap={(e) => {
-        e.cancelBubble = true;
-        onSelect(guid);
-      }}
+      onClick={onShapeClick}
+      onTap={onShapeClick}
       onDragEnd={onDragEnd}
     >
       <Rect
@@ -185,14 +197,15 @@ function NodeShape({
         cornerRadius={cornerR}
         listening
       />
-      {isContainer &&
-        node.children.map((c: any, i: number) => (
+      {hasChildren &&
+        renderableChildren.map((c: any, i: number) => (
           <NodeShape
             key={i}
             node={c}
-            selectedGuid={selectedGuid}
+            selectedGuids={selectedGuids}
             onSelect={onSelect}
-            onMove={onMove}
+            onDragGroup={onDragGroup}
+            dragSnapshot={dragSnapshot}
           />
         ))}
     </Group>
@@ -326,7 +339,9 @@ function SelectionOverlay({
   );
 }
 
-export function Canvas({ page, selectedGuid, onSelect, onMove, onResize }: CanvasProps) {
+export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize }: CanvasProps) {
+  // Single-selection convenience for resize bounds + multi-bbox iteration.
+  const selectedGuid = selectedGuids.size === 1 ? [...selectedGuids][0]! : null;
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [scale, setScale] = useState(0.25);
@@ -452,11 +467,46 @@ export function Canvas({ page, selectedGuid, onSelect, onMove, onResize }: Canva
     setPageId(page.id);
   }, [page, size.width, size.height, pageId]);
 
-  // Compute selection bounds (absolute coords)
-  const selectionBounds = useMemo(
-    () => (selectedGuid ? findAbsBounds(page, selectedGuid) : null),
-    [page, selectedGuid],
-  );
+  // Compute selection bounds for every selected node (absolute coords).
+  const selectionBoundsList = useMemo(() => {
+    const out: Array<{ guid: string; bounds: { x: number; y: number; w: number; h: number } }> = [];
+    for (const g of selectedGuids) {
+      const b = findAbsBounds(page, g);
+      if (b) out.push({ guid: g, bounds: b });
+    }
+    return out;
+  }, [page, selectedGuids]);
+  // Single-selection bounds (used for resize handles)
+  const singleBounds = selectedGuid ? selectionBoundsList[0]?.bounds ?? null : null;
+
+  // Drag-group: capture initial parent-local positions on drag start, fan
+  // the delta out across every selected node on drag end.
+  const dragSnapshot = useMemo(() => {
+    const m = new Map<string, { x: number; y: number }>();
+    function visit(n: any): void {
+      if (!n || typeof n !== 'object') return;
+      const g = n.guid ? `${n.guid.sessionID}:${n.guid.localID}` : null;
+      if (g && selectedGuids.has(g)) {
+        m.set(g, { x: n.transform?.m02 ?? 0, y: n.transform?.m12 ?? 0 });
+      }
+      if (Array.isArray(n.children)) for (const c of n.children) visit(c);
+    }
+    visit(page);
+    return m;
+  }, [page, selectedGuids]);
+
+  const onDragGroup = (anchorGuid: string, dx: number, dy: number): void => {
+    if (!onMoveMany) return;
+    if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
+    const updates: Array<{ guid: string; x: number; y: number }> = [];
+    for (const g of selectedGuids) {
+      const start = dragSnapshot.get(g);
+      if (!start) continue;
+      updates.push({ guid: g, x: start.x + dx, y: start.y + dy });
+    }
+    void anchorGuid;
+    if (updates.length > 0) onMoveMany(updates);
+  };
 
   return (
     <div
@@ -509,20 +559,31 @@ export function Canvas({ page, selectedGuid, onSelect, onMove, onResize }: Canva
             <NodeShape
               key={i}
               node={c}
-              selectedGuid={selectedGuid}
+              selectedGuids={selectedGuids}
               onSelect={onSelect}
-              onMove={onMove}
+              onDragGroup={onDragGroup}
+              dragSnapshot={dragSnapshot}
             />
           ))}
         </Layer>
-        {selectionBounds && (
+        {selectionBoundsList.length > 0 && (
           <Layer listening={!spaceHeld}>
-            <SelectionOverlay
-              bounds={selectionBounds}
-              scale={scale}
-              onResize={onResize}
-              guid={selectedGuid}
-            />
+            {/* Resize handles only when EXACTLY one node is selected — multi-
+                resize would need per-node directional logic; for the PoC we
+                just let users drag the group and resize one at a time. */}
+            {singleBounds && selectedGuid && (
+              <SelectionOverlay
+                bounds={singleBounds}
+                scale={scale}
+                onResize={onResize}
+                guid={selectedGuid}
+              />
+            )}
+            {/* For multi-select, render plain bbox outlines (no handles) */}
+            {selectionBoundsList.length > 1 &&
+              selectionBoundsList.map(({ guid, bounds }) => (
+                <MultiBox key={guid} bounds={bounds} scale={scale} />
+              ))}
           </Layer>
         )}
       </Stage>
@@ -547,6 +608,28 @@ export function Canvas({ page, selectedGuid, onSelect, onMove, onResize }: Canva
         </div>
       )}
     </div>
+  );
+}
+
+/** Lightweight bbox shown for each member of a multi-selection (no handles). */
+function MultiBox({
+  bounds,
+  scale,
+}: {
+  bounds: { x: number; y: number; w: number; h: number };
+  scale: number;
+}) {
+  return (
+    <Rect
+      x={bounds.x}
+      y={bounds.y}
+      width={bounds.w}
+      height={bounds.h}
+      stroke="#0a84ff"
+      strokeWidth={1.5 / scale}
+      fill="transparent"
+      listening={false}
+    />
   );
 }
 

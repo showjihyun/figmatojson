@@ -67,6 +67,22 @@ interface ClientNode {
   children?: ClientNode[];
   _path?: string;      // pre-decoded SVG path (vector nodes)
   _componentTexts?: ComponentTextRef[];  // editable text refs inside an INSTANCE's master
+  /**
+   * For INSTANCE nodes that have no native children, this carries the
+   * MASTER's expanded subtree so the canvas can actually render the
+   * component's contents (icons, labels, etc.). Each rendered child keeps
+   * its master GUID so edits / clicks behave the same as editing the master,
+   * but a `_isInstanceChild: true` marker tells the client this is a virtual
+   * render-only branch (don't recurse into "children of children of an
+   * instance" forever).
+   */
+  _renderChildren?: ClientNode[];
+  _isInstanceChild?: boolean;
+  /** When this INSTANCE child rendering applies a per-instance text override,
+   *  this is the override text (replaces the master's textData.characters
+   *  during render). Edits via the overlay still flow through the parent
+   *  INSTANCE's symbolOverrides. */
+  _renderTextOverride?: string;
   [k: string]: unknown;
 }
 
@@ -115,13 +131,15 @@ function toClientNode(
     }
   }
 
-  // INSTANCE: collect editable TEXT descendants from the master tree so the
-  // Inspector can show a "Component Texts" panel — the user's primary entry
-  // point for changing button labels, headings, etc., when the instance
-  // itself is empty (children rendered via master expansion at render time
-  // in pen-export, not exposed to the client doc).
+  // INSTANCE: collect editable TEXT descendants + attach the master's
+  // expanded subtree as `_renderChildren` so the canvas can show actual
+  // button shapes / icons / labels (without these the instance is just an
+  // empty colored rectangle).
   if (n.type === 'INSTANCE' && n.children.length === 0) {
-    const sd = data.symbolData as { symbolID?: { sessionID?: number; localID?: number } } | undefined;
+    const sd = data.symbolData as {
+      symbolID?: { sessionID?: number; localID?: number };
+      symbolOverrides?: Array<Record<string, unknown>>;
+    } | undefined;
     const sid = sd?.symbolID;
     if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
       const masterKey = `${sid.sessionID}:${sid.localID}`;
@@ -130,6 +148,14 @@ function toClientNode(
         const texts: ComponentTextRef[] = [];
         collectTexts(master, [], texts, symbolIndex, 0);
         if (texts.length > 0) out._componentTexts = texts;
+
+        // Build the override map BEFORE expanding so render-time text
+        // substitutions can happen for each child node.
+        const textOverrides = collectTextOverridesFromInstance(sd?.symbolOverrides);
+        const expanded = master.children.map((c) =>
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, 0),
+        );
+        if (expanded.length > 0) out._renderChildren = expanded;
       }
     }
   }
@@ -138,6 +164,102 @@ function toClientNode(
     if (k === 'guid' || k === 'type' || k === 'name') continue;
     const v = data[k];
     // Drop Uint8Array / large binary fields — Konva-side rendering doesn't need them
+    if (v instanceof Uint8Array) continue;
+    if (k === 'derivedSymbolData' || k === 'derivedTextData') continue;
+    if (k === 'fillGeometry' || k === 'strokeGeometry') continue;
+    if (k === 'vectorData') continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Pull text overrides out of an INSTANCE's symbolOverrides[]. Each override
+ * targets a master text by its single-step guidPath. Returns a map of
+ * "sess:local" → override-text, keyed by the master text node's guidStr.
+ */
+function collectTextOverridesFromInstance(
+  overrides: Array<Record<string, unknown>> | undefined,
+): Map<string, string> {
+  const m = new Map<string, string>();
+  if (!Array.isArray(overrides)) return m;
+  for (const o of overrides) {
+    const td = o.textData as { characters?: string } | undefined;
+    if (typeof td?.characters !== 'string') continue;
+    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+    if (!Array.isArray(guids) || guids.length === 0) continue;
+    // Use the LAST guid in the path — that's the actual text node target.
+    const last = guids[guids.length - 1]!;
+    if (typeof last.sessionID !== 'number' || typeof last.localID !== 'number') continue;
+    m.set(`${last.sessionID}:${last.localID}`, td.characters);
+  }
+  return m;
+}
+
+/**
+ * Render-only version of toClientNode used inside INSTANCE expansion. Keeps
+ * the master's GUIDs (so editing still targets the master node), tags every
+ * descendant with `_isInstanceChild: true`, and applies any per-instance
+ * text overrides at render time so the canvas reflects them immediately.
+ *
+ * Recursion is depth-limited (8) and stops at nested INSTANCEs (their own
+ * `_renderChildren` will be filled in when toClientNode visits them
+ * separately as part of the main tree walk).
+ */
+function toClientChildForRender(
+  n: TreeNode,
+  blobs: Array<{ bytes: Uint8Array }>,
+  symbolIndex: Map<string, TreeNode>,
+  textOverrides: Map<string, string>,
+  depth: number,
+): ClientNode {
+  if (depth > 8) {
+    return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
+  }
+  const data = (n.data ?? {}) as Record<string, unknown>;
+  const out: ClientNode = {
+    id: n.guidStr,
+    guid: n.guid,
+    type: n.type,
+    name: n.name,
+    _isInstanceChild: true,
+    children: n.children.map((c) => toClientChildForRender(c, blobs, symbolIndex, textOverrides, depth + 1)),
+  };
+  // Attach SVG path for vector descendants
+  if (VECTOR_TYPES.has(n.type)) {
+    const vd = data.vectorData as { vectorNetworkBlob?: number } | undefined;
+    if (vd && typeof vd.vectorNetworkBlob === 'number') {
+      const blob = blobs[vd.vectorNetworkBlob];
+      if (blob?.bytes) {
+        const vn = parseVectorNetworkBlob(blob.bytes);
+        if (vn) out._path = vectorNetworkToPath(vn);
+      }
+    }
+  }
+  // Apply per-instance text override at render time
+  if (n.type === 'TEXT') {
+    const ov = textOverrides.get(n.guidStr);
+    if (typeof ov === 'string') out._renderTextOverride = ov;
+  }
+  // Nested INSTANCE inside the master tree — recurse into ITS master too,
+  // applying the OUTER overrides (single-level for PoC; nested overrides
+  // would need path-aware filtering).
+  if (n.type === 'INSTANCE' && n.children.length === 0) {
+    const sd = data.symbolData as { symbolID?: { sessionID?: number; localID?: number } } | undefined;
+    const sid = sd?.symbolID;
+    if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
+      const master = symbolIndex.get(`${sid.sessionID}:${sid.localID}`);
+      if (master) {
+        out._renderChildren = master.children.map((c) =>
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, depth + 1),
+        );
+      }
+    }
+  }
+  // Carry over the data fields the canvas / inspector needs
+  for (const k of Object.keys(data)) {
+    if (k === 'guid' || k === 'type' || k === 'name') continue;
+    const v = data[k];
     if (v instanceof Uint8Array) continue;
     if (k === 'derivedSymbolData' || k === 'derivedTextData') continue;
     if (k === 'fillGeometry' || k === 'strokeGeometry') continue;
