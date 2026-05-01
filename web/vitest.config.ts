@@ -24,5 +24,9 @@ export default defineConfig({
     // jsdom is opt-in per file via `// @vitest-environment jsdom`;
     // pure unit tests (multiResize, EditNode) run faster in node.
     environment: 'node',
+    // @testing-library/react needs explicit cleanup between tests when
+    // not using globals — without this the previous test's DOM stays
+    // mounted and getByRole sees ambiguous matches.
+    setupFiles: ['./vitest.setup.ts'],
   },
 });
