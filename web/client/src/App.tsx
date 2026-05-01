@@ -297,7 +297,7 @@ export function App() {
           )}
         </div>
         <aside className="flex w-[360px] min-h-0 flex-col border-l border-border bg-card">
-          {session && currentPage && (
+          {session && currentPage ? (
             <Inspector
               page={currentPage}
               sessionId={session.sessionId}
@@ -305,6 +305,15 @@ export function App() {
               selectedCount={selectedGuids.size}
               onChange={onRefreshDoc}
             />
+          ) : (
+            <div className="p-4 text-sm leading-relaxed text-muted-foreground">
+              <div className="text-[11px] font-semibold uppercase tracking-wider">
+                Inspector
+              </div>
+              <p className="mt-2">
+                Open a document to inspect and edit its layers.
+              </p>
+            </div>
           )}
         </aside>
       </main>
