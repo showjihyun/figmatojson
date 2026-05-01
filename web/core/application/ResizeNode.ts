@@ -8,6 +8,7 @@
  */
 
 import type { SessionStore } from '../ports/SessionStore.js';
+import type { EditJournal } from '../ports/EditJournal.js';
 import { NotFoundError } from './errors.js';
 
 interface FsLike {
@@ -25,7 +26,10 @@ export interface ResizeNodeInput {
 }
 
 export class ResizeNode {
-  constructor(private readonly sessionStore: SessionStore & FsLike) {}
+  constructor(
+    private readonly sessionStore: SessionStore & FsLike,
+    private readonly journal?: EditJournal,
+  ) {}
 
   async execute({ sessionId, guid, x, y, w, h }: ResizeNodeInput): Promise<{ ok: true }> {
     const session = this.sessionStore.getById(sessionId);
@@ -39,10 +43,19 @@ export class ResizeNode {
     });
     if (!node) throw new NotFoundError(`node ${guid} not found`);
 
+    // Capture pre-state of the four fields we're about to mutate.
+    const beforeT = (node.transform as Record<string, number> | undefined) ?? {};
+    const beforeMx = beforeT.m02;
+    const beforeMy = beforeT.m12;
+    const beforeSize = (node.size as { x?: number; y?: number } | undefined) ?? {};
+    const beforeSx = beforeSize.x;
+    const beforeSy = beforeSize.y;
+
     const t = (node.transform ??= {}) as Record<string, number>;
     t.m02 = x;
     t.m12 = y;
-    node.size = { x: Math.max(1, w), y: Math.max(1, h) };
+    const newSize = { x: Math.max(1, w), y: Math.max(1, h) };
+    node.size = newSize;
     this.sessionStore.writeMessage(sessionId, JSON.stringify(msg));
 
     // Mirror on documentJson.
@@ -61,6 +74,16 @@ export class ResizeNode {
       return false;
     }
     walk(doc);
+
+    this.journal?.record(sessionId, {
+      label: 'Resize',
+      patches: [
+        { guid, field: 'transform.m02', before: beforeMx, after: x },
+        { guid, field: 'transform.m12', before: beforeMy, after: y },
+        { guid, field: 'size.x', before: beforeSx, after: newSize.x },
+        { guid, field: 'size.y', before: beforeSy, after: newSize.y },
+      ],
+    });
 
     return { ok: true };
   }

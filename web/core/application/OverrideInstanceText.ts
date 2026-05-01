@@ -6,6 +6,7 @@
  */
 
 import type { SessionStore } from '../ports/SessionStore.js';
+import type { EditJournal } from '../ports/EditJournal.js';
 import { NotFoundError, ValidationError } from './errors.js';
 
 interface FsLike {
@@ -21,7 +22,10 @@ export interface OverrideInstanceTextInput {
 }
 
 export class OverrideInstanceText {
-  constructor(private readonly sessionStore: SessionStore & FsLike) {}
+  constructor(
+    private readonly sessionStore: SessionStore & FsLike,
+    private readonly journal?: EditJournal,
+  ) {}
 
   async execute({
     sessionId,
@@ -50,6 +54,10 @@ export class OverrideInstanceText {
     inst.symbolData = (inst.symbolData ?? {}) as Record<string, unknown>;
     const sd = inst.symbolData as { symbolOverrides?: Array<Record<string, unknown>> };
     sd.symbolOverrides = sd.symbolOverrides ?? [];
+    // Capture a deep-cloned snapshot before mutating — Undo writes this back
+    // verbatim. JSON round-trip is sufficient since symbolOverrides entries
+    // are pure data (no functions / Dates / typed arrays here).
+    const beforeOverrides = JSON.parse(JSON.stringify(sd.symbolOverrides));
     let entry = sd.symbolOverrides.find((o) => {
       const g = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
       return Array.isArray(g) && g.length === 1 && g[0]?.sessionID === ms && g[0]?.localID === ml;
@@ -91,6 +99,18 @@ export class OverrideInstanceText {
       return false;
     }
     walk(doc);
+
+    this.journal?.record(sessionId, {
+      label: 'Override instance text',
+      patches: [
+        {
+          guid: instanceGuid,
+          field: 'symbolData.symbolOverrides',
+          before: beforeOverrides,
+          after: JSON.parse(JSON.stringify(sd.symbolOverrides)),
+        },
+      ],
+    });
 
     return { ok: true };
   }

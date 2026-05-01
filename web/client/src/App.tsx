@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Download, FileUp, FolderOpen, Save } from 'lucide-react';
+import { Download, FileUp, FolderOpen, Redo2, Save, Undo2 } from 'lucide-react';
 import { Canvas } from './Canvas';
 import { Inspector } from './Inspector';
 import { ChatPanel } from './ChatPanel';
@@ -123,6 +123,26 @@ export function App() {
     setDoc(d);
   }
 
+  async function onUndo() {
+    if (!session) return;
+    try {
+      const r = await documentService.undo(session.sessionId);
+      if (r.ok) await onRefreshDoc();
+    } catch (err) {
+      console.error('undo failed', err);
+    }
+  }
+
+  async function onRedo() {
+    if (!session) return;
+    try {
+      const r = await documentService.redo(session.sessionId);
+      if (r.ok) await onRefreshDoc();
+    } catch (err) {
+      console.error('redo failed', err);
+    }
+  }
+
   useEffect(() => {
     (window as unknown as { __select?: (g: string | null) => void }).__select = (g) =>
       handleSelect(g);
@@ -130,6 +150,30 @@ export function App() {
       delete (window as unknown as { __select?: unknown }).__select;
     };
   }, []);
+
+  // Cmd/Ctrl+Z = Undo, Cmd/Ctrl+Shift+Z (and Cmd/Ctrl+Y) = Redo. Skipped
+  // when focus is in a text input — typing inside an Inspector field should
+  // get the browser's native input-undo, not whole-document undo.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent): void {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea') return;
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        void onUndo();
+      } else if ((k === 'z' && e.shiftKey) || k === 'y') {
+        e.preventDefault();
+        void onRedo();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+    // session is read inside the closures via the latest closure-captured
+    // value when the handler fires, so the effect doesn't need to re-bind
+    // every render — but the linter wants `session` listed; safe either way.
+  }, [session]);
 
   async function onMoveMany(updates: Array<{ guid: string; x: number; y: number }>) {
     if (!session) return;
@@ -257,6 +301,26 @@ export function App() {
               </SelectContent>
             </Select>
             <div className="ml-auto flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onUndo}
+                disabled={busy}
+                title="Undo (Ctrl/Cmd+Z)"
+                aria-label="Undo"
+              >
+                <Undo2 />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onRedo}
+                disabled={busy}
+                title="Redo (Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y)"
+                aria-label="Redo"
+              >
+                <Redo2 />
+              </Button>
               <Button
                 variant="secondary"
                 size="default"

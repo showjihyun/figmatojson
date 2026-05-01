@@ -10,8 +10,9 @@
 import type { SessionStore } from '../ports/SessionStore.js';
 import type { Session } from '../domain/entities/Session.js';
 import type { ComponentTextRef } from '../domain/entities/Document.js';
+import type { EditJournal } from '../ports/EditJournal.js';
 import { NotFoundError, ValidationError } from './errors.js';
-import { tokenizePath, setPath } from '../domain/path.js';
+import { tokenizePath, setPath, getPath } from '../domain/path.js';
 
 interface FsLike {
   readMessage(id: string): string;
@@ -28,6 +29,12 @@ export interface EditNodeInput {
 export class EditNode {
   constructor(
     private readonly sessionStore: SessionStore & FsLike,
+    /**
+     * Optional — when set, every successful edit pushes a journal entry
+     * so Undo/Redo can replay the inverse. The fakes in unit tests
+     * usually omit it (the journal isn't what's under test there).
+     */
+    private readonly journal?: EditJournal,
   ) {}
 
   async execute({ sessionId, nodeGuid, field, value }: EditNodeInput): Promise<{ ok: true }> {
@@ -44,6 +51,8 @@ export class EditNode {
 
     const tokens = tokenizePath(field);
     if (tokens.length === 0) throw new ValidationError('empty field path');
+    // Capture pre-mutation value for the journal — undo writes this back.
+    const before = getPath(node, tokens);
     setPath(node, tokens, value);
     this.sessionStore.writeMessage(sessionId, JSON.stringify(msg));
 
@@ -74,6 +83,11 @@ export class EditNode {
       }
       refresh(doc);
     }
+
+    this.journal?.record(sessionId, {
+      label: 'Edit',
+      patches: [{ guid: nodeGuid, field, before, after: value }],
+    });
 
     return { ok: true };
   }

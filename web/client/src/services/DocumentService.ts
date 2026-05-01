@@ -14,6 +14,15 @@ export interface UploadResult {
   nodeCount: number;
 }
 
+export interface HistoryResult {
+  ok: boolean;
+  /** Label of the entry that was applied (or null if nothing on the stack). */
+  undoneLabel?: string | null;
+  redoneLabel?: string | null;
+  past: number;
+  future: number;
+}
+
 export interface DocumentService {
   upload(file: File): Promise<UploadResult>;
   fetch(sessionId: string): Promise<unknown>;
@@ -32,6 +41,8 @@ export interface DocumentService {
     masterTextGuid: string,
     value: string,
   ): Promise<void>;
+  undo(sessionId: string): Promise<HistoryResult>;
+  redo(sessionId: string): Promise<HistoryResult>;
 }
 
 class HttpDocumentService implements DocumentService {
@@ -86,6 +97,18 @@ class HttpDocumentService implements DocumentService {
       body: JSON.stringify({ instanceGuid, masterTextGuid, value }),
     });
     if (!r.ok) throw new Error(`override failed: ${r.status} ${await r.text()}`);
+  }
+
+  async undo(sessionId: string): Promise<HistoryResult> {
+    const r = await fetch(`/api/undo/${sessionId}`, { method: 'POST' });
+    if (!r.ok) throw new Error(`undo failed: ${r.status} ${await r.text()}`);
+    return r.json();
+  }
+
+  async redo(sessionId: string): Promise<HistoryResult> {
+    const r = await fetch(`/api/redo/${sessionId}`, { method: 'POST' });
+    if (!r.ok) throw new Error(`redo failed: ${r.status} ${await r.text()}`);
+    return r.json();
   }
 }
 

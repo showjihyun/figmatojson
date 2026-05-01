@@ -26,6 +26,7 @@ import { FsAssetServer } from './adapters/driven/FsAssetServer.js';
 import { InProcessTools } from './adapters/driven/InProcessTools.js';
 import { AnthropicChat } from './adapters/driven/AnthropicChat.js';
 import { AgentSdkChat } from './adapters/driven/AgentSdkChat.js';
+import { InMemoryEditJournal } from './adapters/driven/InMemoryEditJournal.js';
 import { registerRoutes } from './adapters/driving/http/index.js';
 import { UploadFig } from '../core/application/UploadFig.js';
 import { EditNode } from '../core/application/EditNode.js';
@@ -36,6 +37,8 @@ import { SaveSnapshot } from '../core/application/SaveSnapshot.js';
 import { LoadSnapshot } from '../core/application/LoadSnapshot.js';
 import { ServeAsset } from '../core/application/ServeAsset.js';
 import { RunChatTurn } from '../core/application/RunChatTurn.js';
+import { Undo } from '../core/application/Undo.js';
+import { Redo } from '../core/application/Redo.js';
 import type { Session } from '../core/domain/entities/Session.js';
 import type { ComponentTextRef } from '../core/domain/entities/Document.js';
 
@@ -50,6 +53,7 @@ const repacker = new KiwiCodec(sessionStore);
 const assetServer = new FsAssetServer(sessionStore);
 const anthropicChat = new AnthropicChat();
 const agentSdkChat = new AgentSdkChat();
+const editJournal = new InMemoryEditJournal();
 // Forward declaration — applyTool is defined later in this file. The closure
 // captures a holder object so the assignment below is visible at call time
 // without TS narrowing it to `never` after init.
@@ -60,9 +64,9 @@ const tools = new InProcessTools(sessionStore, async (s, name, input) => {
   await applyToolHolder.fn(s, name, input);
 });
 const uploadFig = new UploadFig(sessionStore);
-const editNodeUseCase = new EditNode(sessionStore);
-const overrideInstanceText = new OverrideInstanceText(sessionStore);
-const resizeNodeUseCase = new ResizeNode(sessionStore);
+const editNodeUseCase = new EditNode(sessionStore, editJournal);
+const overrideInstanceText = new OverrideInstanceText(sessionStore, editJournal);
+const resizeNodeUseCase = new ResizeNode(sessionStore, editJournal);
 const exportFigUseCase = new ExportFig(sessionStore, repacker);
 const saveSnapshotUseCase = new SaveSnapshot(sessionStore);
 const loadSnapshotUseCase = new LoadSnapshot(sessionStore);
@@ -71,6 +75,8 @@ const runChatTurn = new RunChatTurn(sessionStore, tools, {
   subscription: agentSdkChat,
   apiKey: anthropicChat,
 });
+const undoUseCase = new Undo(sessionStore, editJournal);
+const redoUseCase = new Redo(sessionStore, editJournal);
 
 // `toHttpError` lives in adapters/driving/http/errors.ts now —
 // each route file imports it locally.
@@ -94,6 +100,8 @@ registerRoutes(app, {
   loadSnapshot: loadSnapshotUseCase,
   serveAsset: serveAssetUseCase,
   runChatTurn,
+  undo: undoUseCase,
+  redo: redoUseCase,
 });
 
 
