@@ -39,6 +39,21 @@ import { findById } from '../core/domain/tree.js';
 import { sniffImageMime as sniffImageMimeCore } from '../core/domain/image.js';
 import { summarizeDoc as summarizeDocCore } from '../core/domain/summary.js';
 import { FsSessionStore } from './adapters/driven/FsSessionStore.js';
+import { KiwiCodec } from './adapters/driven/KiwiCodec.js';
+import { FsAssetServer } from './adapters/driven/FsAssetServer.js';
+import { InProcessTools } from './adapters/driven/InProcessTools.js';
+import { AnthropicChat } from './adapters/driven/AnthropicChat.js';
+import { AgentSdkChat } from './adapters/driven/AgentSdkChat.js';
+import { UploadFig } from '../core/application/UploadFig.js';
+import { EditNode } from '../core/application/EditNode.js';
+import { OverrideInstanceText } from '../core/application/OverrideInstanceText.js';
+import { ResizeNode } from '../core/application/ResizeNode.js';
+import { ExportFig } from '../core/application/ExportFig.js';
+import { SaveSnapshot } from '../core/application/SaveSnapshot.js';
+import { LoadSnapshot } from '../core/application/LoadSnapshot.js';
+import { ServeAsset } from '../core/application/ServeAsset.js';
+import { RunChatTurn } from '../core/application/RunChatTurn.js';
+import { NotFoundError, ValidationError, AuthRequiredError } from '../core/application/errors.js';
 import { toClientNode, buildSymbolIndex } from '../core/domain/clientNode.js';
 import type { Session as CoreSession } from '../core/domain/entities/Session.js';
 import type { DocumentNode as CoreDocumentNode } from '../core/domain/entities/Document.js';
@@ -66,10 +81,50 @@ import type { ComponentTextRef } from '../core/domain/entities/Document.js';
 // `VECTOR_TYPES`, `toClientNode`, `toClientChildForRender`, `collectTexts`,
 // `collectTextOverridesFromInstance` all live in core/domain/clientNode.ts now.
 
+// ─── Composition root: adapters + use cases ──────────────────────────────
+//
+// Single instances live for the process lifetime. The session-store is
+// stateful (in-memory id→Session map); every other adapter is stateless.
+// `applyToolFn` is wired below — it threads the legacy `applyTool` function
+// through the InProcessTools dispatcher until phase 5 replaces it.
 const sessionStore = new FsSessionStore();
-// Legacy alias — exposes the adapter's underlying map so the existing route
-// handlers (which still call `sessions.get`/`sessions.set`) keep working
-// during the phase-3→5 migration. New code should use `sessionStore` directly.
+const repacker = new KiwiCodec(sessionStore);
+const assetServer = new FsAssetServer(sessionStore);
+const anthropicChat = new AnthropicChat();
+const agentSdkChat = new AgentSdkChat();
+// Forward declaration — applyTool is defined later in this file. The closure
+// captures a holder object so the assignment below is visible at call time
+// without TS narrowing it to `never` after init.
+type ApplyToolFn = (s: Session, name: string, input: Record<string, unknown>) => Promise<void>;
+const applyToolHolder: { fn: ApplyToolFn | null } = { fn: null };
+const tools = new InProcessTools(sessionStore, async (s, name, input) => {
+  if (!applyToolHolder.fn) throw new Error('applyTool not wired yet');
+  await applyToolHolder.fn(s, name, input);
+});
+const uploadFig = new UploadFig(sessionStore);
+const editNodeUseCase = new EditNode(sessionStore);
+const overrideInstanceText = new OverrideInstanceText(sessionStore);
+const resizeNodeUseCase = new ResizeNode(sessionStore);
+const exportFigUseCase = new ExportFig(sessionStore, repacker);
+const saveSnapshotUseCase = new SaveSnapshot(sessionStore);
+const loadSnapshotUseCase = new LoadSnapshot(sessionStore);
+const serveAssetUseCase = new ServeAsset(assetServer);
+const runChatTurn = new RunChatTurn(sessionStore, tools, {
+  subscription: agentSdkChat,
+  apiKey: anthropicChat,
+});
+
+/** Translate use-case errors into the right Hono response. */
+function toHttpError(c: Context, err: unknown): Response {
+  if (err instanceof NotFoundError) return c.json({ error: err.message }, 404);
+  if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+  if (err instanceof AuthRequiredError) return c.json({ error: err.message }, 401);
+  return c.json({ error: (err as Error).message }, 500);
+}
+
+// Legacy alias — exposes the adapter's underlying map so any straggler
+// route handlers (chat path) that still call `sessions.get`/`sessions.set`
+// keep working until phase 5.
 const sessions = sessionStore.rawMap();
 
 const app = new Hono();
@@ -85,31 +140,12 @@ app.post('/api/upload', async (c) => {
   }
   const bytes = new Uint8Array(await file.arrayBuffer());
   try {
-    const session = await sessionStore.create(bytes, file.name);
-    const doc = session.documentJson;
-    const pageCount = Array.isArray(doc.children)
-      ? doc.children.filter((n: any) => n.type === 'CANVAS').length
-      : 0;
-    return c.json({
-      sessionId: session.id,
-      origName: session.origName,
-      pageCount,
-      // nodeCount is not exposed via the SessionStore port (no consumer
-      // outside upload). For now we count from the documentJson tree;
-      // when a `Stats` port lands we'll replace this with a structured value.
-      nodeCount: countNodes(doc),
-    });
+    const out = await uploadFig.execute({ bytes, origName: file.name });
+    return c.json(out);
   } catch (err) {
-    return c.json({ error: (err as Error).message }, 500);
+    return toHttpError(c, err);
   }
 });
-
-function countNodes(n: any): number {
-  if (!n || typeof n !== 'object') return 0;
-  let count = 1;
-  if (Array.isArray(n.children)) for (const c of n.children) count += countNodes(c);
-  return count;
-}
 
 app.get('/api/doc/:id', (c) => {
   const s = sessions.get(c.req.param('id'));
@@ -131,103 +167,62 @@ app.get('/api/doc/:id', (c) => {
 // ArrayLike<number>, so the core impl works over the same shape.
 const sniffImageMime = (buf: Buffer): string => sniffImageMimeCore(buf);
 
-app.get('/api/asset/:id/:hash', (c) => {
-  const s = sessions.get(c.req.param('id'));
-  if (!s) return c.json({ error: 'session not found' }, 404);
-  const hash = c.req.param('hash');
-  // Reject anything that isn't a 40-char lowercase hex string — defensive
-  // against path traversal even though we then join under a fixed prefix.
-  if (!/^[0-9a-f]{40}$/.test(hash)) return c.json({ error: 'invalid hash' }, 400);
-  const assetPath = join(s.dir, 'extracted', '01_container', 'images', hash);
-  if (!existsSync(assetPath)) return c.json({ error: 'asset not found' }, 404);
-  const buf = readFileSync(assetPath);
-  return c.body(buf as unknown as ArrayBuffer, 200, {
-    'Content-Type': sniffImageMime(buf),
-    'Content-Length': String(buf.byteLength),
-    'Cache-Control': 'private, max-age=3600',
-  });
+app.get('/api/asset/:id/:hash', async (c) => {
+  try {
+    const asset = await serveAssetUseCase.execute({
+      sessionId: c.req.param('id'),
+      hashHex: c.req.param('hash'),
+    });
+    return c.body(asset.bytes as unknown as ArrayBuffer, 200, {
+      'Content-Type': asset.mime,
+      'Content-Length': String(asset.bytes.byteLength),
+      'Cache-Control': 'private, max-age=3600',
+    });
+  } catch (err) {
+    return toHttpError(c, err);
+  }
 });
 
 // `tokenizePath` and `setPath` live in core/domain/path.ts now.
 
 app.patch('/api/doc/:id', async (c) => {
-  const s = sessions.get(c.req.param('id'));
-  if (!s) return c.json({ error: 'session not found' }, 404);
-  const body = (await c.req.json()) as {
-    nodeGuid: string;
-    field: string;          // e.g. "textData.characters" or "fillPaints[0].color.r"
-    value: unknown;
-  };
-  const messagePath = join(s.dir, 'extracted', '04_decoded', 'message.json');
-  if (!existsSync(messagePath)) return c.json({ error: 'message.json missing' }, 500);
-  const raw = readFileSync(messagePath, 'utf8');
-  const msg = JSON.parse(raw) as { nodeChanges?: Array<Record<string, unknown>> };
-  const node = msg.nodeChanges?.find(
-    (n) => `${(n.guid as { sessionID: number; localID: number })?.sessionID}:${(n.guid as { sessionID: number; localID: number })?.localID}` === body.nodeGuid,
-  );
-  if (!node) return c.json({ error: `node ${body.nodeGuid} not found` }, 404);
-
-  const tokens = tokenizePath(body.field);
-  if (tokens.length === 0) return c.json({ error: 'empty field path' }, 400);
-  setPath(node, tokens, body.value);
-  writeFileSync(messagePath, JSON.stringify(msg));
-
-  // Mirror the patch on the in-memory client doc so subsequent /doc fetches reflect the edit.
-  function walk(n: Record<string, unknown>): boolean {
-    const guid = n.guid as { sessionID: number; localID: number } | undefined;
-    if (guid && `${guid.sessionID}:${guid.localID}` === body.nodeGuid) {
-      setPath(n, tokens, body.value);
-      return true;
-    }
-    const children = n.children as Array<Record<string, unknown>> | undefined;
-    if (Array.isArray(children)) {
-      for (const c of children) if (walk(c)) return true;
-    }
-    return false;
+  try {
+    const body = (await c.req.json()) as {
+      nodeGuid: string;
+      field: string;
+      value: unknown;
+    };
+    const out = await editNodeUseCase.execute({
+      sessionId: c.req.param('id'),
+      nodeGuid: body.nodeGuid,
+      field: body.field,
+      value: body.value,
+    });
+    return c.json(out);
+  } catch (err) {
+    return toHttpError(c, err);
   }
-  walk(s.documentJson as unknown as Record<string, unknown>);
-
-  // If the patched field is textData.characters on a master text node, update
-  // every INSTANCE's `_componentTexts[]` snapshot whose entry references that
-  // master GUID. This keeps the inspector's component-text list fresh after
-  // an edit (otherwise it shows the pre-edit value until a re-upload).
-  if (body.field === 'textData.characters' && typeof body.value === 'string') {
-    const newChars = body.value;
-    function refreshInstances(n: Record<string, unknown>): void {
-      const refs = n._componentTexts as ComponentTextRef[] | undefined;
-      if (Array.isArray(refs)) {
-        for (const r of refs) {
-          if (r.guid === body.nodeGuid) r.characters = newChars;
-        }
-      }
-      const ch = n.children as Array<Record<string, unknown>> | undefined;
-      if (Array.isArray(ch)) for (const c of ch) refreshInstances(c);
-    }
-    refreshInstances(s.documentJson as unknown as Record<string, unknown>);
-  }
-
-  return c.json({ ok: true });
 });
 
 app.post('/api/save/:id', async (c) => {
-  const s = sessions.get(c.req.param('id'));
-  if (!s) return c.json({ error: 'session not found' }, 404);
-  const outFig = join(s.dir, 'out.fig');
-  const result = await repack(join(s.dir, 'extracted'), outFig, { mode: 'json' });
-  const bytes = readFileSync(outFig);
-  // Content-Disposition filename: HTTP headers are ByteString (≤ 0xFF). For
-  // non-ASCII filenames (Korean / Chinese / etc.), use RFC 5987 filename*
-  // encoding plus an ASCII fallback.
-  const baseAscii = s.origName.replace(/\.fig$/, '').replace(/[^\x20-\x7e]/g, '_');
-  const baseUtf8 = encodeURIComponent(s.origName.replace(/\.fig$/, ''));
-  return new Response(bytes, {
-    headers: {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition':
-        `attachment; filename="${baseAscii}-edited.fig"; filename*=UTF-8''${baseUtf8}-edited.fig`,
-      'X-Repack-Bytes': String(result.outBytes ?? bytes.byteLength),
-    },
-  });
+  try {
+    const out = await exportFigUseCase.execute({ sessionId: c.req.param('id') });
+    // Content-Disposition filename: HTTP headers are ByteString (≤ 0xFF). For
+    // non-ASCII filenames (Korean / Chinese / etc.), use RFC 5987 filename*
+    // encoding plus an ASCII fallback.
+    const baseAscii = out.origName.replace(/\.fig$/, '').replace(/[^\x20-\x7e]/g, '_');
+    const baseUtf8 = encodeURIComponent(out.origName.replace(/\.fig$/, ''));
+    return new Response(out.bytes as unknown as ArrayBuffer, {
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition':
+          `attachment; filename="${baseAscii}-edited.fig"; filename*=UTF-8''${baseUtf8}-edited.fig`,
+        'X-Repack-Bytes': String(out.bytes.byteLength),
+      },
+    });
+  } catch (err) {
+    return toHttpError(c, err);
+  }
 });
 
 // ─── Per-instance text override (no master mutation) ────────────────────────
@@ -236,69 +231,22 @@ app.post('/api/save/:id', async (c) => {
 // guidPath leads to the master text. Only THIS instance's render changes;
 // other instances of the same master are untouched.
 app.post('/api/instance-override/:id', async (c) => {
-  const s = sessions.get(c.req.param('id'));
-  if (!s) return c.json({ error: 'session not found' }, 404);
-  const body = (await c.req.json()) as {
-    instanceGuid: string;
-    masterTextGuid: string;
-    value: string;
-  };
-  const messagePath = join(s.dir, 'extracted', '04_decoded', 'message.json');
-  if (!existsSync(messagePath)) return c.json({ error: 'message.json missing' }, 500);
-  const raw = readFileSync(messagePath, 'utf8');
-  const msg = JSON.parse(raw) as { nodeChanges?: Array<Record<string, unknown>> };
-  const inst = msg.nodeChanges?.find((n) => {
-    const g = n.guid as { sessionID?: number; localID?: number } | undefined;
-    return g && `${g.sessionID}:${g.localID}` === body.instanceGuid;
-  });
-  if (!inst) return c.json({ error: `INSTANCE ${body.instanceGuid} not found` }, 404);
-
-  const [ms, ml] = body.masterTextGuid.split(':').map((s2) => parseInt(s2, 10));
-  if (!Number.isInteger(ms) || !Number.isInteger(ml)) {
-    return c.json({ error: `invalid masterTextGuid ${body.masterTextGuid}` }, 400);
-  }
-
-  // Ensure symbolData.symbolOverrides exists
-  inst.symbolData = (inst.symbolData ?? {}) as Record<string, unknown>;
-  const sd = inst.symbolData as { symbolOverrides?: Array<Record<string, unknown>> };
-  sd.symbolOverrides = sd.symbolOverrides ?? [];
-
-  // Find an existing override targeting this master text (single-step path)
-  let entry = sd.symbolOverrides.find((o) => {
-    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
-    return Array.isArray(guids) && guids.length === 1 && guids[0]?.sessionID === ms && guids[0]?.localID === ml;
-  });
-  if (!entry) {
-    entry = {
-      guidPath: { guids: [{ sessionID: ms, localID: ml }] },
-      textData: { characters: body.value, lines: [{ lineType: 'PLAIN', styleId: 0, indentationLevel: 0, sourceDirectionality: 'AUTO', listStartOffset: 0, isFirstLineOfList: false }] },
+  try {
+    const body = (await c.req.json()) as {
+      instanceGuid: string;
+      masterTextGuid: string;
+      value: string;
     };
-    sd.symbolOverrides.push(entry);
-  } else {
-    const td = (entry.textData ?? {}) as { characters?: string; lines?: unknown };
-    td.characters = body.value;
-    if (!td.lines) td.lines = [{ lineType: 'PLAIN', styleId: 0, indentationLevel: 0, sourceDirectionality: 'AUTO', listStartOffset: 0, isFirstLineOfList: false }];
-    entry.textData = td;
+    const out = await overrideInstanceText.execute({
+      sessionId: c.req.param('id'),
+      instanceGuid: body.instanceGuid,
+      masterTextGuid: body.masterTextGuid,
+      value: body.value,
+    });
+    return c.json(out);
+  } catch (err) {
+    return toHttpError(c, err);
   }
-  writeFileSync(messagePath, JSON.stringify(msg));
-
-  // Mirror in client doc — store an _instanceOverrides map keyed by master text guid.
-  function walk(n: Record<string, unknown>): boolean {
-    const guid = n.guid as { sessionID: number; localID: number } | undefined;
-    if (guid && `${guid.sessionID}:${guid.localID}` === body.instanceGuid) {
-      const overrides = (n._instanceOverrides ??= {}) as Record<string, string>;
-      overrides[body.masterTextGuid] = body.value;
-      return true;
-    }
-    const children = n.children as Array<Record<string, unknown>> | undefined;
-    if (Array.isArray(children)) {
-      for (const c of children) if (walk(c)) return true;
-    }
-    return false;
-  }
-  walk(s.documentJson as unknown as Record<string, unknown>);
-
-  return c.json({ ok: true });
 });
 
 // ─── Resize endpoint ────────────────────────────────────────────────────────
@@ -306,52 +254,26 @@ app.post('/api/instance-override/:id', async (c) => {
 // Atomic patch of size.{x,y} + transform.{m02,m12} so the canvas can apply a
 // single drag-end as one logical change.
 app.post('/api/resize/:id', async (c) => {
-  const s = sessions.get(c.req.param('id'));
-  if (!s) return c.json({ error: 'session not found' }, 404);
-  const body = (await c.req.json()) as {
-    nodeGuid: string;
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-  };
-  const messagePath = join(s.dir, 'extracted', '04_decoded', 'message.json');
-  if (!existsSync(messagePath)) return c.json({ error: 'message.json missing' }, 500);
-  const raw = readFileSync(messagePath, 'utf8');
-  const msg = JSON.parse(raw) as { nodeChanges?: Array<Record<string, unknown>> };
-  const node = msg.nodeChanges?.find((n) => {
-    const g = n.guid as { sessionID?: number; localID?: number } | undefined;
-    return g && `${g.sessionID}:${g.localID}` === body.nodeGuid;
-  });
-  if (!node) return c.json({ error: `node ${body.nodeGuid} not found` }, 404);
-  const transform = ((node.transform as Record<string, number> | undefined) ?? {}) as Record<string, number>;
-  transform.m02 = body.x;
-  transform.m12 = body.y;
-  // Preserve orthonormal (m00/m11=1, m01/m10=0) — minimal change.
-  if (typeof transform.m00 !== 'number') transform.m00 = 1;
-  if (typeof transform.m11 !== 'number') transform.m11 = 1;
-  if (typeof transform.m01 !== 'number') transform.m01 = 0;
-  if (typeof transform.m10 !== 'number') transform.m10 = 0;
-  node.transform = transform;
-  node.size = { x: Math.max(1, body.w), y: Math.max(1, body.h) };
-  writeFileSync(messagePath, JSON.stringify(msg));
-
-  function walk(n: Record<string, unknown>): boolean {
-    const guid = n.guid as { sessionID: number; localID: number } | undefined;
-    if (guid && `${guid.sessionID}:${guid.localID}` === body.nodeGuid) {
-      const t = (n.transform ??= {}) as Record<string, number>;
-      t.m02 = body.x; t.m12 = body.y;
-      n.size = { x: Math.max(1, body.w), y: Math.max(1, body.h) };
-      return true;
-    }
-    const children = n.children as Array<Record<string, unknown>> | undefined;
-    if (Array.isArray(children)) {
-      for (const c of children) if (walk(c)) return true;
-    }
-    return false;
+  try {
+    const body = (await c.req.json()) as {
+      nodeGuid: string;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+    };
+    const out = await resizeNodeUseCase.execute({
+      sessionId: c.req.param('id'),
+      guid: body.nodeGuid,
+      x: body.x,
+      y: body.y,
+      w: body.w,
+      h: body.h,
+    });
+    return c.json(out);
+  } catch (err) {
+    return toHttpError(c, err);
   }
-  walk(s.documentJson as unknown as Record<string, unknown>);
-  return c.json({ ok: true });
 });
 
 // ─── Save / Load editing session as a JSON snapshot ─────────────────────────
@@ -360,114 +282,40 @@ app.post('/api/resize/:id', async (c) => {
 // the entire editing state up to but excluding final .fig export. User can
 // download it, return later, and resume editing without re-uploading the
 // original .fig.
-app.get('/api/session/:id/snapshot', (c) => {
-  const s = sessions.get(c.req.param('id'));
-  if (!s) return c.json({ error: 'session not found' }, 404);
-  const messagePath = join(s.dir, 'extracted', '04_decoded', 'message.json');
-  const schemaBinPath = join(s.dir, 'extracted', '03_decompressed', 'schema.kiwi.bin');
-  const containerInfoPath = join(s.dir, 'extracted', '01_container');
-  if (!existsSync(messagePath)) return c.json({ error: 'message.json missing' }, 500);
-  // Read and base64 the binary parts so the snapshot is JSON-portable.
-  const messageJson = readFileSync(messagePath, 'utf8');
-  const schemaBin = existsSync(schemaBinPath) ? readFileSync(schemaBinPath).toString('base64') : null;
-  const archiveInfoPath = join(s.dir, 'extracted', '02_archive', '_info.json');
-  const archiveInfo = existsSync(archiveInfoPath) ? JSON.parse(readFileSync(archiveInfoPath, 'utf8')) : null;
-  // Sidecar files (meta.json, thumbnail.png, images/*) — preserve as base64
-  const sidecars: Array<{ name: string; b64: string }> = [];
-  function collect(dirPath: string, prefix: string): void {
-    if (!existsSync(dirPath)) return;
-    for (const f of readdirSync(dirPath).sort()) {
-      const p = join(dirPath, f);
-      if (statSync(p).isDirectory()) collect(p, `${prefix}${f}/`);
-      else sidecars.push({ name: `${prefix}${f}`, b64: readFileSync(p).toString('base64') });
-    }
+app.get('/api/session/:id/snapshot', async (c) => {
+  try {
+    const out = await saveSnapshotUseCase.execute({ sessionId: c.req.param('id') });
+    return c.json(out);
+  } catch (err) {
+    return toHttpError(c, err);
   }
-  collect(containerInfoPath, '');
-  return c.json({
-    version: 1,
-    origName: s.origName,
-    archiveVersion: s.archiveVersion,
-    archiveInfo,
-    schemaBinB64: schemaBin,
-    messageJson,
-    sidecars,
-  });
 });
 
 app.post('/api/session/load', async (c) => {
-  const body = (await c.req.json()) as {
-    version: number;
-    origName: string;
-    archiveVersion: number;
-    schemaBinB64: string | null;
-    messageJson: string;
-    sidecars: Array<{ name: string; b64: string }>;
-    archiveInfo?: Record<string, unknown>;
-  };
-  if (body.version !== 1) return c.json({ error: 'unsupported snapshot version' }, 400);
-  const tmpDir = mkdtempSync(join(tmpdir(), 'figrev-web-'));
   try {
-    // Recreate the extracted/ tree expected by repack --mode json.
-    const extractedDir = join(tmpDir, 'extracted');
-    const decompDir = join(extractedDir, '03_decompressed');
-    const decodedDir = join(extractedDir, '04_decoded');
-    const archiveDir = join(extractedDir, '02_archive');
-    const containerDir = join(extractedDir, '01_container');
-    for (const d of [decompDir, decodedDir, archiveDir, containerDir]) {
-      ensureDirSync(d);
-    }
-    if (body.schemaBinB64) {
-      writeFileSync(join(decompDir, 'schema.kiwi.bin'), Buffer.from(body.schemaBinB64, 'base64'));
-    }
-    writeFileSync(join(decodedDir, 'message.json'), body.messageJson);
-    writeFileSync(
-      join(archiveDir, '_info.json'),
-      JSON.stringify({ version: body.archiveVersion ?? 106, ...(body.archiveInfo ?? {}) }),
-    );
-    for (const sc of body.sidecars) {
-      const dest = join(containerDir, sc.name);
-      ensureDirSync(dirname(dest));
-      writeFileSync(dest, Buffer.from(sc.b64, 'base64'));
-    }
-
-    // Rebuild the in-memory documentJson from message.json by decoding through
-    // the existing pipeline. Easiest: parse message.json + reuse buildTree.
-    const messageObj = JSON.parse(body.messageJson, (_, v) => {
-      if (v && typeof v === 'object' && typeof (v as Record<string, unknown>).__bytes === 'string') {
-        return Uint8Array.from(Buffer.from((v as { __bytes: string }).__bytes, 'base64'));
-      }
-      return v;
-    });
-    const tree = buildTree(messageObj as never);
-    if (!tree.document) throw new Error('snapshot has no DOCUMENT root');
-    const blobs = (messageObj as { blobs?: Array<{ bytes: Uint8Array }> }).blobs ?? [];
-    const symbolIndex = new Map<string, TreeNode>();
-    for (const node of tree.allNodes.values()) symbolIndex.set(node.guidStr, node);
-    const documentJson = toClientNode(tree.document, blobs, symbolIndex);
-
-    const id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    sessions.set(id, {
-      id,
-      dir: tmpDir,
+    const body = (await c.req.json()) as {
+      version: number;
+      origName: string;
+      archiveVersion: number;
+      schemaBinB64: string | null;
+      messageJson: string;
+      sidecars: Array<{ name: string; b64: string }>;
+      archiveInfo?: Record<string, unknown>;
+    };
+    const out = await loadSnapshotUseCase.execute({
+      version: body.version as 1,
       origName: body.origName,
       archiveVersion: body.archiveVersion,
-      documentJson,
+      schemaBinB64: body.schemaBinB64,
+      messageJson: body.messageJson,
+      sidecars: body.sidecars,
+      archiveInfo: body.archiveInfo ?? null,
     });
-    return c.json({
-      sessionId: id,
-      origName: body.origName,
-      pageCount: tree.document.children.filter((n) => n.type === 'CANVAS').length,
-      nodeCount: tree.allNodes.size,
-    });
+    return c.json(out);
   } catch (err) {
-    rmSync(tmpDir, { recursive: true, force: true });
-    return c.json({ error: (err as Error).message }, 500);
+    return toHttpError(c, err);
   }
 });
-
-function ensureDirSync(p: string): void {
-  if (!existsSync(p)) mkdirSync(p, { recursive: true });
-}
 
 // ─── Claude AI chat proxy ──────────────────────────────────────────────────
 //
@@ -475,164 +323,47 @@ function ensureDirSync(p: string): void {
 // Server makes a tool-using call to Claude with our editing primitives.
 // The model decides what to mutate; we apply each tool call by reusing the
 // existing PATCH / instance-override / resize handlers.
+const ALLOWED_MODELS = new Set([
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5-20251001',
+]);
+
 app.post('/api/chat/:id', async (c) => {
-  const s = sessions.get(c.req.param('id'));
-  if (!s) return c.json({ error: 'session not found' }, 404);
-  const body = (await c.req.json()) as {
-    messages: Array<{ role: 'user' | 'assistant'; content: string }>;
-    selectedGuid?: string | null;
-    model?: string;
-    authMode?: 'subscription' | 'api-key';
-  };
-  const authMode = body.authMode === 'api-key' ? 'api-key' : 'subscription';
+  try {
+    const body = (await c.req.json()) as {
+      messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+      selectedGuid?: string | null;
+      model?: string;
+      authMode?: 'subscription' | 'api-key';
+    };
+    const authMode: 'subscription' | 'api-key' =
+      body.authMode === 'api-key' ? 'api-key' : 'subscription';
+    const model =
+      body.model && ALLOWED_MODELS.has(body.model) ? body.model : 'claude-opus-4-6';
 
-  // Whitelist allowed models
-  const ALLOWED = new Set([
-    'claude-opus-4-7',
-    'claude-opus-4-6',
-    'claude-sonnet-4-6',
-    'claude-haiku-4-5-20251001',
-  ]);
-  const model = body.model && ALLOWED.has(body.model) ? body.model : 'claude-opus-4-6';
-
-  // Subscription mode: use the Claude Agent SDK which auto-discovers the
-  // local Claude Code credentials (~/.claude/), so no API key is needed.
-  // Recommended default — works out of the box for users running this PoC
-  // alongside Claude Code on their machine.
-  if (authMode === 'subscription') {
-    return runSubscriptionChat(c, s, body.messages, body.selectedGuid ?? null, model);
-  }
-
-  // API-key mode (legacy): require the user-supplied key in the header.
-  const apiKey = c.req.header('x-anthropic-key') ?? '';
-  if (!apiKey.startsWith('sk-ant-')) {
-    return c.json({ error: 'missing or invalid x-anthropic-key header' }, 401);
-  }
-  const Anthropic = (await import('@anthropic-ai/sdk')).default;
-  const client = new Anthropic({ apiKey });
-
-  // Build a compact context of the current document — top-level pages + the
-  // selected node's relevant fields. (Sending the whole doc is too large.)
-  const summary = summarizeDocCore(s.documentJson, body.selectedGuid ?? null);
-
-  const tools = [
-    {
-      name: 'set_text',
-      description:
-        'Set the textData.characters of a TEXT node. Affects every instance that references this master.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          guid: { type: 'string', description: 'Target node GUID like "26:269".' },
-          value: { type: 'string', description: 'New text content.' },
-        },
-        required: ['guid', 'value'],
-      },
-    },
-    {
-      name: 'override_instance_text',
-      description:
-        'Set a per-instance text override. Mutates only the given INSTANCE; the master stays intact.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          instanceGuid: { type: 'string' },
-          masterTextGuid: { type: 'string' },
-          value: { type: 'string' },
-        },
-        required: ['instanceGuid', 'masterTextGuid', 'value'],
-      },
-    },
-    {
-      name: 'set_position',
-      description: 'Move a node by setting its transform.m02 (x) and transform.m12 (y).',
-      input_schema: {
-        type: 'object',
-        properties: {
-          guid: { type: 'string' },
-          x: { type: 'number' },
-          y: { type: 'number' },
-        },
-        required: ['guid', 'x', 'y'],
-      },
-    },
-    {
-      name: 'set_size',
-      description: 'Resize a node by setting size.x (width) and size.y (height).',
-      input_schema: {
-        type: 'object',
-        properties: {
-          guid: { type: 'string' },
-          w: { type: 'number' },
-          h: { type: 'number' },
-        },
-        required: ['guid', 'w', 'h'],
-      },
-    },
-    {
-      name: 'set_fill_color',
-      description:
-        'Set fillPaints[0].color RGBA channels (each 0..1). Use for changing a frame/text fill.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          guid: { type: 'string' },
-          r: { type: 'number' },
-          g: { type: 'number' },
-          b: { type: 'number' },
-          a: { type: 'number' },
-        },
-        required: ['guid', 'r', 'g', 'b', 'a'],
-      },
-    },
-  ];
-
-  // Run the agent loop: up to 5 turns of tool calls.
-  const conversation: Anthropic.MessageParam[] = body.messages.map((m) => ({
-    role: m.role,
-    content: m.content,
-  }));
-  const actions: Array<{ tool: string; input: unknown }> = [];
-  let assistantText = '';
-  for (let turn = 0; turn < 5; turn++) {
-    const response = await client.messages.create({
-      model,
-      max_tokens: 1024,
-      system: `You are a design assistant editing a Figma file via tool calls.
-Document summary:
-${summary}
-Use the tools to make the user's requested edits. Be concise.`,
-      tools: tools as never,
-      messages: conversation,
-    });
-    // Extract text + tool_use
-    const toolUses: Anthropic.ToolUseBlock[] = [];
-    for (const block of response.content) {
-      if (block.type === 'text') assistantText += block.text;
-      else if (block.type === 'tool_use') toolUses.push(block);
-    }
-    if (toolUses.length === 0) break;
-    // Apply each tool call locally and produce tool_result blocks
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const tu of toolUses) {
-      try {
-        await applyTool(s, tu.name, tu.input as Record<string, unknown>);
-        actions.push({ tool: tu.name, input: tu.input });
-        toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: 'ok' });
-      } catch (err) {
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: tu.id,
-          content: `error: ${(err as Error).message}`,
-          is_error: true,
-        });
+    let apiKey: string | undefined;
+    if (authMode === 'api-key') {
+      const headerKey = c.req.header('x-anthropic-key') ?? '';
+      if (!headerKey.startsWith('sk-ant-')) {
+        return c.json({ error: 'missing or invalid x-anthropic-key header' }, 401);
       }
+      apiKey = headerKey;
     }
-    conversation.push({ role: 'assistant', content: response.content });
-    conversation.push({ role: 'user', content: toolResults });
-    if (response.stop_reason === 'end_turn') break;
+
+    const out = await runChatTurn.execute({
+      sessionId: c.req.param('id'),
+      messages: body.messages,
+      selectedGuid: body.selectedGuid ?? null,
+      model,
+      authMode,
+      apiKey,
+    });
+    return c.json({ assistantText: out.assistantText, actions: out.actions });
+  } catch (err) {
+    return toHttpError(c, err);
   }
-  return c.json({ assistantText, actions });
 });
 
 // `summarizeDoc` and `findById` live in core/domain/summary.ts and
@@ -759,6 +490,7 @@ ${summary}`,
   return c.json({ assistantText: assistantText || '(no text)', actions });
 }
 
+applyToolHolder.fn = applyTool;
 async function applyTool(s: Session, name: string, input: Record<string, unknown>): Promise<void> {
   // Dispatch to the local handlers — same code paths that the inspector uses.
   // We bypass HTTP here for efficiency.
