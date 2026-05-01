@@ -139,4 +139,45 @@ describe('repack round-trip', () => {
     expect(result.comparison?.nodeCountMatch).toBe(true);
     expect(result.comparison?.schemaDefCountMatch).toBe(true);
   });
+
+  it('json mode: user-level text edit survives extract → edit → repack → re-extract', async () => {
+    // Tier 1 핵심 시나리오: AI/사용자가 message.json 의 텍스트를 수정한 후
+    // .fig 로 repack → 재추출 시 변경된 텍스트가 보존되어야 함.
+    const fs = await import('node:fs');
+    // 1. extract sample → message.json
+    const c = loadContainer(SAMPLE);
+    const d = decodeFigCanvas(c.canvasFig);
+    const intOpts = { enabled: true, dir: join(tmp, 'extracted'), includeFullMessage: true, minify: true };
+    dumpStage4Decoded(intOpts, d);
+
+    const messageJsonPath = join(tmp, 'extracted', '04_decoded', 'message.json');
+    const original = fs.readFileSync(messageJsonPath, 'utf8');
+
+    // 2. 텍스트 한 군데 편집 — "Heading" → "T1_EDIT_OK"
+    const target = '"Heading"';
+    const replacement = '"T1_EDIT_OK"';
+    expect(original.includes(target)).toBe(true);
+    const idx = original.indexOf(target);
+    const edited = original.slice(0, idx) + replacement + original.slice(idx + target.length);
+    fs.writeFileSync(messageJsonPath, edited);
+
+    // 3. repack with json mode → produces .fig
+    await repack(join(tmp, 'extracted'), join(tmp, 'rj-edit.fig'), {
+      mode: 'json',
+      originalFig: SAMPLE,
+    });
+
+    // 4. re-extract the resulting .fig and verify edit survived
+    const c2 = loadContainer(join(tmp, 'rj-edit.fig'));
+    const d2 = decodeFigCanvas(c2.canvasFig);
+    const intOpts2 = { enabled: true, dir: join(tmp, 'extracted2'), includeFullMessage: true, minify: true };
+    dumpStage4Decoded(intOpts2, d2);
+
+    const reExtracted = fs.readFileSync(join(tmp, 'extracted2', '04_decoded', 'message.json'), 'utf8');
+    expect(reExtracted.includes('"T1_EDIT_OK"')).toBe(true);
+    // The original "Heading" count decreased by 1 (we changed 1 occurrence)
+    const originalCount = (original.match(/"Heading"/g) ?? []).length;
+    const newCount = (reExtracted.match(/"Heading"/g) ?? []).length;
+    expect(newCount).toBe(originalCount - 1);
+  });
 });
