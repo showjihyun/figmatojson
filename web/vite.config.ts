@@ -12,6 +12,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': resolve(__dirname, 'client/src'),
+      '@core': resolve(__dirname, 'core'),
     },
   },
   server: {

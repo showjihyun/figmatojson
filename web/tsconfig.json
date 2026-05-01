@@ -15,7 +15,8 @@
     "allowImportingTsExtensions": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["client/src/*"]
+      "@/*": ["client/src/*"],
+      "@core/*": ["core/*"]
     }
   },
   "include": ["server/**/*", "client/**/*"]
