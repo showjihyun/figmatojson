@@ -139,6 +139,21 @@ export function App() {
     }
   }
 
+  async function onResizeMany(
+    updates: Array<{ guid: string; x: number; y: number; w: number; h: number }>,
+  ) {
+    if (!session) return;
+    try {
+      // Sequential — backend mutates a single message.json, same shape as onMoveMany.
+      for (const u of updates) {
+        await resizeNode(session.sessionId, u.guid, u.x, u.y, u.w, u.h);
+      }
+      onRefreshDoc();
+    } catch (err) {
+      console.error('group resize patch failed', err);
+    }
+  }
+
   const pages = doc?.children?.filter((c: any) => c.type === 'CANVAS') ?? [];
   const currentPage = pages[pageIdx];
 
@@ -264,6 +279,7 @@ export function App() {
               onSelect={handleSelect}
               onMoveMany={onMoveMany}
               onResize={onResize}
+              onResizeMany={onResizeMany}
             />
           ) : (
             <div style={{ padding: 32, color: '#888' }}>
