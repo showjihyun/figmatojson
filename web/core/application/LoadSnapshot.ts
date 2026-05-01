@@ -72,6 +72,11 @@ export class LoadSnapshot {
         ensureDirSync(dirname(dest));
         writeFileSync(dest, Buffer.from(sc.b64, 'base64'));
       }
+      // Restore the undo journal if the snapshot carried one — FsEditJournal
+      // lazy-hydrates from this file on first access against the new sessionId.
+      if (snapshot.historyJson) {
+        writeFileSync(join(dir, '.history.json'), snapshot.historyJson);
+      }
 
       const messageObj = JSON.parse(snapshot.messageJson, (_, v) => {
         if (v && typeof v === 'object' && typeof (v as Record<string, unknown>).__bytes === 'string') {

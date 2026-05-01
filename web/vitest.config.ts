@@ -20,7 +20,11 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['client/**/*.test.{ts,tsx}', 'core/**/*.test.{ts,tsx}'],
+    include: [
+      'client/**/*.test.{ts,tsx}',
+      'core/**/*.test.{ts,tsx}',
+      'server/**/*.test.{ts,tsx}',
+    ],
     // jsdom is opt-in per file via `// @vitest-environment jsdom`;
     // pure unit tests (multiResize, EditNode) run faster in node.
     environment: 'node',

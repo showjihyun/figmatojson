@@ -33,6 +33,12 @@ export interface SnapshotV1 {
   schemaBinB64: string | null;
   messageJson: string;
   sidecars: Array<{ name: string; b64: string }>;
+  /**
+   * Serialized FsEditJournal contents (`.history.json` from the session
+   * dir) — null when the user hasn't made any undoable edits yet. Lets a
+   * loaded snapshot resume with the same undo stack.
+   */
+  historyJson?: string | null;
 }
 
 export class SaveSnapshot {
@@ -57,6 +63,11 @@ export class SaveSnapshot {
       ? (JSON.parse(readFileSync(archiveInfoPath, 'utf8')) as Record<string, unknown>)
       : null;
 
+    // FsEditJournal persists per-session under `<dir>/.history.json`.
+    // Including it in the snapshot lets undo/redo travel with a saved session.
+    const historyPath = this.sessionStore.resolvePath(sessionId, '.history.json');
+    const historyJson = existsSync(historyPath) ? readFileSync(historyPath, 'utf8') : null;
+
     const sidecars: Array<{ name: string; b64: string }> = [];
     function collect(dirPath: string, prefix: string): void {
       if (!existsSync(dirPath)) return;
@@ -76,6 +87,7 @@ export class SaveSnapshot {
       schemaBinB64,
       messageJson,
       sidecars,
+      historyJson,
     };
   }
 }

@@ -22,6 +22,7 @@ export function registerSnapshotRoutes(app: Hono, deps: Deps): void {
         messageJson: string;
         sidecars: Array<{ name: string; b64: string }>;
         archiveInfo?: Record<string, unknown>;
+        historyJson?: string | null;
       };
       const out = await deps.loadSnapshot.execute({
         version: body.version as 1,
@@ -31,6 +32,7 @@ export function registerSnapshotRoutes(app: Hono, deps: Deps): void {
         messageJson: body.messageJson,
         sidecars: body.sidecars,
         archiveInfo: body.archiveInfo ?? null,
+        historyJson: body.historyJson ?? null,
       });
       return c.json(out);
     } catch (err) {
