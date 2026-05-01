@@ -33,6 +33,13 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const figFileInputRef = useRef<HTMLInputElement>(null);
   const sessionFileInputRef = useRef<HTMLInputElement>(null);
+  // Serialization queue for move/resize batches. The server mutates a single
+  // message.json file, so two concurrent batches can interleave their
+  // per-axis PATCHes (A.m02 → B.m02 → B.m12 → A.m12) and leave nodes with
+  // mixed coordinates. Chaining batches through one promise eliminates that
+  // race entirely. Inspector edits go through a different code path (debounced
+  // usePatch in Inspector.tsx), so they don't share this queue.
+  const moveQueue = useRef<Promise<void>>(Promise.resolve());
 
   function handleSelect(guid: string | null, mode: 'replace' | 'toggle' = 'replace') {
     setSelectedGuids((prev) => {
@@ -131,41 +138,51 @@ export function App() {
 
   async function onMoveMany(updates: Array<{ guid: string; x: number; y: number }>) {
     if (!session) return;
-    try {
-      // Sequential PATCH per node — could parallelize but the backend mutates
-      // a single message.json file so we keep it serial for safety.
-      for (const u of updates) {
-        await patchNode(session.sessionId, u.guid, 'transform.m02', u.x);
-        await patchNode(session.sessionId, u.guid, 'transform.m12', u.y);
+    const sid = session.sessionId;
+    moveQueue.current = moveQueue.current.then(async () => {
+      try {
+        for (const u of updates) {
+          await patchNode(sid, u.guid, 'transform.m02', u.x);
+          await patchNode(sid, u.guid, 'transform.m12', u.y);
+        }
+        onRefreshDoc();
+      } catch (err) {
+        console.error('group move patch failed', err);
       }
-      onRefreshDoc();
-    } catch (err) {
-      console.error('group move patch failed', err);
-    }
+    });
+    await moveQueue.current;
   }
 
   async function onResize(guid: string, x: number, y: number, w: number, h: number) {
     if (!session) return;
-    try {
-      await resizeNode(session.sessionId, guid, x, y, w, h);
-      onRefreshDoc();
-    } catch (err) {
-      console.error('resize patch failed', err);
-    }
+    const sid = session.sessionId;
+    moveQueue.current = moveQueue.current.then(async () => {
+      try {
+        await resizeNode(sid, guid, x, y, w, h);
+        onRefreshDoc();
+      } catch (err) {
+        console.error('resize patch failed', err);
+      }
+    });
+    await moveQueue.current;
   }
 
   async function onResizeMany(
     updates: Array<{ guid: string; x: number; y: number; w: number; h: number }>,
   ) {
     if (!session) return;
-    try {
-      for (const u of updates) {
-        await resizeNode(session.sessionId, u.guid, u.x, u.y, u.w, u.h);
+    const sid = session.sessionId;
+    moveQueue.current = moveQueue.current.then(async () => {
+      try {
+        for (const u of updates) {
+          await resizeNode(sid, u.guid, u.x, u.y, u.w, u.h);
+        }
+        onRefreshDoc();
+      } catch (err) {
+        console.error('group resize patch failed', err);
       }
-      onRefreshDoc();
-    } catch (err) {
-      console.error('group resize patch failed', err);
-    }
+    });
+    await moveQueue.current;
   }
 
   const pages = doc?.children?.filter((c: any) => c.type === 'CANVAS') ?? [];
