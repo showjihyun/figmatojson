@@ -22,11 +22,18 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
+import {
+  chatService,
+  preferencesService,
+  ChatHttpError,
+  type AuthMode,
+  type ChatAction,
+} from '@/services';
 
 interface ChatMsg {
   role: 'user' | 'assistant';
   content: string;
-  actions?: Array<{ tool: string; input: unknown }>;
+  actions?: ChatAction[];
 }
 
 interface ChatPanelProps {
@@ -34,11 +41,6 @@ interface ChatPanelProps {
   selectedGuid: string | null;
   onChange: () => void;
 }
-
-const KEY_STORE = 'figrev_anthropic_key';
-const MODEL_STORE = 'figrev_claude_model';
-const AUTH_MODE_STORE = 'figrev_auth_mode';
-type AuthMode = 'subscription' | 'api-key';
 
 interface ModelOption {
   id: string;
@@ -67,16 +69,16 @@ function modelDot(id: string): string {
 }
 
 export function ChatPanel({ sessionId, selectedGuid, onChange }: ChatPanelProps) {
-  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem(KEY_STORE) ?? '');
+  const [apiKey, setApiKey] = useState<string>(() => preferencesService.getApiKey());
   const [authMode, setAuthMode] = useState<AuthMode>(
-    () => (localStorage.getItem(AUTH_MODE_STORE) as AuthMode) || 'subscription',
+    () => preferencesService.getAuthMode('subscription'),
   );
   const [showAuth, setShowAuth] = useState<boolean>(false);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [model, setModel] = useState<string>(
-    () => localStorage.getItem(MODEL_STORE) ?? DEFAULT_MODEL,
+    () => preferencesService.getModel(DEFAULT_MODEL),
   );
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -96,7 +98,7 @@ export function ChatPanel({ sessionId, selectedGuid, onChange }: ChatPanelProps)
 
   function pickModel(id: string): void {
     setModel(id);
-    localStorage.setItem(MODEL_STORE, id);
+    preferencesService.setModel(id);
     setModelMenuOpen(false);
   }
   const currentModel = MODELS.find((m) => m.id === model) ?? MODELS[0]!;
@@ -107,14 +109,13 @@ export function ChatPanel({ sessionId, selectedGuid, onChange }: ChatPanelProps)
 
   function saveKey(k: string): void {
     setApiKey(k);
-    if (k) localStorage.setItem(KEY_STORE, k);
-    else localStorage.removeItem(KEY_STORE);
+    preferencesService.setApiKey(k);
     setShowAuth(false);
   }
 
   function pickAuthMode(m: AuthMode): void {
     setAuthMode(m);
-    localStorage.setItem(AUTH_MODE_STORE, m);
+    preferencesService.setAuthMode(m);
   }
 
   async function send(): Promise<void> {
@@ -133,35 +134,33 @@ export function ChatPanel({ sessionId, selectedGuid, onChange }: ChatPanelProps)
     setMessages(next);
     setBusy(true);
     try {
-      const headers: Record<string, string> = { 'content-type': 'application/json' };
-      if (authMode === 'api-key' && apiKey) headers['x-anthropic-key'] = apiKey;
-      const r = await fetch(`/api/chat/${sessionId}`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          messages: next.map((m) => ({ role: m.role, content: m.content })),
-          selectedGuid,
-          model,
-          authMode,
-        }),
+      const result = await chatService.send({
+        sessionId,
+        messages: next.map((m) => ({ role: m.role, content: m.content })),
+        selectedGuid,
+        model,
+        authMode,
+        apiKey: authMode === 'api-key' ? apiKey : undefined,
       });
-      if (!r.ok) {
-        const err = await r.text();
-        setMessages([
-          ...next,
-          { role: 'assistant', content: `⚠️ Error: ${r.status} — ${err}` },
-        ]);
-        if (r.status === 401) setShowAuth(true);
-      } else {
-        const j = (await r.json()) as { assistantText: string; actions: ChatMsg['actions'] };
-        setMessages([
-          ...next,
-          { role: 'assistant', content: j.assistantText || '(no text)', actions: j.actions },
-        ]);
-        if (j.actions && j.actions.length > 0) onChange();
-      }
+      setMessages([
+        ...next,
+        {
+          role: 'assistant',
+          content: result.assistantText || '(no text)',
+          actions: result.actions,
+        },
+      ]);
+      if (result.actions.length > 0) onChange();
     } catch (err) {
-      setMessages([...next, { role: 'assistant', content: `⚠️ ${(err as Error).message}` }]);
+      if (err instanceof ChatHttpError) {
+        setMessages([
+          ...next,
+          { role: 'assistant', content: `⚠️ Error: ${err.status} — ${err.message}` },
+        ]);
+        if (err.status === 401) setShowAuth(true);
+      } else {
+        setMessages([...next, { role: 'assistant', content: `⚠️ ${(err as Error).message}` }]);
+      }
     } finally {
       setBusy(false);
     }

@@ -12,15 +12,10 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
-  uploadFig,
-  fetchDoc,
-  downloadFig,
-  patchNode,
-  resizeNode,
-  downloadSessionSnapshot,
-  loadSessionSnapshot,
+  documentService,
+  sessionService,
   type UploadResult,
-} from './api';
+} from '@/services';
 
 export function App() {
   const [session, setSession] = useState<UploadResult | null>(null);
@@ -62,9 +57,9 @@ export function App() {
     const target = e.target;
     setBusy(true);
     try {
-      const result = await uploadFig(f);
+      const result = await documentService.upload(f);
       setSession(result);
-      const d = await fetchDoc(result.sessionId);
+      const d = await documentService.fetch(result.sessionId);
       setDoc(d);
       setPageIdx(0);
       setSelectedGuids(new Set());
@@ -82,7 +77,7 @@ export function App() {
     if (!session) return;
     setBusy(true);
     try {
-      await downloadFig(session.sessionId, session.origName);
+      await sessionService.downloadExportedFig(session.sessionId, session.origName);
     } catch (err) {
       alert(`Save error: ${(err as Error).message}`);
     } finally {
@@ -94,7 +89,7 @@ export function App() {
     if (!session) return;
     setBusy(true);
     try {
-      await downloadSessionSnapshot(session.sessionId, session.origName);
+      await sessionService.downloadSnapshot(session.sessionId, session.origName);
     } catch (err) {
       alert(`Snapshot error: ${(err as Error).message}`);
     } finally {
@@ -108,9 +103,9 @@ export function App() {
     const target = e.target;
     setBusy(true);
     try {
-      const result = await loadSessionSnapshot(f);
+      const result = await sessionService.loadSnapshot(f);
       setSession(result);
-      const d = await fetchDoc(result.sessionId);
+      const d = await documentService.fetch(result.sessionId);
       setDoc(d);
       setPageIdx(0);
       setSelectedGuids(new Set());
@@ -124,7 +119,7 @@ export function App() {
 
   async function onRefreshDoc() {
     if (!session) return;
-    const d = await fetchDoc(session.sessionId);
+    const d = await documentService.fetch(session.sessionId);
     setDoc(d);
   }
 
@@ -142,8 +137,8 @@ export function App() {
     moveQueue.current = moveQueue.current.then(async () => {
       try {
         for (const u of updates) {
-          await patchNode(sid, u.guid, 'transform.m02', u.x);
-          await patchNode(sid, u.guid, 'transform.m12', u.y);
+          await documentService.patch(sid, u.guid, 'transform.m02', u.x);
+          await documentService.patch(sid, u.guid, 'transform.m12', u.y);
         }
         onRefreshDoc();
       } catch (err) {
@@ -158,7 +153,7 @@ export function App() {
     const sid = session.sessionId;
     moveQueue.current = moveQueue.current.then(async () => {
       try {
-        await resizeNode(sid, guid, x, y, w, h);
+        await documentService.resize(sid, guid, x, y, w, h);
         onRefreshDoc();
       } catch (err) {
         console.error('resize patch failed', err);
@@ -175,7 +170,7 @@ export function App() {
     moveQueue.current = moveQueue.current.then(async () => {
       try {
         for (const u of updates) {
-          await resizeNode(sid, u.guid, u.x, u.y, u.w, u.h);
+          await documentService.resize(sid, u.guid, u.x, u.y, u.w, u.h);
         }
         onRefreshDoc();
       } catch (err) {

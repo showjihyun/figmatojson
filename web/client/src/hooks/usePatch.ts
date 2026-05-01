@@ -1,5 +1,12 @@
 import { useEffect, useRef } from 'react';
-import { patchNode as defaultPatchNode } from '../api';
+import { documentService } from '@/services';
+
+const defaultPatchNode = (
+  sessionId: string,
+  nodeGuid: string,
+  field: string,
+  value: unknown,
+): Promise<void> => documentService.patch(sessionId, nodeGuid, field, value);
 
 /**
  * Debounced PATCH dispatcher for the Inspector.
