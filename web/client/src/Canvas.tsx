@@ -13,6 +13,9 @@ import { useEffect, useRef, useState, useMemo } from 'react';
 import { Stage, Layer, Rect, Text as KText, Group, Path, Image as KImage } from 'react-konva';
 import type Konva from 'konva';
 import { cornerDrag, groupBbox, projectMembers, type Corner } from './multiResize';
+import { solidFillCss, solidStrokeCss } from '@core/domain/color';
+import { imageHashHex } from '@core/domain/image';
+import { guidStr } from '@core/domain/tree';
 
 interface CanvasProps {
   page: any;
@@ -25,39 +28,6 @@ interface CanvasProps {
   onResizeMany?: (updates: Array<{ guid: string; x: number; y: number; w: number; h: number }>) => void;
   /** Required for IMAGE fill rendering — keys the asset URL space. */
   sessionId: string | null;
-}
-
-/**
- * Convert a Figma image hash (20-byte SHA-1) into its lowercase hex form.
- *
- * After JSON serialization the byte array arrives as either:
- *   - a plain object {0: byte, 1: byte, ...} (typed-array default toJSON)
- *   - a regular array
- *   - or, on a re-revived path, a Uint8Array
- * Returns null when the input doesn't conform to a 20-byte sequence.
- */
-function imageHashHex(node: any): string | null {
-  const fills = node?.fillPaints;
-  if (!Array.isArray(fills)) return null;
-  const fp = fills.find((p: any) => p?.type === 'IMAGE' && p?.visible !== false);
-  const h = fp?.image?.hash;
-  if (!h) return null;
-  const bytes: number[] = [];
-  if (Array.isArray(h)) {
-    for (const b of h) bytes.push(b as number);
-  } else if (h instanceof Uint8Array) {
-    for (let i = 0; i < h.length; i++) bytes.push(h[i]!);
-  } else if (typeof h === 'object') {
-    for (let i = 0; i < 20; i++) {
-      const v = (h as Record<string, unknown>)[String(i)];
-      if (typeof v !== 'number') return null;
-      bytes.push(v);
-    }
-  } else {
-    return null;
-  }
-  if (bytes.length !== 20) return null;
-  return bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /**
@@ -133,36 +103,11 @@ function ImageFill({
   return <KImage image={img} x={0} y={0} width={width} height={height} listening={false} />;
 }
 
-function guidStr(g: any): string | null {
-  if (!g || typeof g !== 'object') return null;
-  if (typeof g.sessionID !== 'number' || typeof g.localID !== 'number') return null;
-  return `${g.sessionID}:${g.localID}`;
-}
-
-function colorOf(node: any): string {
-  const fills = node.fillPaints;
-  if (!Array.isArray(fills)) return 'transparent';
-  const first = fills.find((p: any) => p?.type === 'SOLID' && p?.visible !== false);
-  if (!first?.color) return 'transparent';
-  const { r = 0, g = 0, b = 0, a = 1 } = first.color;
-  const op = typeof first.opacity === 'number' ? first.opacity : 1;
-  const fa = a * op;
-  return `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)},${fa.toFixed(3)})`;
-}
-
-function strokeOf(node: any): { color: string; width: number } | null {
-  if (typeof node.strokeWeight !== 'number' || node.strokeWeight <= 0) return null;
-  const strokes = node.strokePaints;
-  if (!Array.isArray(strokes)) return null;
-  const first = strokes.find((p: any) => p?.type === 'SOLID' && p?.visible !== false);
-  if (!first?.color) return null;
-  const { r = 0, g = 0, b = 0, a = 1 } = first.color;
-  const op = typeof first.opacity === 'number' ? first.opacity : 1;
-  return {
-    color: `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)},${(a * op).toFixed(3)})`,
-    width: node.strokeWeight,
-  };
-}
+// `guidStr`, `solidFillCss` (was `colorOf`), `solidStrokeCss` (was `strokeOf`)
+// live in `@core/domain/color.ts` and `@core/domain/tree.ts` now.
+// Local aliases preserve the old call sites' names without further churn.
+const colorOf = solidFillCss;
+const strokeOf = solidStrokeCss;
 
 const VECTOR_TYPES = new Set([
   'VECTOR',

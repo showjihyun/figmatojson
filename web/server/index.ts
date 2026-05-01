@@ -34,6 +34,10 @@ const repoRoot = resolve(here, '..', '..');
 import { loadContainer } from '../../src/container.js';
 import { decodeFigCanvas } from '../../src/decoder.js';
 import { buildTree } from '../../src/tree.js';
+import { tokenizePath, setPath } from '../core/domain/path.js';
+import { findById } from '../core/domain/tree.js';
+import { sniffImageMime as sniffImageMimeCore } from '../core/domain/image.js';
+import { summarizeDoc as summarizeDocCore } from '../core/domain/summary.js';
 import {
   dumpStage1Container,
   dumpStage3Decompressed,
@@ -392,17 +396,9 @@ app.get('/api/doc/:id', (c) => {
  * MIME type is sniffed from the magic-byte header — Figma containers can hold
  * PNG / JPEG / GIF / WebP fills.
  */
-function sniffImageMime(buf: Buffer): string {
-  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
-  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
-  if (buf.length >= 6 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif';
-  if (
-    buf.length >= 12 &&
-    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
-    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
-  ) return 'image/webp';
-  return 'application/octet-stream';
-}
+// `sniffImageMime` lives in core/domain/image.ts now — Buffer is an
+// ArrayLike<number>, so the core impl works over the same shape.
+const sniffImageMime = (buf: Buffer): string => sniffImageMimeCore(buf);
 
 app.get('/api/asset/:id/:hash', (c) => {
   const s = sessions.get(c.req.param('id'));
@@ -421,35 +417,7 @@ app.get('/api/asset/:id/:hash', (c) => {
   });
 });
 
-/**
- * Path tokenizer — supports dotted keys + bracket indices:
- *   "textData.characters"        → ["textData", "characters"]
- *   "fillPaints[0].color.r"      → ["fillPaints", 0, "color", "r"]
- *   "stack.padding[2]"           → ["stack", "padding", 2]
- */
-function tokenizePath(path: string): Array<string | number> {
-  const tokens: Array<string | number> = [];
-  const re = /([^.[\]]+)|\[(\d+)\]/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(path)) !== null) {
-    if (m[2] !== undefined) tokens.push(parseInt(m[2], 10));
-    else if (m[1] !== undefined) tokens.push(m[1]);
-  }
-  return tokens;
-}
-
-/** Walk into `obj` along path tokens, creating intermediate {}/ [] as needed. */
-function setPath(obj: any, tokens: Array<string | number>, value: unknown): boolean {
-  let cur = obj;
-  for (let i = 0; i < tokens.length - 1; i++) {
-    const t = tokens[i]!;
-    const next = tokens[i + 1]!;
-    if (cur[t] == null) cur[t] = typeof next === 'number' ? [] : {};
-    cur = cur[t];
-  }
-  cur[tokens[tokens.length - 1]!] = value;
-  return true;
-}
+// `tokenizePath` and `setPath` live in core/domain/path.ts now.
 
 app.patch('/api/doc/:id', async (c) => {
   const s = sessions.get(c.req.param('id'));
@@ -814,7 +782,7 @@ app.post('/api/chat/:id', async (c) => {
 
   // Build a compact context of the current document — top-level pages + the
   // selected node's relevant fields. (Sending the whole doc is too large.)
-  const summary = summarizeDoc(s.documentJson, body.selectedGuid ?? null);
+  const summary = summarizeDocCore(s.documentJson, body.selectedGuid ?? null);
 
   const tools = [
     {
@@ -936,50 +904,8 @@ Use the tools to make the user's requested edits. Be concise.`,
   return c.json({ assistantText, actions });
 });
 
-function summarizeDoc(doc: unknown, selectedGuid: string | null): string {
-  const lines: string[] = [];
-  function walk(n: any, depth: number, max: number): void {
-    if (!n || depth > max) return;
-    const tag = `${n.type}${n.name ? ` "${n.name}"` : ''} (${n.id ?? '?'})`;
-    lines.push('  '.repeat(depth) + tag + (n.id === selectedGuid ? '  ← SELECTED' : ''));
-    if (Array.isArray(n.children) && depth < max) {
-      for (const c of n.children.slice(0, 8)) walk(c, depth + 1, max);
-      if (n.children.length > 8) lines.push('  '.repeat(depth + 1) + `... ${n.children.length - 8} more`);
-    }
-  }
-  walk(doc, 0, 3);
-  if (selectedGuid) {
-    const sel = findById(doc, selectedGuid);
-    if (sel) {
-      lines.push('');
-      lines.push(`Selected node detail:`);
-      const compact = {
-        id: sel.id,
-        type: sel.type,
-        name: sel.name,
-        size: sel.size,
-        transform: sel.transform,
-        textData: sel.textData,
-        fillPaints: sel.fillPaints,
-        _componentTexts: sel._componentTexts,
-      };
-      lines.push(JSON.stringify(compact, null, 2).slice(0, 1200));
-    }
-  }
-  return lines.join('\n');
-}
-
-function findById(node: any, id: string): any | null {
-  if (!node || typeof node !== 'object') return null;
-  if (node.id === id) return node;
-  if (Array.isArray(node.children)) {
-    for (const c of node.children) {
-      const f = findById(c, id);
-      if (f) return f;
-    }
-  }
-  return null;
-}
+// `summarizeDoc` and `findById` live in core/domain/summary.ts and
+// core/domain/tree.ts now — call sites import them directly.
 
 /**
  * Subscription-mode chat — uses @anthropic-ai/claude-agent-sdk's `query()`,
@@ -998,7 +924,7 @@ async function runSubscriptionChat(
   const { query, tool, createSdkMcpServer } = sdk;
   const z = (await import('zod')).z;
 
-  const summary = summarizeDoc(s.documentJson, selectedGuid);
+  const summary = summarizeDocCore(s.documentJson, selectedGuid);
   const actions: Array<{ tool: string; input: unknown }> = [];
 
   const wrap = <T extends Record<string, unknown>>(name: string, fn: (i: T) => Promise<void>) =>
