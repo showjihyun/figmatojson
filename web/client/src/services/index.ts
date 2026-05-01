@@ -4,7 +4,12 @@
  * reaching into individual files.
  */
 
-export { documentService, type DocumentService, type UploadResult } from './DocumentService';
+export {
+  documentService,
+  type DocumentService,
+  type UploadResult,
+  type HistoryResult,
+} from './DocumentService';
 export { sessionService, type SessionService } from './SessionService';
 export {
   chatService,

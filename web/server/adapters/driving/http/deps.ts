@@ -16,6 +16,8 @@ import type { SaveSnapshot } from '../../../../core/application/SaveSnapshot.js'
 import type { LoadSnapshot } from '../../../../core/application/LoadSnapshot.js';
 import type { ServeAsset } from '../../../../core/application/ServeAsset.js';
 import type { RunChatTurn } from '../../../../core/application/RunChatTurn.js';
+import type { Undo } from '../../../../core/application/Undo.js';
+import type { Redo } from '../../../../core/application/Redo.js';
 
 export interface Deps {
   sessionStore: SessionStore;
@@ -28,4 +30,6 @@ export interface Deps {
   loadSnapshot: LoadSnapshot;
   serveAsset: ServeAsset;
   runChatTurn: RunChatTurn;
+  undo: Undo;
+  redo: Redo;
 }

@@ -14,6 +14,7 @@ import { registerOverrideRoute } from './overrideRoute.js';
 import { registerResizeRoute } from './resizeRoute.js';
 import { registerSnapshotRoutes } from './snapshotRoute.js';
 import { registerChatRoute } from './chatRoute.js';
+import { registerHistoryRoutes } from './historyRoute.js';
 
 export function registerRoutes(app: Hono, deps: Deps): void {
   registerUploadRoute(app, deps);
@@ -24,6 +25,7 @@ export function registerRoutes(app: Hono, deps: Deps): void {
   registerResizeRoute(app, deps);
   registerSnapshotRoutes(app, deps);
   registerChatRoute(app, deps);
+  registerHistoryRoutes(app, deps);
 }
 
 export type { Deps } from './deps.js';

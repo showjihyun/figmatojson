@@ -47,3 +47,17 @@ export function setPath(
   cur[tokens[tokens.length - 1]!] = value;
   return true;
 }
+
+/**
+ * Read the value at `tokens`. Returns `undefined` for any missing
+ * intermediate — callers treat that as "field absent" (used by the
+ * journal to capture the pre-mutation state of a newly-introduced field).
+ */
+export function getPath(obj: unknown, tokens: PathToken[]): unknown {
+  let cur: any = obj;
+  for (const t of tokens) {
+    if (cur == null || typeof cur !== 'object') return undefined;
+    cur = cur[t];
+  }
+  return cur;
+}
