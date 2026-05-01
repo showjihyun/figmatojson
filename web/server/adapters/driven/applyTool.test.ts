@@ -19,8 +19,22 @@ function buildFixture(): { dir: string; session: Session; messagePath: string } 
   const decodedDir = join(dir, 'extracted', '04_decoded');
   mkdirSync(decodedDir, { recursive: true });
 
+  // Build a small DOCUMENT/CANVAS skeleton plus the leaf nodes the existing
+  // tool tests use. parentIndex.guid + position links match what kiwi
+  // produces — required so the duplicate tool's subtree walk + the
+  // rebuildDocumentFromMessage helper see the same parent linkage.
   const msg = {
     nodeChanges: [
+      {
+        guid: { sessionID: 0, localID: 0 },
+        type: 'DOCUMENT',
+      },
+      {
+        guid: { sessionID: 0, localID: 100 },
+        type: 'CANVAS',
+        name: 'page',
+        parentIndex: { guid: { sessionID: 0, localID: 0 }, position: 'V' },
+      },
       {
         guid: { sessionID: 0, localID: 1 },
         type: 'TEXT',
@@ -29,6 +43,7 @@ function buildFixture(): { dir: string; session: Session; messagePath: string } 
         size: { x: 100, y: 50 },
         cornerRadius: 0,
         fillPaints: [{ type: 'SOLID', visible: true, opacity: 1, color: { r: 1, g: 0, b: 0, a: 1 } }],
+        parentIndex: { guid: { sessionID: 0, localID: 100 }, position: 'V' },
       },
       {
         guid: { sessionID: 0, localID: 2 },
@@ -37,11 +52,13 @@ function buildFixture(): { dir: string; session: Session; messagePath: string } 
         size: { x: 80, y: 40 },
         cornerRadius: 4,
         fillPaints: [{ type: 'SOLID', visible: true, opacity: 1, color: { r: 0, g: 0, b: 1, a: 1 } }],
+        parentIndex: { guid: { sessionID: 0, localID: 100 }, position: 'X' },
       },
       {
         guid: { sessionID: 0, localID: 3 },
         type: 'INSTANCE',
         symbolData: { symbolOverrides: [] },
+        parentIndex: { guid: { sessionID: 0, localID: 100 }, position: 'Z' },
       },
     ],
   };
@@ -125,7 +142,11 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
     const disk = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
       nodeChanges: Array<Record<string, unknown>>;
     };
-    expect((disk.nodeChanges[0] as { textData: { characters: string } }).textData.characters).toBe('world');
+    const textNode = disk.nodeChanges.find((n) => {
+      const g = n.guid as { localID?: number } | undefined;
+      return g?.localID === 1;
+    }) as { textData: { characters: string } } | undefined;
+    expect(textNode?.textData.characters).toBe('world');
   });
 
   it('set_position records both axes', async () => {
@@ -260,5 +281,125 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       applyTool(fx.session, 'set_text', { guid: '99:99', value: 'x' }, journal),
     ).rejects.toThrow(/not found/);
     expect(journal.depths('sid-test')).toEqual({ past: 0, future: 0 });
+  });
+
+  describe('duplicate', () => {
+    it('appends a cloned node with a fresh GUID, offset by default 20px', async () => {
+      const before = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const beforeCount = before.nodeChanges.length;
+
+      await applyTool(fx.session, 'duplicate', { guid: '0:1' }, journal);
+
+      const after = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      expect(after.nodeChanges).toHaveLength(beforeCount + 1);
+      const cloned = after.nodeChanges[after.nodeChanges.length - 1] as {
+        guid: { sessionID: number; localID: number };
+        type: string;
+        transform: { m02: number; m12: number };
+        textData: { characters: string };
+        parentIndex: { guid: { localID: number }; position: string };
+      };
+      expect(cloned.type).toBe('TEXT');
+      // Fresh GUID — outside the 0..3 + 100 range used in the fixture.
+      expect(cloned.guid.localID).toBeGreaterThan(100);
+      expect(cloned.transform.m02).toBe(30); // 10 + 20
+      expect(cloned.transform.m12).toBe(40); // 20 + 20
+      expect(cloned.textData.characters).toBe('hello');
+      // Same parent (CANVAS, localID 100) but a fresh sibling-position
+      // string strictly greater than the original's.
+      expect(cloned.parentIndex.guid.localID).toBe(100);
+      expect(cloned.parentIndex.position > 'V').toBe(true);
+    });
+
+    it('respects custom dx/dy offsets', async () => {
+      await applyTool(fx.session, 'duplicate', { guid: '0:2', dx: 5, dy: -10 }, journal);
+      const after = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const cloned = after.nodeChanges[after.nodeChanges.length - 1] as {
+        transform: { m02: number; m12: number };
+      };
+      expect(cloned.transform.m02).toBe(205); // 200 + 5
+      expect(cloned.transform.m12).toBe(290); // 300 - 10
+    });
+
+    it('records a __msg__ sentinel patch with full nodeChanges before/after', async () => {
+      await applyTool(fx.session, 'duplicate', { guid: '0:1' }, journal);
+      const entry = journal.popUndo('sid-test');
+      expect(entry?.label).toBe('AI: duplicate');
+      expect(entry?.patches).toHaveLength(1);
+      const p = entry!.patches[0];
+      expect(p.guid).toBe('__msg__');
+      expect(p.field).toBe('nodeChanges');
+      expect(Array.isArray(p.before)).toBe(true);
+      expect(Array.isArray(p.after)).toBe(true);
+      // before has 5 (DOCUMENT, CANVAS, TEXT, RECT, INSTANCE), after has 6.
+      expect((p.before as unknown[]).length).toBe(5);
+      expect((p.after as unknown[]).length).toBe(6);
+    });
+
+    it('rebuilds documentJson so the new clone is reachable via the client tree', async () => {
+      await applyTool(fx.session, 'duplicate', { guid: '0:1' }, journal);
+      // The page now has 4 children (the 3 originals + 1 clone).
+      const doc = fx.session.documentJson as { children: Array<{ children?: unknown[] }> };
+      const canvas = doc.children[0];
+      expect(canvas.children).toBeDefined();
+      expect(canvas.children!.length).toBe(4);
+    });
+
+    it('throws on missing guid without recording or mutating disk', async () => {
+      const beforeRaw = readFileSync(fx.messagePath, 'utf8');
+      await expect(
+        applyTool(fx.session, 'duplicate', { guid: '99:99' }, journal),
+      ).rejects.toThrow(/not found/);
+      expect(journal.depths('sid-test')).toEqual({ past: 0, future: 0 });
+      expect(readFileSync(fx.messagePath, 'utf8')).toBe(beforeRaw);
+    });
+
+    it('clones an entire subtree — every descendant gets a fresh GUID with parentIndex re-pointed', async () => {
+      // Add a child under 0:2 (RECT) so we have a 2-deep subtree to clone.
+      const raw = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      raw.nodeChanges.push({
+        guid: { sessionID: 0, localID: 50 },
+        type: 'TEXT',
+        textData: { characters: 'inside-rect' },
+        transform: { m02: 0, m12: 0 },
+        size: { x: 20, y: 10 },
+        parentIndex: { guid: { sessionID: 0, localID: 2 }, position: 'V' },
+      });
+      writeFileSync(fx.messagePath, JSON.stringify(raw));
+      // Reset documentJson so the next duplicate re-derives it cleanly.
+      // (The fixture's hand-built tree didn't include the new descendant.)
+
+      await applyTool(fx.session, 'duplicate', { guid: '0:2' }, journal);
+
+      const after = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      // We started at 6 (after the manual push above), duplicated 2 nodes
+      // (RECT + its TEXT child) → 8 total.
+      expect(after.nodeChanges).toHaveLength(8);
+
+      // The two new clones are at the end.
+      const last2 = after.nodeChanges.slice(-2) as Array<{
+        guid: { localID: number };
+        parentIndex?: { guid?: { localID: number } };
+        type: string;
+      }>;
+      const cloneIds = new Set(last2.map((n) => n.guid.localID));
+      // The clone of 0:50 should have its parentIndex point at the new
+      // RECT clone (not the original 0:2).
+      const innerClone = last2.find((n) => n.type === 'TEXT')!;
+      const rectClone = last2.find((n) => n.type === 'RECTANGLE')!;
+      expect(innerClone.parentIndex?.guid?.localID).toBe(rectClone.guid.localID);
+      expect(cloneIds.has(2)).toBe(false);
+      expect(cloneIds.has(50)).toBe(false);
+    });
   });
 });

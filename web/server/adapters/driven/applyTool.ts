@@ -23,12 +23,21 @@ import type {
   EditJournal,
   PatchPair,
 } from '../../../core/ports/EditJournal.js';
+import { rebuildDocumentFromMessage } from '../../../core/domain/messageJson.js';
+import { between } from '../../../../src/fractional-index.js';
 
 interface MessageJson {
   nodeChanges?: Array<Record<string, unknown>>;
 }
 
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
+
+/**
+ * Sentinel GUID for full-message-snapshot journal patches. Undo.applyPatches
+ * recognizes this guid and replaces the whole nodeChanges array (and rebuilds
+ * documentJson) instead of trying to setPath on a node.
+ */
+export const MSG_SENTINEL_GUID = '__msg__';
 
 export async function applyTool(
   s: Session,
@@ -267,6 +276,114 @@ export async function applyTool(
         }
       }
       recordChatEdit(`align ${axis}`, patches);
+      break;
+    }
+    case 'duplicate': {
+      // Clone the source node + its entire descendant subtree with fresh
+      // GUIDs, place the root clone at (origX + dx, origY + dy), and append
+      // it as the next sibling of the original. dx/dy default to 20 px so
+      // the clone is visible if the user didn't specify.
+      const node = findNode(String(input.guid));
+      if (!node) throw new Error(`node ${input.guid} not found`);
+      const dx = Number(input.dx ?? 20);
+      const dy = Number(input.dy ?? 20);
+
+      const beforeNodeChanges = clone(msg.nodeChanges ?? []);
+
+      // Find every descendant of the source via parentIndex.guid linkage.
+      // The kiwi format is a flat list, so we BFS by parent pointer.
+      const sourceKey = `${(node.guid as { sessionID: number; localID: number }).sessionID}:${(node.guid as { sessionID: number; localID: number }).localID}`;
+      const subtree: Array<Record<string, unknown>> = [node];
+      const queue = [sourceKey];
+      while (queue.length > 0) {
+        const cur = queue.shift()!;
+        const direct = (msg.nodeChanges ?? []).filter((n) => {
+          const pi = n.parentIndex as { guid?: { sessionID?: number; localID?: number } } | undefined;
+          if (!pi?.guid) return false;
+          return `${pi.guid.sessionID}:${pi.guid.localID}` === cur;
+        });
+        for (const c of direct) {
+          subtree.push(c);
+          const cg = c.guid as { sessionID: number; localID: number } | undefined;
+          if (cg) queue.push(`${cg.sessionID}:${cg.localID}`);
+        }
+      }
+
+      // Allocate fresh localIDs in sessionID 0 — we pick a slot above the
+      // current max so we don't collide with anything the kiwi schema
+      // already references.
+      let nextLocalId = 1;
+      for (const n of msg.nodeChanges ?? []) {
+        const g = n.guid as { localID?: number } | undefined;
+        if (g?.localID && g.localID >= nextLocalId) nextLocalId = g.localID + 1;
+      }
+      const guidMap = new Map<string, { sessionID: number; localID: number }>();
+      for (const orig of subtree) {
+        const og = orig.guid as { sessionID: number; localID: number };
+        guidMap.set(`${og.sessionID}:${og.localID}`, { sessionID: 0, localID: nextLocalId++ });
+      }
+
+      // Build the cloned set: root gets a fresh parentIndex.position so it
+      // sorts immediately after the original; descendants keep their
+      // relative positions but their parentIndex.guid is rewritten to
+      // point at the corresponding clone.
+      const origRootPi = node.parentIndex as { guid?: unknown; position?: string } | undefined;
+      const cloned: Array<Record<string, unknown>> = [];
+      for (const orig of subtree) {
+        const c = clone(orig);
+        const og = orig.guid as { sessionID: number; localID: number };
+        c.guid = guidMap.get(`${og.sessionID}:${og.localID}`)!;
+
+        if (orig === node) {
+          if (origRootPi) {
+            // between(origPos, null) = a position lex-greater than origPos,
+            // i.e. the next sibling slot. If a real next sibling exists,
+            // this still slots strictly between original and that sibling
+            // because between() pads with the alphabet's max char.
+            const origPos = origRootPi.position ?? null;
+            c.parentIndex = {
+              guid: origRootPi.guid,
+              position: between(origPos, null),
+            };
+          }
+          // Offset transform on the root clone only.
+          const t = c.transform as Record<string, number> | undefined;
+          if (t) {
+            t.m02 = (t.m02 ?? 0) + dx;
+            t.m12 = (t.m12 ?? 0) + dy;
+          }
+        } else {
+          // Descendant: rewrite parentIndex.guid to the cloned parent's
+          // new GUID. Keep the original position string — relative order
+          // among siblings within the cloned subtree stays the same.
+          const pi = c.parentIndex as { guid?: { sessionID: number; localID: number }; position?: string } | undefined;
+          if (pi?.guid) {
+            const pgKey = `${pi.guid.sessionID}:${pi.guid.localID}`;
+            const newPg = guidMap.get(pgKey);
+            if (newPg) pi.guid = newPg;
+          }
+        }
+        cloned.push(c);
+      }
+
+      msg.nodeChanges = [...(msg.nodeChanges ?? []), ...cloned];
+      writeFileSync(messagePath, JSON.stringify(msg));
+
+      // documentJson: re-derive the whole client tree from the new message.
+      // Wholesale rebuild costs a tree walk but is the only way to keep the
+      // hierarchical mirror in sync with a structural change.
+      s.documentJson = rebuildDocumentFromMessage(JSON.stringify(msg));
+
+      // Journal: full-array before/after on the sentinel guid. Undo replays
+      // by replacing nodeChanges and rebuilding documentJson.
+      recordChatEdit('duplicate', [
+        {
+          guid: MSG_SENTINEL_GUID,
+          field: 'nodeChanges',
+          before: beforeNodeChanges,
+          after: clone(msg.nodeChanges),
+        },
+      ]);
       break;
     }
     default:

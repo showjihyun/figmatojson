@@ -14,6 +14,15 @@ import type { SessionStore } from '../ports/SessionStore.js';
 import type { EditJournal } from '../ports/EditJournal.js';
 import { NotFoundError } from './errors.js';
 import { tokenizePath, setPath } from '../domain/path.js';
+import { rebuildDocumentFromMessage } from '../domain/messageJson.js';
+
+/**
+ * Sentinel guid for full-message-snapshot patches emitted by structural
+ * chat tools (today: duplicate). When `applyPatches` sees this guid it
+ * replaces the whole `nodeChanges` array and re-derives documentJson —
+ * the leaf-level setPath fan-out doesn't apply to tree restructure.
+ */
+const MSG_SENTINEL_GUID = '__msg__';
 
 interface FsLike {
   readMessage(id: string): string;
@@ -75,6 +84,14 @@ export function applyPatches(
     });
 
   for (const patch of patches) {
+    if (patch.guid === MSG_SENTINEL_GUID && patch.field === 'nodeChanges') {
+      // Structural patch: swap the whole nodeChanges array. No need to
+      // setPath — the new array IS the new state. documentJson is rebuilt
+      // wholesale below.
+      const value = pick === 'before' ? patch.before : patch.after;
+      msg.nodeChanges = value as Array<Record<string, unknown>>;
+      continue;
+    }
     const node = findNode(patch.guid);
     if (!node) continue;
     const value = pick === 'before' ? patch.before : patch.after;
@@ -97,4 +114,16 @@ export function applyPatches(
   }
 
   store.writeMessage(sessionId, JSON.stringify(msg));
+
+  // If any structural patch landed, the in-place mirror above is incomplete —
+  // re-derive documentJson from the freshly-written message.json so the
+  // client tree reflects the new node set. Cheap to skip when no sentinel
+  // patches are present.
+  const hadStructural = patches.some(
+    (p) => p.guid === MSG_SENTINEL_GUID && p.field === 'nodeChanges',
+  );
+  if (hadStructural) {
+    const newDoc = rebuildDocumentFromMessage(JSON.stringify(msg));
+    (session as { documentJson: unknown }).documentJson = newDoc;
+  }
 }

@@ -123,6 +123,22 @@ const CATALOGUE = [
       required: ['guids', 'axis'],
     },
   },
+  {
+    name: 'duplicate',
+    description:
+      "Clone a node and its entire subtree. The clone gets fresh GUIDs and is " +
+      "placed (dx, dy) px offset from the original (defaults: 20, 20). Returns " +
+      "after the new sibling is inserted next to the source.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        guid: { type: 'string', description: 'Source node GUID like "26:269".' },
+        dx: { type: 'number', description: 'Horizontal offset px. Defaults to 20.' },
+        dy: { type: 'number', description: 'Vertical offset px. Defaults to 20.' },
+      },
+      required: ['guid'],
+    },
+  },
 ] as const;
 
 export class InProcessTools implements ToolDispatcher {
