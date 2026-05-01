@@ -16,6 +16,8 @@ import { useMemo, useState, useEffect, useRef, type ReactNode } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
 import { patchNode, setInstanceTextOverride } from './api';
 import { usePatch } from './hooks/usePatch';
+import { rgbaToHex, hexToRgb01 } from '@core/domain/color';
+import { findById } from '@core/domain/tree';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -37,33 +39,13 @@ interface InspectorProps {
   onChange: () => void;
 }
 
-function findByGuid(root: any, guid: string): any | null {
-  if (!root || typeof root !== 'object') return null;
-  const g = root.guid;
-  if (g && `${g.sessionID}:${g.localID}` === guid) return root;
-  if (Array.isArray(root.children)) {
-    for (const c of root.children) {
-      const f = findByGuid(c, guid);
-      if (f) return f;
-    }
-  }
-  return null;
-}
+// `findByGuid` here used to traverse via the raw `guid` object; the core
+// `findById` traverses by the precomputed `id` string. The page tree this
+// Inspector reads always has `id = guidStr(guid)` set during decode, so the
+// two are equivalent in practice — alias kept for callers below.
+const findByGuid = findById;
 
-/** rgba 0..1 → "#RRGGBB" hex (drops alpha — handle via separate slider). */
-function rgbaToHex(c?: { r?: number; g?: number; b?: number }): string {
-  const r = Math.round(((c?.r ?? 0) * 255));
-  const g = Math.round(((c?.g ?? 0) * 255));
-  const b = Math.round(((c?.b ?? 0) * 255));
-  const h = (n: number): string => Math.max(0, Math.min(255, n)).toString(16).padStart(2, '0');
-  return `#${h(r)}${h(g)}${h(b)}`;
-}
-function hexToRgb01(hex: string): { r: number; g: number; b: number } {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
-  if (!m) return { r: 0, g: 0, b: 0 };
-  const i = parseInt(m[1]!, 16);
-  return { r: ((i >> 16) & 0xff) / 255, g: ((i >> 8) & 0xff) / 255, b: (i & 0xff) / 255 };
-}
+// `rgbaToHex` and `hexToRgb01` live in `@core/domain/color.ts` now.
 
 const FONT_WEIGHT_STYLES = [
   { label: 'Thin', value: 'Thin' },
