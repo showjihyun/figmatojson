@@ -147,4 +147,94 @@ describe('Undo / Redo', () => {
     inst = JSON.parse(store.readMessage('sid')).nodeChanges[2];
     expect(inst.symbolData.symbolOverrides).toEqual([]);
   });
+
+  it('round-trips a __msg__ sentinel patch (structural duplicate-style undo)', async () => {
+    // The duplicate chat tool emits a full nodeChanges before/after on the
+    // sentinel guid. applyPatches has to recognize that, swap the array,
+    // and rebuild documentJson from the new message — none of which the
+    // leaf-level code path covers.
+    const store = new FakeSessionStore();
+    const beforeMessage = {
+      nodeChanges: [
+        {
+          guid: { sessionID: 0, localID: 0 },
+          type: 'DOCUMENT',
+        },
+        {
+          guid: { sessionID: 0, localID: 1 },
+          type: 'CANVAS',
+          name: 'page',
+          parentIndex: { guid: { sessionID: 0, localID: 0 }, position: 'V' },
+        },
+        {
+          guid: { sessionID: 0, localID: 2 },
+          type: 'TEXT',
+          textData: { characters: 'orig' },
+          transform: { m02: 0, m12: 0 },
+          size: { x: 50, y: 20 },
+          parentIndex: { guid: { sessionID: 0, localID: 1 }, position: 'V' },
+        },
+      ],
+    };
+    const afterMessage = {
+      nodeChanges: [
+        ...beforeMessage.nodeChanges,
+        {
+          guid: { sessionID: 0, localID: 3 },
+          type: 'TEXT',
+          textData: { characters: 'orig' },
+          transform: { m02: 20, m12: 20 },
+          size: { x: 50, y: 20 },
+          parentIndex: { guid: { sessionID: 0, localID: 1 }, position: 'X' },
+        },
+      ],
+    };
+    store.seed(
+      {
+        id: 'sid',
+        dir: '/tmp/x',
+        origName: 'x.fig',
+        archiveVersion: 106,
+        // Pre-load with the AFTER state — that's what applyTool would have
+        // left the session in right after a duplicate call.
+        documentJson: { id: '0:0', guid: { sessionID: 0, localID: 0 }, type: 'DOCUMENT', children: [] },
+      },
+      JSON.stringify(afterMessage),
+    );
+    const journal = new InMemoryEditJournal();
+    journal.record('sid', {
+      label: 'AI: duplicate',
+      patches: [{
+        guid: '__msg__',
+        field: 'nodeChanges',
+        before: beforeMessage.nodeChanges,
+        after: afterMessage.nodeChanges,
+      }],
+    });
+
+    const undo = new Undo(store, journal);
+    const redo = new Redo(store, journal);
+    const session = store.getById('sid')!;
+
+    // Undo → message.json reverts to 3 nodes, documentJson rebuilt to match.
+    await undo.execute({ sessionId: 'sid' });
+    let parsed = JSON.parse(store.readMessage('sid')) as { nodeChanges: unknown[] };
+    expect(parsed.nodeChanges).toHaveLength(3);
+    const docAfterUndo = session.documentJson as {
+      type: string;
+      children?: Array<{ type: string; children?: Array<{ guid: { localID: number } }> }>;
+    };
+    expect(docAfterUndo.type).toBe('DOCUMENT');
+    expect(docAfterUndo.children![0].type).toBe('CANVAS');
+    expect(docAfterUndo.children![0].children).toHaveLength(1);
+
+    // Redo → message.json back to 4, documentJson rebuilt to match.
+    await redo.execute({ sessionId: 'sid' });
+    parsed = JSON.parse(store.readMessage('sid')) as { nodeChanges: unknown[] };
+    expect(parsed.nodeChanges).toHaveLength(4);
+    const docAfterRedo = session.documentJson as {
+      children?: Array<{ children?: unknown[] }>;
+    };
+    expect(docAfterRedo.children![0].children).toHaveLength(2);
+  });
 });

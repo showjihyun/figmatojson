@@ -103,6 +103,16 @@ export class AgentSdkChat implements ChatAdapter {
           wrap('align_nodes', async (i: { guids: string[]; axis: string }) =>
             this.toolHook('align_nodes', i)),
         ),
+        tool('duplicate',
+          "Clone a node + its subtree with fresh GUIDs. Offsets the new copy by (dx, dy) px (defaults: 20, 20).",
+          {
+            guid: z.string(),
+            dx: z.number().optional(),
+            dy: z.number().optional(),
+          },
+          wrap('duplicate', async (i: { guid: string; dx?: number; dy?: number }) =>
+            this.toolHook('duplicate', i)),
+        ),
       ],
     });
 
