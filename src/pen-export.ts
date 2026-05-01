@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { extractVectors } from './vector.js';
+import { extractVectors, decodeCommandsBlob } from './vector.js';
 import type { DecodedFig } from './decoder.js';
 import type { BuildTreeResult, ContainerResult, TreeNode } from './types.js';
 
@@ -831,6 +831,83 @@ function buildPropAssignmentMap(
 }
 
 /**
+ * INSTANCE의 derivedSymbolData[] → guidPath → derived 항목 Map.
+ *
+ * Figma의 derivedSymbolData는 instance마다 모든 override/variable/inheritance가
+ * 이미 적용된 사전-계산 snapshot (Figma copy/paste가 이걸 직렬화함).
+ * raw master에서 우리가 다시 resolve하면 gap 발생 → derivedSymbolData가 authoritative.
+ *
+ * 각 entry:
+ *   - guidPath.guids[] — master 기준 descendant 경로 ([masterChildGuid] 또는 [child, grand-child, ...])
+ *   - derivedTextData — 텍스트 노드의 fully-resolved fontMetaData (fontWeight, family, style 등)
+ *   - fillGeometry — 벡터 노드의 resolved 경로 (commandsBlob index)
+ *   - size, transform — instance에서의 실제 크기/위치
+ */
+function buildDerivedMap(
+  instData: Record<string, unknown>,
+): Map<string, Record<string, unknown>> | undefined {
+  const ds = instData.derivedSymbolData as
+    | Array<Record<string, unknown> & { guidPath?: { guids?: Array<{ sessionID?: number; localID?: number }> } }>
+    | undefined;
+  if (!Array.isArray(ds) || ds.length === 0) return undefined;
+  const out = new Map<string, Record<string, unknown>>();
+  for (const entry of ds) {
+    const guids = entry.guidPath?.guids;
+    if (!Array.isArray(guids) || guids.length === 0) continue;
+    const key = guids.map((g) => `${g.sessionID}:${g.localID}`).join('/');
+    out.set(key, entry);
+  }
+  return out.size > 0 ? out : undefined;
+}
+
+/**
+ * derivedMap을 master children에 적용 — 매칭되는 descendant의 data에
+ * `_derivedTextData`, `_derivedFillGeometry` 등 마커 stamp.
+ * convertNode의 text/path branch가 이 마커를 우선 사용 → Figma의 사전-resolved 값을 그대로 반영.
+ *
+ * derivedMap의 guidPath는 master 기준이라, 자손 트리를 따라 내려가며 부분 매칭 가능.
+ *  깊이 1: guidPath = [c.guid] → c에 stamp
+ *  깊이 2+: guidPath = [c.guid, gc.guid] → c의 children 처리 시 [gc.guid]로 줄여 재귀
+ */
+function applyDerivedSymbolData(
+  children: TreeNode[],
+  derivedMap: Map<string, Record<string, unknown>>,
+): TreeNode[] {
+  if (derivedMap.size === 0) return children;
+  // Group entries by first-level guid; entries whose path is exactly [guid] applied here, deeper ones recurse
+  const directByGuid = new Map<string, Record<string, unknown>>();
+  const nestedByGuid = new Map<string, Map<string, Record<string, unknown>>>();
+  for (const [pathKey, entry] of derivedMap) {
+    const segs = pathKey.split('/');
+    const head = segs[0]!;
+    if (segs.length === 1) {
+      directByGuid.set(head, entry);
+    } else {
+      const rest = segs.slice(1).join('/');
+      if (!nestedByGuid.has(head)) nestedByGuid.set(head, new Map());
+      nestedByGuid.get(head)!.set(rest, entry);
+    }
+  }
+  return children.map((c) => {
+    const direct = directByGuid.get(c.guidStr);
+    const nested = nestedByGuid.get(c.guidStr);
+    let data = c.data as Record<string, unknown>;
+    let kids = c.children;
+    if (direct) {
+      const merged = { ...data };
+      if (direct.derivedTextData !== undefined) merged._derivedTextData = direct.derivedTextData;
+      if (direct.fillGeometry !== undefined) merged._derivedFillGeometry = direct.fillGeometry;
+      if (direct.size !== undefined) merged._derivedSize = direct.size;
+      if (direct.transform !== undefined) merged._derivedTransform = direct.transform;
+      data = merged;
+    }
+    if (nested) kids = applyDerivedSymbolData(c.children, nested);
+    if (data === c.data && kids === c.children) return c;
+    return { ...c, data: data as never, children: kids };
+  });
+}
+
+/**
  * 노드의 componentPropRefs(VISIBLE)가 propAssignments에 의해 false로 토글되었는지.
  * - propRefs[].defID가 assignments에 있고 그 boolValue=false → 자식 hidden.
  * - boolValue=true이면 표시 (강제 visible — Figma의 boolean prop 의미).
@@ -895,7 +972,12 @@ function convertNode(
           const symbolOverrides = sd.symbolOverrides as
             | Array<Record<string, unknown>>
             | undefined;
-          const overriddenChildren = applySymbolOverrides(master.children, symbolOverrides);
+          let overriddenChildren = applySymbolOverrides(master.children, symbolOverrides);
+          // ★ derivedSymbolData 적용 — Figma의 사전-resolved 값(font weight/style, fillGeometry, size, transform)이
+          //   raw master 값보다 authoritative (Figma copy/paste가 사용하는 그 데이터).
+          //   대부분의 텍스트 fontWeight 미스매치와 vector path 차이의 근본 해결책.
+          const derivedMap = buildDerivedMap(instData);
+          if (derivedMap) overriddenChildren = applyDerivedSymbolData(overriddenChildren, derivedMap);
           let scaledChildren: TreeNode[];
           if (useScale) {
             scaledChildren = overriddenChildren.map((c) => scaleNode(c, sx, sy));
@@ -1065,9 +1147,14 @@ function convertNode(
 
     const td = data.textData as Record<string, unknown> | undefined;
 
+    // ★ derivedSymbolData가 우선 (Figma copy/paste의 진리). 없으면 styleIdForText, 그 다음 master 자체 값.
+    //   derivedTextData.fontMetaData[0]에 instance에서의 final fontWeight/fontStyle/fontFamily가 들어있음.
+    const derivedTd = data._derivedTextData as
+      | { fontMetaData?: Array<{ key?: { family?: string; style?: string }; fontWeight?: number }> }
+      | undefined;
+    const derivedFm = derivedTd?.fontMetaData?.[0];
+
     // styleIdForText 해결: Figma는 공유 텍스트 스타일을 별개 노드로 저장하고, 사용처는 GUID로 참조함.
-    //   text 노드의 자체 fontName/fontSize 등은 stale일 수 있어 (Figma UI에서 Regular로 보이지만 파일엔 다른 값 등)
-    //   styleIdForText가 있으면 그 노드의 값을 우선 적용 (Pencil 동작과 일치).
     const styleId = (data.styleIdForText as { guid?: { sessionID?: number; localID?: number } } | undefined)?.guid;
     let styleData: Record<string, unknown> | undefined;
     if (styleId && typeof styleId.sessionID === 'number' && typeof styleId.localID === 'number' && nodeIndex) {
@@ -1076,9 +1163,14 @@ function convertNode(
     }
     const styleTd = styleData?.textData as Record<string, unknown> | undefined;
 
+    // 폰트 family/style — derived가 1순위
+    const derivedFamily = derivedFm?.key?.family;
+    const derivedStyle = derivedFm?.key?.style;
     const fontName = (styleData?.fontName ?? styleTd?.fontName ?? data.fontName ?? td?.fontName) as { family?: string; style?: string } | undefined;
-    if (fontName?.family) out.fontFamily = fontName.family;
-    if (fontName?.style) out.fontWeight = fontWeightName(fontName.style);
+    const family = derivedFamily ?? fontName?.family;
+    const style = derivedStyle ?? fontName?.style;
+    if (family) out.fontFamily = family;
+    if (style) out.fontWeight = fontWeightName(style);
 
     const fontSize = (styleData?.fontSize as number) ?? (styleTd?.fontSize as number) ?? (data.fontSize as number) ?? (td?.fontSize as number | undefined);
     if (typeof fontSize === 'number') out.fontSize = fontSize;
@@ -1126,10 +1218,12 @@ function convertNode(
     if (tar === 'HEIGHT') out.textGrowth = 'fixed-width';
     else if (tar === 'NONE' || tar === 'TRUNCATE') out.textGrowth = 'fixed-width-height';
   } else if (penType === 'path') {
-    // INSTANCE 확장으로 prefix가 붙은 경우 ("22:200/4:18548") 마지막 segment(원본 master guid)로 lookup.
-    // vectorPathMap은 vector 추출 단계에서 원본 GUID로 키잉됨.
-    const lookupKey = n.guidStr.includes('/') ? n.guidStr.split('/').pop()! : n.guidStr;
-    const svgPath = vectorPathMap.get(lookupKey);
+    // 1순위: full prefixed path (per-instance resolved path from derivedSymbolData)
+    // 2순위: 마지막 segment 원본 master guid (master 자체의 fillGeometry)
+    let svgPath = vectorPathMap.get(n.guidStr);
+    if (!svgPath && n.guidStr.includes('/')) {
+      svgPath = vectorPathMap.get(n.guidStr.split('/').pop()!);
+    }
     if (svgPath) out.geometry = svgPath;
   } else if (penType === 'frame') {
     const layout = layoutFromNode(data);
@@ -1192,7 +1286,12 @@ function convertNode(
   return out;
 }
 
-/** SVG path 'd' attribute만 추출 (vector.ts의 결과에서) */
+/** SVG path 'd' attribute만 추출.
+ *  Map에는 두 종류 키가 들어감:
+ *    1. 원본 master GUID (예: "11:580") — vector.ts/extractVectors 결과
+ *    2. INSTANCE 확장 경로 (예: "9:49/7:199") — derivedSymbolData fillGeometry 결과 (per-instance 사전-resolved)
+ *  convertNode의 path 분기는 (2)를 우선 lookup → 없으면 (1)으로 fallback.
+ */
 function buildVectorPathMap(
   tree: BuildTreeResult,
   decoded: DecodedFig,
@@ -1200,12 +1299,36 @@ function buildVectorPathMap(
   const map = new Map<string, string>();
   const blobs = (decoded.message as { blobs?: Array<{ bytes: Uint8Array }> }).blobs ?? [];
   if (!tree.document) return map;
+  // (1) extractVectors가 master node 자체의 fillGeometry로부터 SVG path 추출
   const vectors = extractVectors(tree.document, blobs);
   for (const v of vectors) {
     if (v.svg) {
-      // SVG 안에서 첫 path d="..." 추출 (단일 path 가정)
       const m = v.svg.match(/<path[^>]+d="([^"]+)"/);
       if (m) map.set(v.nodeId, m[1]!);
+    }
+  }
+  // (2) 모든 INSTANCE의 derivedSymbolData[].fillGeometry → instance-prefix 경로로 추가
+  //   이게 Figma copy/paste가 사용하는 per-instance resolved path. 우리 Pen export도 이걸 우선 사용.
+  for (const node of tree.allNodes.values()) {
+    if (node.type !== 'INSTANCE') continue;
+    const ds = (node.data as Record<string, unknown>).derivedSymbolData as
+      | Array<{
+          guidPath?: { guids?: Array<{ sessionID?: number; localID?: number }> };
+          fillGeometry?: Array<{ commandsBlob?: number }>;
+        }>
+      | undefined;
+    if (!Array.isArray(ds)) continue;
+    for (const entry of ds) {
+      const fg = entry.fillGeometry;
+      if (!Array.isArray(fg) || fg.length === 0) continue;
+      const guids = entry.guidPath?.guids;
+      if (!Array.isArray(guids) || guids.length === 0) continue;
+      const blobIdx = fg[0]?.commandsBlob;
+      if (typeof blobIdx !== 'number' || !blobs[blobIdx]?.bytes) continue;
+      const path = decodeCommandsBlob(blobs[blobIdx].bytes);
+      if (!path) continue;
+      const key = node.guidStr + '/' + guids.map((g) => `${g.sessionID}:${g.localID}`).join('/');
+      map.set(key, path);
     }
   }
   return map;
