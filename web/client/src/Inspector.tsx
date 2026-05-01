@@ -435,6 +435,18 @@ function ToggleButtons<T extends string>({
 function usePatch(sessionId: string, guid: string, onChange: () => void) {
   const pending = useRef<Map<string, unknown>>(new Map());
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Cancel any in-flight debounce when the component unmounts so a stale
+  // timer doesn't fire patchNode against a session that may already be gone
+  // (and to avoid setState-after-unmount warnings from onChange).
+  useEffect(() => {
+    return () => {
+      if (timer.current) {
+        clearTimeout(timer.current);
+        timer.current = null;
+      }
+      pending.current.clear();
+    };
+  }, []);
   return (field: string, value: unknown): void => {
     pending.current.set(field, value);
     if (timer.current) clearTimeout(timer.current);
