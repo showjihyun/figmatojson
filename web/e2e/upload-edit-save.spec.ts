@@ -92,6 +92,67 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
     }
   });
 
+  test('component text edit (master text via INSTANCE._componentTexts) round-trips', async ({ page, request }) => {
+    test.setTimeout(180_000);
+
+    let sessionId = '';
+    page.on('request', (req) => {
+      const m = req.url().match(/\/api\/doc\/(s[a-z0-9]+)/);
+      if (m && !sessionId) sessionId = m[1]!;
+    });
+
+    await page.goto('/');
+    await page.locator('input[type="file"]').setInputFiles(SAMPLE_FIG);
+    await expect(page.locator('select')).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator('select option')).toHaveCount(6, { timeout: 60_000 });
+    expect(sessionId).toBeTruthy();
+
+    // Locate an INSTANCE that exposes editable component texts.
+    const doc = await request.get(`http://localhost:5274/api/doc/${sessionId}`).then((r) => r.json());
+    function findInst(n: any): any | null {
+      if (n?.type === 'INSTANCE' && Array.isArray(n._componentTexts) && n._componentTexts.length > 0) return n;
+      if (Array.isArray(n?.children)) for (const c of n.children) { const r = findInst(c); if (r) return r; }
+      return null;
+    }
+    const inst = findInst(doc);
+    expect(inst, 'an INSTANCE with at least one _componentTexts entry').toBeTruthy();
+    const ref = inst._componentTexts[0];
+    const marker = '_COMPTXT_E2E_';
+
+    // PATCH the master text via the same field path the inspector uses.
+    const patchRes = await request.patch(`http://localhost:5274/api/doc/${sessionId}`, {
+      data: { nodeGuid: ref.guid, field: 'textData.characters', value: marker },
+    });
+    expect(patchRes.ok()).toBeTruthy();
+
+    // Snapshot must reflect the edit immediately (no re-upload required).
+    const doc2 = await request.get(`http://localhost:5274/api/doc/${sessionId}`).then((r) => r.json());
+    expect(findInst(doc2)._componentTexts[0].characters).toBe(marker);
+
+    // Save → extract → marker present in message.json.
+    const saveRes = await request.post(`http://localhost:5274/api/save/${sessionId}`);
+    expect(saveRes.ok()).toBeTruthy();
+    const bytes = Buffer.from(await saveRes.body());
+    const tmp = await mkdtemp(join(tmpdir(), 'figrev-e2e-'));
+    try {
+      const dl = join(tmp, 'comp.fig');
+      const fsp = await import('node:fs/promises');
+      await fsp.writeFile(dl, bytes);
+      const { loadContainer } = await import('../../src/container.js');
+      const { decodeFigCanvas } = await import('../../src/decoder.js');
+      const { dumpStage4Decoded } = await import('../../src/intermediate.js');
+      const c = loadContainer(dl);
+      const d = decodeFigCanvas(c.canvasFig);
+      const intOpts = { enabled: true, dir: join(tmp, 'extracted'), includeFullMessage: true, minify: true };
+      dumpStage4Decoded(intOpts, d);
+      const messageJson = await readFile(join(tmp, 'extracted', '04_decoded', 'message.json'), 'utf8');
+      expect(messageJson).toContain(`"${marker}"`);
+      console.log(`[comp-text-e2e] marker "${marker}" survived round-trip`);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   test('edit-via-API then save preserves the edit through round-trip', async ({ page, request }) => {
     test.setTimeout(180_000);
 

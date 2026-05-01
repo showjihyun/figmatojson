@@ -56,7 +56,15 @@ interface ClientNode {
   name?: string;
   children?: ClientNode[];
   _path?: string;      // pre-decoded SVG path (vector nodes)
+  _componentTexts?: ComponentTextRef[];  // editable text refs inside an INSTANCE's master
   [k: string]: unknown;
+}
+
+interface ComponentTextRef {
+  guid: string;        // master text node's guidStr (e.g. "11:506")
+  name?: string;       // display name
+  path: string;        // dotted ancestor names ("Button / Label / Text")
+  characters: string;  // current text content
 }
 
 const VECTOR_TYPES = new Set([
@@ -69,14 +77,18 @@ const VECTOR_TYPES = new Set([
   'ROUNDED_RECTANGLE',
 ]);
 
-function toClientNode(n: TreeNode, blobs: Array<{ bytes: Uint8Array }>): ClientNode {
+function toClientNode(
+  n: TreeNode,
+  blobs: Array<{ bytes: Uint8Array }>,
+  symbolIndex: Map<string, TreeNode>,
+): ClientNode {
   const data = (n.data ?? {}) as Record<string, unknown>;
   const out: ClientNode = {
     id: n.guidStr,
     guid: n.guid,
     type: n.type,
     name: n.name,
-    children: n.children.map((c) => toClientNode(c, blobs)),
+    children: n.children.map((c) => toClientNode(c, blobs, symbolIndex)),
   };
 
   // Pre-decode the vectorNetworkBlob into an SVG path string so the canvas
@@ -93,6 +105,25 @@ function toClientNode(n: TreeNode, blobs: Array<{ bytes: Uint8Array }>): ClientN
     }
   }
 
+  // INSTANCE: collect editable TEXT descendants from the master tree so the
+  // Inspector can show a "Component Texts" panel — the user's primary entry
+  // point for changing button labels, headings, etc., when the instance
+  // itself is empty (children rendered via master expansion at render time
+  // in pen-export, not exposed to the client doc).
+  if (n.type === 'INSTANCE' && n.children.length === 0) {
+    const sd = data.symbolData as { symbolID?: { sessionID?: number; localID?: number } } | undefined;
+    const sid = sd?.symbolID;
+    if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
+      const masterKey = `${sid.sessionID}:${sid.localID}`;
+      const master = symbolIndex.get(masterKey);
+      if (master) {
+        const texts: ComponentTextRef[] = [];
+        collectTexts(master, [], texts, symbolIndex, 0);
+        if (texts.length > 0) out._componentTexts = texts;
+      }
+    }
+  }
+
   for (const k of Object.keys(data)) {
     if (k === 'guid' || k === 'type' || k === 'name') continue;
     const v = data[k];
@@ -104,6 +135,47 @@ function toClientNode(n: TreeNode, blobs: Array<{ bytes: Uint8Array }>): ClientN
     out[k] = v;
   }
   return out;
+}
+
+/** Walk a master tree and collect every TEXT descendant (with breadcrumb path).
+ *  Recurses through nested INSTANCEs by following their master via symbolIndex
+ *  (capped at depth 6 to avoid pathological nesting). */
+function collectTexts(
+  n: TreeNode,
+  ancestors: string[],
+  out: ComponentTextRef[],
+  symbolIndex: Map<string, TreeNode>,
+  depth: number,
+): void {
+  if (depth > 6) return;
+  const data = n.data as Record<string, unknown>;
+  if (n.type === 'TEXT') {
+    const td = data.textData as { characters?: string } | undefined;
+    out.push({
+      guid: n.guidStr,
+      name: n.name,
+      path: ancestors.join(' / '),
+      characters: td?.characters ?? '',
+    });
+    return;
+  }
+  // Descend into children
+  for (const c of n.children) {
+    collectTexts(c, [...ancestors, c.name ?? c.type], out, symbolIndex, depth + 1);
+  }
+  // Nested INSTANCE → resolve via master and descend
+  if (n.type === 'INSTANCE' && n.children.length === 0) {
+    const sd = data.symbolData as { symbolID?: { sessionID?: number; localID?: number } } | undefined;
+    const sid = sd?.symbolID;
+    if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
+      const master = symbolIndex.get(`${sid.sessionID}:${sid.localID}`);
+      if (master) {
+        for (const c of master.children) {
+          collectTexts(c, [...ancestors, c.name ?? c.type], out, symbolIndex, depth + 1);
+        }
+      }
+    }
+  }
 }
 const sessions = new Map<string, Session>();
 
@@ -143,7 +215,16 @@ app.post('/api/upload', async (c) => {
 
     const id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     const blobs = (decoded.message as { blobs?: Array<{ bytes: Uint8Array }> }).blobs ?? [];
-    const documentJson = toClientNode(tree.document, blobs);
+    // SymbolIndex by guidStr — needed to resolve INSTANCE → master for component-text panels.
+    const symbolIndex = new Map<string, TreeNode>();
+    for (const node of tree.allNodes.values()) {
+      if (node.type === 'SYMBOL' || node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
+        symbolIndex.set(node.guidStr, node);
+      }
+      // Also accept FRAME masters that INSTANCEs may reference (rare but possible).
+      symbolIndex.set(node.guidStr, node);
+    }
+    const documentJson = toClientNode(tree.document, blobs, symbolIndex);
     sessions.set(id, {
       id,
       dir: tmpDir,
@@ -235,6 +316,25 @@ app.patch('/api/doc/:id', async (c) => {
     return false;
   }
   walk(s.documentJson as unknown as Record<string, unknown>);
+
+  // If the patched field is textData.characters on a master text node, update
+  // every INSTANCE's `_componentTexts[]` snapshot whose entry references that
+  // master GUID. This keeps the inspector's component-text list fresh after
+  // an edit (otherwise it shows the pre-edit value until a re-upload).
+  if (body.field === 'textData.characters' && typeof body.value === 'string') {
+    const newChars = body.value;
+    function refreshInstances(n: Record<string, unknown>): void {
+      const refs = n._componentTexts as ComponentTextRef[] | undefined;
+      if (Array.isArray(refs)) {
+        for (const r of refs) {
+          if (r.guid === body.nodeGuid) r.characters = newChars;
+        }
+      }
+      const ch = n.children as Array<Record<string, unknown>> | undefined;
+      if (Array.isArray(ch)) for (const c of ch) refreshInstances(c);
+    }
+    refreshInstances(s.documentJson as unknown as Record<string, unknown>);
+  }
 
   return c.json({ ok: true });
 });
