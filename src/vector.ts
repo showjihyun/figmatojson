@@ -148,7 +148,7 @@ function tryExtract(
 // commandsBlob decoder
 // ---------------------------------------------------------------------------
 
-function decodeCommandsBlob(bytes: Uint8Array): string {
+export function decodeCommandsBlob(bytes: Uint8Array): string {
   // 두 시작점 후보를 시도하고, "더 많은 명령을 디코드한 쪽"을 선택.
   // 일부 블롭은 첫 1 byte 헤더(winding flag 추정)를 가지므로 offset=1도 시도.
   const attempts = [0, 1]
