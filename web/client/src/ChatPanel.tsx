@@ -9,7 +9,7 @@
  *                             localStorage only (never in the bundle).
  */
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, ChevronDown, Check, Crown, KeyRound, Loader2, ShieldCheck } from 'lucide-react';
+import { ArrowUp, ChevronDown, Check, KeyRound, Loader2, Save, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -512,7 +512,7 @@ function AuthModal({
                 onSaveKey(val.trim());
               }}
             >
-              <Crown />
+              <Save />
               Save Key
             </Button>
           )}
