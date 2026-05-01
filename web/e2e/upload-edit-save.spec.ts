@@ -25,6 +25,22 @@ const REPO_ROOT = resolve(__dirname, '..', '..');
 const SAMPLE_FIG = join(REPO_ROOT, 'docs', '메타리치 화면 UI Design.fig');
 const BVP_FIG = join(REPO_ROOT, 'docs', 'bvp.fig');
 
+/**
+ * Wait for the document to fully load. The header renders
+ * "<name> · <N,NNN> nodes · 6 pages" only after fetchDoc() resolves,
+ * so this is a stable, content-driven signal that doesn't depend on a
+ * specific DOM element (the page-picker switched from a native <select>
+ * to a Radix combobox during the shadcn migration).
+ */
+async function waitForDocLoaded(
+  page: import('@playwright/test').Page,
+  expectedPages: number,
+  timeout = 60_000,
+) {
+  const re = new RegExp(`${expectedPages}\\s+pages`);
+  await expect(page.getByText(re).first()).toBeVisible({ timeout });
+}
+
 test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
   test.skip(!existsSync(SAMPLE_FIG), `sample missing: ${SAMPLE_FIG}`);
 
@@ -45,14 +61,10 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
     const fileInput = page.locator('input[type="file"][accept=".fig"]');
     await fileInput.setInputFiles(SAMPLE_FIG);
 
-    // 2. Page selector should appear AND populate with 6 pages (metarich sample).
-    //    select element appears as soon as session is set, but options fill only
-    //    after fetchDoc resolves — wait explicitly for the option count.
-    const pageSelector = page.locator('select');
-    await expect(pageSelector).toBeVisible({ timeout: 60_000 });
-    await expect(pageSelector.locator('option')).toHaveCount(6, { timeout: 60_000 });
-    const pageCount = await pageSelector.locator('option').count();
-    console.log(`[e2e] uploaded — ${pageCount} pages detected`);
+    // 2. Wait for the document to load. The header text "X pages" is a
+    //    stable, content-driven signal once fetchDoc() resolves.
+    await waitForDocLoaded(page, 6);
+    console.log('[e2e] uploaded — 6 pages detected');
 
     // 3. Visual evidence: capture the rendered canvas.
     await page.waitForTimeout(1500); // let Konva render
@@ -104,8 +116,7 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
 
     await page.goto('/');
     await page.locator('input[type="file"][accept=".fig"]').setInputFiles(SAMPLE_FIG);
-    await expect(page.locator('select')).toBeVisible({ timeout: 60_000 });
-    await expect(page.locator('select option')).toHaveCount(6, { timeout: 60_000 });
+    await waitForDocLoaded(page, 6);
     expect(sessionId).toBeTruthy();
 
     // Locate an INSTANCE that exposes editable component texts.
@@ -163,7 +174,7 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
     });
     await page.goto('/');
     await page.locator('input[type="file"][accept=".fig"]').setInputFiles(SAMPLE_FIG);
-    await expect(page.locator('select option')).toHaveCount(6, { timeout: 60_000 });
+    await waitForDocLoaded(page, 6);
     expect(sessionId).toBeTruthy();
 
     const doc = await request.get(`http://localhost:5274/api/doc/${sessionId}`).then((r) => r.json());
@@ -227,7 +238,7 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
     });
     await page.goto('/');
     await page.locator('input[type="file"][accept=".fig"]').setInputFiles(SAMPLE_FIG);
-    await expect(page.locator('select option')).toHaveCount(6, { timeout: 60_000 });
+    await waitForDocLoaded(page, 6);
     expect(sessionId).toBeTruthy();
 
     const doc = await request.get(`http://localhost:5274/api/doc/${sessionId}`).then((r) => r.json());
@@ -290,7 +301,7 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
     });
     await page.goto('/');
     await page.locator('input[type="file"][accept=".fig"]').setInputFiles(SAMPLE_FIG);
-    await expect(page.locator('select option')).toHaveCount(6, { timeout: 60_000 });
+    await waitForDocLoaded(page, 6);
     expect(sessionId).toBeTruthy();
 
     // 1. API-key mode without a key → 401
@@ -351,8 +362,7 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
     await page.goto('/');
     const fileInput = page.locator('input[type="file"][accept=".fig"]');
     await fileInput.setInputFiles(SAMPLE_FIG);
-    await expect(page.locator('select')).toBeVisible({ timeout: 60_000 });
-    await expect(page.locator('select option')).toHaveCount(6, { timeout: 60_000 });
+    await waitForDocLoaded(page, 6);
 
     expect(sessionId, 'sessionId from /api/doc/:id request').toBeTruthy();
     console.log(`[e2e-api] sessionId = ${sessionId}`);
