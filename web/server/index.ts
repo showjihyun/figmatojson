@@ -26,7 +26,7 @@ import { FsAssetServer } from './adapters/driven/FsAssetServer.js';
 import { InProcessTools } from './adapters/driven/InProcessTools.js';
 import { AnthropicChat } from './adapters/driven/AnthropicChat.js';
 import { AgentSdkChat } from './adapters/driven/AgentSdkChat.js';
-import { InMemoryEditJournal } from './adapters/driven/InMemoryEditJournal.js';
+import { FsEditJournal } from './adapters/driven/FsEditJournal.js';
 import { registerRoutes } from './adapters/driving/http/index.js';
 import { UploadFig } from '../core/application/UploadFig.js';
 import { EditNode } from '../core/application/EditNode.js';
@@ -53,7 +53,7 @@ const repacker = new KiwiCodec(sessionStore);
 const assetServer = new FsAssetServer(sessionStore);
 const anthropicChat = new AnthropicChat();
 const agentSdkChat = new AgentSdkChat();
-const editJournal = new InMemoryEditJournal();
+const editJournal = new FsEditJournal(sessionStore);
 // Forward declaration — applyTool is defined later in this file. The closure
 // captures a holder object so the assignment below is visible at call time
 // without TS narrowing it to `never` after init.
