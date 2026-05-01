@@ -408,7 +408,10 @@ body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 }
 
 /* ── Pen viewer (.pen.json structured tree) ────────────────────── */
-#pen { display: flex; flex-direction: row; }
+/* #pen.active overrides .panel.active's "display:block" — only when active.
+   ID selector trumps class, so we can't use #pen alone or it leaks while inactive. */
+#pen { display: none; }
+#pen.active { display: flex; flex-direction: row; }
 .pen-sidebar {
   width: 240px;
   flex: 0 0 auto;
