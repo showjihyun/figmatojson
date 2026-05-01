@@ -689,7 +689,7 @@ function ComponentTextsSection({
   );
 }
 
-function ComponentTextRow({
+export function ComponentTextRow({
   item,
   mode,
   instanceGuid,
