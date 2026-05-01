@@ -393,12 +393,22 @@ function AuthModal({
         </DialogHeader>
 
         <div className="space-y-2.5">
-          {/* Subscription card */}
-          <button
-            type="button"
+          {/* Subscription card — div+role=button instead of <button> so the
+              API-key card below can host an <a> for the help link without
+              violating HTML's no-interactive-descendants-of-button rule. */}
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => onPickMode('subscription')}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onPickMode('subscription');
+              }
+            }}
             className={cn(
-              'group flex w-full items-start gap-3 rounded-lg border p-3.5 text-left transition-colors',
+              'group flex w-full cursor-pointer items-start gap-3 rounded-lg border p-3.5 text-left transition-colors',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
               mode === 'subscription'
                 ? 'border-emerald-700 bg-emerald-950/40'
                 : 'border-border bg-background hover:border-emerald-900',
@@ -432,14 +442,24 @@ function AuthModal({
                 No key required. Run <code className="rounded bg-muted px-1">claude login</code> once if you haven't yet.
               </div>
             </div>
-          </button>
+          </div>
 
           {/* API Key card */}
-          <button
-            type="button"
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => onPickMode('api-key')}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                // Don't preempt the inner <a> link's own keyboard activation.
+                if (e.target instanceof HTMLAnchorElement) return;
+                e.preventDefault();
+                onPickMode('api-key');
+              }
+            }}
             className={cn(
-              'group flex w-full items-start gap-3 rounded-lg border p-3.5 text-left transition-colors',
+              'group flex w-full cursor-pointer items-start gap-3 rounded-lg border p-3.5 text-left transition-colors',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
               mode === 'api-key'
                 ? 'border-blue-700 bg-blue-950/40'
                 : 'border-border bg-background hover:border-blue-900',
@@ -478,7 +498,7 @@ function AuthModal({
                 .
               </div>
             </div>
-          </button>
+          </div>
         </div>
 
         {mode === 'api-key' && (
