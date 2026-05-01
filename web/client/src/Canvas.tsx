@@ -18,6 +18,7 @@ interface CanvasProps {
   selectedGuid: string | null;
   onSelect: (guid: string | null) => void;
   onMove?: (guid: string, x: number, y: number) => void;
+  onResize?: (guid: string, x: number, y: number, w: number, h: number) => void;
 }
 
 function guidStr(g: any): string | null {
@@ -228,52 +229,89 @@ function findAbsBounds(
   return null;
 }
 
-/** Figma-style selection overlay: blue outline + 4 corner handles + size badge. */
+/** Figma-style selection overlay with draggable corner handles for resize. */
 function SelectionOverlay({
   bounds,
   scale,
+  onResize,
+  guid,
 }: {
   bounds: { x: number; y: number; w: number; h: number };
   scale: number;
+  onResize?: (guid: string, x: number, y: number, w: number, h: number) => void;
+  guid: string | null;
 }) {
-  const HANDLE = 6 / scale;
+  const HANDLE = 8 / scale;
   const STROKE = 1.5 / scale;
   const BADGE_FONT = 11 / scale;
   const BADGE_PAD_X = 6 / scale;
   const BADGE_PAD_Y = 3 / scale;
-  const sizeLabel = `${Math.round(bounds.w)} × ${Math.round(bounds.h)}`;
+  // Local resize preview: while dragging, render bounds from this state for fluid feedback.
+  const [drag, setDrag] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const live = drag ?? bounds;
+  const sizeLabel = `${Math.round(live.w)} × ${Math.round(live.h)}`;
   const labelW = sizeLabel.length * BADGE_FONT * 0.55 + BADGE_PAD_X * 2;
   const labelH = BADGE_FONT + BADGE_PAD_Y * 2;
+
+  const corners: Array<{
+    cx: number; cy: number;
+    /** axis flags: which edge each axis pulls from */
+    ax: 'x' | 'r'; ay: 'y' | 'b';
+  }> = [
+    { cx: live.x, cy: live.y, ax: 'x', ay: 'y' },                        // top-left
+    { cx: live.x + live.w, cy: live.y, ax: 'r', ay: 'y' },               // top-right
+    { cx: live.x, cy: live.y + live.h, ax: 'x', ay: 'b' },               // bottom-left
+    { cx: live.x + live.w, cy: live.y + live.h, ax: 'r', ay: 'b' },      // bottom-right
+  ];
+
   return (
-    <Group listening={false}>
+    <Group>
       <Rect
-        x={bounds.x}
-        y={bounds.y}
-        width={bounds.w}
-        height={bounds.h}
+        x={live.x}
+        y={live.y}
+        width={live.w}
+        height={live.h}
         stroke="#0a84ff"
         strokeWidth={STROKE}
         fill="transparent"
+        listening={false}
       />
-      {[
-        { cx: bounds.x, cy: bounds.y },
-        { cx: bounds.x + bounds.w, cy: bounds.y },
-        { cx: bounds.x, cy: bounds.y + bounds.h },
-        { cx: bounds.x + bounds.w, cy: bounds.y + bounds.h },
-      ].map((p, i) => (
+      {corners.map((c, i) => (
         <Rect
           key={i}
-          x={p.cx - HANDLE / 2}
-          y={p.cy - HANDLE / 2}
+          x={c.cx - HANDLE / 2}
+          y={c.cy - HANDLE / 2}
           width={HANDLE}
           height={HANDLE}
           fill="white"
           stroke="#0a84ff"
           strokeWidth={STROKE}
+          draggable={!!onResize}
+          onDragMove={(e) => {
+            // Compute new bounds from the dragged corner position.
+            const nx = e.target.x() + HANDLE / 2;
+            const ny = e.target.y() + HANDLE / 2;
+            let x = bounds.x, y = bounds.y, w = bounds.w, h = bounds.h;
+            if (c.ax === 'x') { w = bounds.x + bounds.w - nx; x = nx; }
+            else { w = nx - bounds.x; }
+            if (c.ay === 'y') { h = bounds.y + bounds.h - ny; y = ny; }
+            else { h = ny - bounds.y; }
+            // Clamp minimums
+            if (w < 1) { w = 1; if (c.ax === 'x') x = bounds.x + bounds.w - 1; }
+            if (h < 1) { h = 1; if (c.ay === 'y') y = bounds.y + bounds.h - 1; }
+            setDrag({ x, y, w, h });
+          }}
+          onDragEnd={() => {
+            if (drag && guid && onResize) onResize(guid, drag.x, drag.y, drag.w, drag.h);
+            setDrag(null);
+          }}
         />
       ))}
-      {/* size badge below the selection */}
-      <Group x={bounds.x + bounds.w / 2 - labelW / 2} y={bounds.y + bounds.h + 6 / scale}>
+      <Group
+        x={live.x + live.w / 2 - labelW / 2}
+        y={live.y + live.h + 6 / scale}
+        listening={false}
+      >
         <Rect width={labelW} height={labelH} fill="#0a84ff" cornerRadius={3 / scale} />
         <KText
           text={sizeLabel}
@@ -288,7 +326,7 @@ function SelectionOverlay({
   );
 }
 
-export function Canvas({ page, selectedGuid, onSelect, onMove }: CanvasProps) {
+export function Canvas({ page, selectedGuid, onSelect, onMove, onResize }: CanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [scale, setScale] = useState(0.25);
@@ -478,8 +516,13 @@ export function Canvas({ page, selectedGuid, onSelect, onMove }: CanvasProps) {
           ))}
         </Layer>
         {selectionBounds && (
-          <Layer listening={false}>
-            <SelectionOverlay bounds={selectionBounds} scale={scale} />
+          <Layer listening={!spaceHeld}>
+            <SelectionOverlay
+              bounds={selectionBounds}
+              scale={scale}
+              onResize={onResize}
+              guid={selectedGuid}
+            />
           </Layer>
         )}
       </Stage>

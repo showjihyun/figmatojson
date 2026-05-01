@@ -48,3 +48,58 @@ export async function downloadFig(sessionId: string, origName: string): Promise<
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+export async function setInstanceTextOverride(
+  sessionId: string,
+  instanceGuid: string,
+  masterTextGuid: string,
+  value: string,
+): Promise<void> {
+  const r = await fetch(`/api/instance-override/${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instanceGuid, masterTextGuid, value }),
+  });
+  if (!r.ok) throw new Error(`override failed: ${r.status} ${await r.text()}`);
+}
+
+export async function resizeNode(
+  sessionId: string,
+  nodeGuid: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): Promise<void> {
+  const r = await fetch(`/api/resize/${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nodeGuid, x, y, w, h }),
+  });
+  if (!r.ok) throw new Error(`resize failed: ${r.status} ${await r.text()}`);
+}
+
+export async function downloadSessionSnapshot(sessionId: string, origName: string): Promise<void> {
+  const r = await fetch(`/api/session/${sessionId}/snapshot`);
+  if (!r.ok) throw new Error(`snapshot failed: ${r.status} ${await r.text()}`);
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = origName.replace(/\.fig$/, '') + '.figrev-session.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function loadSessionSnapshot(file: File): Promise<UploadResult> {
+  const text = await file.text();
+  const r = await fetch('/api/session/load', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: text,
+  });
+  if (!r.ok) throw new Error(`load failed: ${r.status} ${await r.text()}`);
+  return r.json();
+}

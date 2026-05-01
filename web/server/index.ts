@@ -10,9 +10,18 @@
  * 세션은 메모리 + 임시 디렉토리 (PoC라서 단순). 프로덕션은 별도 storage 필요.
  */
 import { serve } from '@hono/node-server';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+  rmSync,
+  existsSync,
+  readdirSync,
+  statSync,
+  mkdirSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +43,7 @@ import {
 import { repack } from '../../src/repack.js';
 import { parseVectorNetworkBlob, vectorNetworkToPath } from '../../src/vector.js';
 import type { TreeNode } from '../../src/types.js';
+import type Anthropic from '@anthropic-ai/sdk';
 
 interface Session {
   id: string;
@@ -359,6 +369,675 @@ app.post('/api/save/:id', async (c) => {
     },
   });
 });
+
+// ─── Per-instance text override (no master mutation) ────────────────────────
+//
+// Mutates instance.symbolData.symbolOverrides to add/update an entry whose
+// guidPath leads to the master text. Only THIS instance's render changes;
+// other instances of the same master are untouched.
+app.post('/api/instance-override/:id', async (c) => {
+  const s = sessions.get(c.req.param('id'));
+  if (!s) return c.json({ error: 'session not found' }, 404);
+  const body = (await c.req.json()) as {
+    instanceGuid: string;
+    masterTextGuid: string;
+    value: string;
+  };
+  const messagePath = join(s.dir, 'extracted', '04_decoded', 'message.json');
+  if (!existsSync(messagePath)) return c.json({ error: 'message.json missing' }, 500);
+  const raw = readFileSync(messagePath, 'utf8');
+  const msg = JSON.parse(raw) as { nodeChanges?: Array<Record<string, unknown>> };
+  const inst = msg.nodeChanges?.find((n) => {
+    const g = n.guid as { sessionID?: number; localID?: number } | undefined;
+    return g && `${g.sessionID}:${g.localID}` === body.instanceGuid;
+  });
+  if (!inst) return c.json({ error: `INSTANCE ${body.instanceGuid} not found` }, 404);
+
+  const [ms, ml] = body.masterTextGuid.split(':').map((s2) => parseInt(s2, 10));
+  if (!Number.isInteger(ms) || !Number.isInteger(ml)) {
+    return c.json({ error: `invalid masterTextGuid ${body.masterTextGuid}` }, 400);
+  }
+
+  // Ensure symbolData.symbolOverrides exists
+  inst.symbolData = (inst.symbolData ?? {}) as Record<string, unknown>;
+  const sd = inst.symbolData as { symbolOverrides?: Array<Record<string, unknown>> };
+  sd.symbolOverrides = sd.symbolOverrides ?? [];
+
+  // Find an existing override targeting this master text (single-step path)
+  let entry = sd.symbolOverrides.find((o) => {
+    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+    return Array.isArray(guids) && guids.length === 1 && guids[0]?.sessionID === ms && guids[0]?.localID === ml;
+  });
+  if (!entry) {
+    entry = {
+      guidPath: { guids: [{ sessionID: ms, localID: ml }] },
+      textData: { characters: body.value, lines: [{ lineType: 'PLAIN', styleId: 0, indentationLevel: 0, sourceDirectionality: 'AUTO', listStartOffset: 0, isFirstLineOfList: false }] },
+    };
+    sd.symbolOverrides.push(entry);
+  } else {
+    const td = (entry.textData ?? {}) as { characters?: string; lines?: unknown };
+    td.characters = body.value;
+    if (!td.lines) td.lines = [{ lineType: 'PLAIN', styleId: 0, indentationLevel: 0, sourceDirectionality: 'AUTO', listStartOffset: 0, isFirstLineOfList: false }];
+    entry.textData = td;
+  }
+  writeFileSync(messagePath, JSON.stringify(msg));
+
+  // Mirror in client doc — store an _instanceOverrides map keyed by master text guid.
+  function walk(n: Record<string, unknown>): boolean {
+    const guid = n.guid as { sessionID: number; localID: number } | undefined;
+    if (guid && `${guid.sessionID}:${guid.localID}` === body.instanceGuid) {
+      const overrides = (n._instanceOverrides ??= {}) as Record<string, string>;
+      overrides[body.masterTextGuid] = body.value;
+      return true;
+    }
+    const children = n.children as Array<Record<string, unknown>> | undefined;
+    if (Array.isArray(children)) {
+      for (const c of children) if (walk(c)) return true;
+    }
+    return false;
+  }
+  walk(s.documentJson as unknown as Record<string, unknown>);
+
+  return c.json({ ok: true });
+});
+
+// ─── Resize endpoint ────────────────────────────────────────────────────────
+//
+// Atomic patch of size.{x,y} + transform.{m02,m12} so the canvas can apply a
+// single drag-end as one logical change.
+app.post('/api/resize/:id', async (c) => {
+  const s = sessions.get(c.req.param('id'));
+  if (!s) return c.json({ error: 'session not found' }, 404);
+  const body = (await c.req.json()) as {
+    nodeGuid: string;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  };
+  const messagePath = join(s.dir, 'extracted', '04_decoded', 'message.json');
+  if (!existsSync(messagePath)) return c.json({ error: 'message.json missing' }, 500);
+  const raw = readFileSync(messagePath, 'utf8');
+  const msg = JSON.parse(raw) as { nodeChanges?: Array<Record<string, unknown>> };
+  const node = msg.nodeChanges?.find((n) => {
+    const g = n.guid as { sessionID?: number; localID?: number } | undefined;
+    return g && `${g.sessionID}:${g.localID}` === body.nodeGuid;
+  });
+  if (!node) return c.json({ error: `node ${body.nodeGuid} not found` }, 404);
+  const transform = ((node.transform as Record<string, number> | undefined) ?? {}) as Record<string, number>;
+  transform.m02 = body.x;
+  transform.m12 = body.y;
+  // Preserve orthonormal (m00/m11=1, m01/m10=0) — minimal change.
+  if (typeof transform.m00 !== 'number') transform.m00 = 1;
+  if (typeof transform.m11 !== 'number') transform.m11 = 1;
+  if (typeof transform.m01 !== 'number') transform.m01 = 0;
+  if (typeof transform.m10 !== 'number') transform.m10 = 0;
+  node.transform = transform;
+  node.size = { x: Math.max(1, body.w), y: Math.max(1, body.h) };
+  writeFileSync(messagePath, JSON.stringify(msg));
+
+  function walk(n: Record<string, unknown>): boolean {
+    const guid = n.guid as { sessionID: number; localID: number } | undefined;
+    if (guid && `${guid.sessionID}:${guid.localID}` === body.nodeGuid) {
+      const t = (n.transform ??= {}) as Record<string, number>;
+      t.m02 = body.x; t.m12 = body.y;
+      n.size = { x: Math.max(1, body.w), y: Math.max(1, body.h) };
+      return true;
+    }
+    const children = n.children as Array<Record<string, unknown>> | undefined;
+    if (Array.isArray(children)) {
+      for (const c of children) if (walk(c)) return true;
+    }
+    return false;
+  }
+  walk(s.documentJson as unknown as Record<string, unknown>);
+  return c.json({ ok: true });
+});
+
+// ─── Save / Load editing session as a JSON snapshot ─────────────────────────
+//
+// A "session" snapshot is the current message.json plus session metadata —
+// the entire editing state up to but excluding final .fig export. User can
+// download it, return later, and resume editing without re-uploading the
+// original .fig.
+app.get('/api/session/:id/snapshot', (c) => {
+  const s = sessions.get(c.req.param('id'));
+  if (!s) return c.json({ error: 'session not found' }, 404);
+  const messagePath = join(s.dir, 'extracted', '04_decoded', 'message.json');
+  const schemaBinPath = join(s.dir, 'extracted', '03_decompressed', 'schema.kiwi.bin');
+  const containerInfoPath = join(s.dir, 'extracted', '01_container');
+  if (!existsSync(messagePath)) return c.json({ error: 'message.json missing' }, 500);
+  // Read and base64 the binary parts so the snapshot is JSON-portable.
+  const messageJson = readFileSync(messagePath, 'utf8');
+  const schemaBin = existsSync(schemaBinPath) ? readFileSync(schemaBinPath).toString('base64') : null;
+  const archiveInfoPath = join(s.dir, 'extracted', '02_archive', '_info.json');
+  const archiveInfo = existsSync(archiveInfoPath) ? JSON.parse(readFileSync(archiveInfoPath, 'utf8')) : null;
+  // Sidecar files (meta.json, thumbnail.png, images/*) — preserve as base64
+  const sidecars: Array<{ name: string; b64: string }> = [];
+  function collect(dirPath: string, prefix: string): void {
+    if (!existsSync(dirPath)) return;
+    for (const f of readdirSync(dirPath).sort()) {
+      const p = join(dirPath, f);
+      if (statSync(p).isDirectory()) collect(p, `${prefix}${f}/`);
+      else sidecars.push({ name: `${prefix}${f}`, b64: readFileSync(p).toString('base64') });
+    }
+  }
+  collect(containerInfoPath, '');
+  return c.json({
+    version: 1,
+    origName: s.origName,
+    archiveVersion: s.archiveVersion,
+    archiveInfo,
+    schemaBinB64: schemaBin,
+    messageJson,
+    sidecars,
+  });
+});
+
+app.post('/api/session/load', async (c) => {
+  const body = (await c.req.json()) as {
+    version: number;
+    origName: string;
+    archiveVersion: number;
+    schemaBinB64: string | null;
+    messageJson: string;
+    sidecars: Array<{ name: string; b64: string }>;
+    archiveInfo?: Record<string, unknown>;
+  };
+  if (body.version !== 1) return c.json({ error: 'unsupported snapshot version' }, 400);
+  const tmpDir = mkdtempSync(join(tmpdir(), 'figrev-web-'));
+  try {
+    // Recreate the extracted/ tree expected by repack --mode json.
+    const extractedDir = join(tmpDir, 'extracted');
+    const decompDir = join(extractedDir, '03_decompressed');
+    const decodedDir = join(extractedDir, '04_decoded');
+    const archiveDir = join(extractedDir, '02_archive');
+    const containerDir = join(extractedDir, '01_container');
+    for (const d of [decompDir, decodedDir, archiveDir, containerDir]) {
+      ensureDirSync(d);
+    }
+    if (body.schemaBinB64) {
+      writeFileSync(join(decompDir, 'schema.kiwi.bin'), Buffer.from(body.schemaBinB64, 'base64'));
+    }
+    writeFileSync(join(decodedDir, 'message.json'), body.messageJson);
+    writeFileSync(
+      join(archiveDir, '_info.json'),
+      JSON.stringify({ version: body.archiveVersion ?? 106, ...(body.archiveInfo ?? {}) }),
+    );
+    for (const sc of body.sidecars) {
+      const dest = join(containerDir, sc.name);
+      ensureDirSync(dirname(dest));
+      writeFileSync(dest, Buffer.from(sc.b64, 'base64'));
+    }
+
+    // Rebuild the in-memory documentJson from message.json by decoding through
+    // the existing pipeline. Easiest: parse message.json + reuse buildTree.
+    const messageObj = JSON.parse(body.messageJson, (_, v) => {
+      if (v && typeof v === 'object' && typeof (v as Record<string, unknown>).__bytes === 'string') {
+        return Uint8Array.from(Buffer.from((v as { __bytes: string }).__bytes, 'base64'));
+      }
+      return v;
+    });
+    const tree = buildTree(messageObj as never);
+    if (!tree.document) throw new Error('snapshot has no DOCUMENT root');
+    const blobs = (messageObj as { blobs?: Array<{ bytes: Uint8Array }> }).blobs ?? [];
+    const symbolIndex = new Map<string, TreeNode>();
+    for (const node of tree.allNodes.values()) symbolIndex.set(node.guidStr, node);
+    const documentJson = toClientNode(tree.document, blobs, symbolIndex);
+
+    const id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    sessions.set(id, {
+      id,
+      dir: tmpDir,
+      origName: body.origName,
+      archiveVersion: body.archiveVersion,
+      documentJson,
+    });
+    return c.json({
+      sessionId: id,
+      origName: body.origName,
+      pageCount: tree.document.children.filter((n) => n.type === 'CANVAS').length,
+      nodeCount: tree.allNodes.size,
+    });
+  } catch (err) {
+    rmSync(tmpDir, { recursive: true, force: true });
+    return c.json({ error: (err as Error).message }, 500);
+  }
+});
+
+function ensureDirSync(p: string): void {
+  if (!existsSync(p)) mkdirSync(p, { recursive: true });
+}
+
+// ─── Claude AI chat proxy ──────────────────────────────────────────────────
+//
+// Browser sends user messages + selectedGuid + an x-anthropic-key header.
+// Server makes a tool-using call to Claude with our editing primitives.
+// The model decides what to mutate; we apply each tool call by reusing the
+// existing PATCH / instance-override / resize handlers.
+app.post('/api/chat/:id', async (c) => {
+  const s = sessions.get(c.req.param('id'));
+  if (!s) return c.json({ error: 'session not found' }, 404);
+  const body = (await c.req.json()) as {
+    messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    selectedGuid?: string | null;
+    model?: string;
+    authMode?: 'subscription' | 'api-key';
+  };
+  const authMode = body.authMode === 'api-key' ? 'api-key' : 'subscription';
+
+  // Whitelist allowed models
+  const ALLOWED = new Set([
+    'claude-opus-4-7',
+    'claude-opus-4-6',
+    'claude-sonnet-4-6',
+    'claude-haiku-4-5-20251001',
+  ]);
+  const model = body.model && ALLOWED.has(body.model) ? body.model : 'claude-opus-4-6';
+
+  // Subscription mode: use the Claude Agent SDK which auto-discovers the
+  // local Claude Code credentials (~/.claude/), so no API key is needed.
+  // Recommended default — works out of the box for users running this PoC
+  // alongside Claude Code on their machine.
+  if (authMode === 'subscription') {
+    return runSubscriptionChat(c, s, body.messages, body.selectedGuid ?? null, model);
+  }
+
+  // API-key mode (legacy): require the user-supplied key in the header.
+  const apiKey = c.req.header('x-anthropic-key') ?? '';
+  if (!apiKey.startsWith('sk-ant-')) {
+    return c.json({ error: 'missing or invalid x-anthropic-key header' }, 401);
+  }
+  const Anthropic = (await import('@anthropic-ai/sdk')).default;
+  const client = new Anthropic({ apiKey });
+
+  // Build a compact context of the current document — top-level pages + the
+  // selected node's relevant fields. (Sending the whole doc is too large.)
+  const summary = summarizeDoc(s.documentJson, body.selectedGuid ?? null);
+
+  const tools = [
+    {
+      name: 'set_text',
+      description:
+        'Set the textData.characters of a TEXT node. Affects every instance that references this master.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          guid: { type: 'string', description: 'Target node GUID like "26:269".' },
+          value: { type: 'string', description: 'New text content.' },
+        },
+        required: ['guid', 'value'],
+      },
+    },
+    {
+      name: 'override_instance_text',
+      description:
+        'Set a per-instance text override. Mutates only the given INSTANCE; the master stays intact.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          instanceGuid: { type: 'string' },
+          masterTextGuid: { type: 'string' },
+          value: { type: 'string' },
+        },
+        required: ['instanceGuid', 'masterTextGuid', 'value'],
+      },
+    },
+    {
+      name: 'set_position',
+      description: 'Move a node by setting its transform.m02 (x) and transform.m12 (y).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          guid: { type: 'string' },
+          x: { type: 'number' },
+          y: { type: 'number' },
+        },
+        required: ['guid', 'x', 'y'],
+      },
+    },
+    {
+      name: 'set_size',
+      description: 'Resize a node by setting size.x (width) and size.y (height).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          guid: { type: 'string' },
+          w: { type: 'number' },
+          h: { type: 'number' },
+        },
+        required: ['guid', 'w', 'h'],
+      },
+    },
+    {
+      name: 'set_fill_color',
+      description:
+        'Set fillPaints[0].color RGBA channels (each 0..1). Use for changing a frame/text fill.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          guid: { type: 'string' },
+          r: { type: 'number' },
+          g: { type: 'number' },
+          b: { type: 'number' },
+          a: { type: 'number' },
+        },
+        required: ['guid', 'r', 'g', 'b', 'a'],
+      },
+    },
+  ];
+
+  // Run the agent loop: up to 5 turns of tool calls.
+  const conversation: Anthropic.MessageParam[] = body.messages.map((m) => ({
+    role: m.role,
+    content: m.content,
+  }));
+  const actions: Array<{ tool: string; input: unknown }> = [];
+  let assistantText = '';
+  for (let turn = 0; turn < 5; turn++) {
+    const response = await client.messages.create({
+      model,
+      max_tokens: 1024,
+      system: `You are a design assistant editing a Figma file via tool calls.
+Document summary:
+${summary}
+Use the tools to make the user's requested edits. Be concise.`,
+      tools: tools as never,
+      messages: conversation,
+    });
+    // Extract text + tool_use
+    const toolUses: Anthropic.ToolUseBlock[] = [];
+    for (const block of response.content) {
+      if (block.type === 'text') assistantText += block.text;
+      else if (block.type === 'tool_use') toolUses.push(block);
+    }
+    if (toolUses.length === 0) break;
+    // Apply each tool call locally and produce tool_result blocks
+    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    for (const tu of toolUses) {
+      try {
+        await applyTool(s, tu.name, tu.input as Record<string, unknown>);
+        actions.push({ tool: tu.name, input: tu.input });
+        toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: 'ok' });
+      } catch (err) {
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: `error: ${(err as Error).message}`,
+          is_error: true,
+        });
+      }
+    }
+    conversation.push({ role: 'assistant', content: response.content });
+    conversation.push({ role: 'user', content: toolResults });
+    if (response.stop_reason === 'end_turn') break;
+  }
+  return c.json({ assistantText, actions });
+});
+
+function summarizeDoc(doc: unknown, selectedGuid: string | null): string {
+  const lines: string[] = [];
+  function walk(n: any, depth: number, max: number): void {
+    if (!n || depth > max) return;
+    const tag = `${n.type}${n.name ? ` "${n.name}"` : ''} (${n.id ?? '?'})`;
+    lines.push('  '.repeat(depth) + tag + (n.id === selectedGuid ? '  ← SELECTED' : ''));
+    if (Array.isArray(n.children) && depth < max) {
+      for (const c of n.children.slice(0, 8)) walk(c, depth + 1, max);
+      if (n.children.length > 8) lines.push('  '.repeat(depth + 1) + `... ${n.children.length - 8} more`);
+    }
+  }
+  walk(doc, 0, 3);
+  if (selectedGuid) {
+    const sel = findById(doc, selectedGuid);
+    if (sel) {
+      lines.push('');
+      lines.push(`Selected node detail:`);
+      const compact = {
+        id: sel.id,
+        type: sel.type,
+        name: sel.name,
+        size: sel.size,
+        transform: sel.transform,
+        textData: sel.textData,
+        fillPaints: sel.fillPaints,
+        _componentTexts: sel._componentTexts,
+      };
+      lines.push(JSON.stringify(compact, null, 2).slice(0, 1200));
+    }
+  }
+  return lines.join('\n');
+}
+
+function findById(node: any, id: string): any | null {
+  if (!node || typeof node !== 'object') return null;
+  if (node.id === id) return node;
+  if (Array.isArray(node.children)) {
+    for (const c of node.children) {
+      const f = findById(c, id);
+      if (f) return f;
+    }
+  }
+  return null;
+}
+
+/**
+ * Subscription-mode chat — uses @anthropic-ai/claude-agent-sdk's `query()`,
+ * which auto-discovers the user's Claude Code credentials. Our edit tools are
+ * exposed as a small in-process MCP server; Claude calls them and we mutate
+ * the session in the handlers.
+ */
+async function runSubscriptionChat(
+  c: Context,
+  s: Session,
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  selectedGuid: string | null,
+  model: string,
+): Promise<Response> {
+  const sdk = await import('@anthropic-ai/claude-agent-sdk');
+  const { query, tool, createSdkMcpServer } = sdk;
+  const z = (await import('zod')).z;
+
+  const summary = summarizeDoc(s.documentJson, selectedGuid);
+  const actions: Array<{ tool: string; input: unknown }> = [];
+
+  const wrap = <T extends Record<string, unknown>>(name: string, fn: (i: T) => Promise<void>) =>
+    async (input: T) => {
+      await fn(input);
+      actions.push({ tool: name, input });
+      return { content: [{ type: 'text' as const, text: 'ok' }] };
+    };
+
+  const editServer = createSdkMcpServer({
+    name: 'figma_editor',
+    tools: [
+      tool('set_text', 'Set textData.characters of a TEXT node (master-level — affects all instances).',
+        { guid: z.string(), value: z.string() },
+        wrap('set_text', async ({ guid, value }) => applyTool(s, 'set_text', { guid, value })),
+      ),
+      tool('override_instance_text', 'Set per-instance text override; master is untouched.',
+        { instanceGuid: z.string(), masterTextGuid: z.string(), value: z.string() },
+        wrap('override_instance_text', async ({ instanceGuid, masterTextGuid, value }) =>
+          applyTool(s, 'override_instance_text', { instanceGuid, masterTextGuid, value })),
+      ),
+      tool('set_position', 'Move a node by setting transform.m02/m12.',
+        { guid: z.string(), x: z.number(), y: z.number() },
+        wrap('set_position', async ({ guid, x, y }) => applyTool(s, 'set_position', { guid, x, y })),
+      ),
+      tool('set_size', 'Resize a node by setting size.x and size.y.',
+        { guid: z.string(), w: z.number(), h: z.number() },
+        wrap('set_size', async ({ guid, w, h }) => applyTool(s, 'set_size', { guid, w, h })),
+      ),
+      tool('set_fill_color', 'Set fillPaints[0].color RGBA (each 0..1).',
+        { guid: z.string(), r: z.number(), g: z.number(), b: z.number(), a: z.number() },
+        wrap('set_fill_color', async ({ guid, r, g, b, a }) =>
+          applyTool(s, 'set_fill_color', { guid, r, g, b, a })),
+      ),
+    ],
+  });
+
+  // Compose the prompt. Agent SDK takes a single string prompt (or async
+  // iterable). We linearize the chat: prior turns become a transcript,
+  // current user msg is appended, system prompt is prepended.
+  const transcript = messages
+    .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+    .join('\n\n');
+  const prompt = `${transcript}\n\nApply edits via the figma_editor tools. Be concise.`;
+
+  let assistantText = '';
+  try {
+    const q = query({
+      prompt,
+      options: {
+        model,
+        mcpServers: { figma_editor: editServer },
+        // Restrict tools to only ours — no Bash/Read/Write etc.
+        allowedTools: [
+          'mcp__figma_editor__set_text',
+          'mcp__figma_editor__override_instance_text',
+          'mcp__figma_editor__set_position',
+          'mcp__figma_editor__set_size',
+          'mcp__figma_editor__set_fill_color',
+        ],
+        systemPrompt: `You are a design assistant editing a Figma file via tool calls.
+Document summary:
+${summary}`,
+        maxTurns: 5,
+        // Auto-approve every tool call (we're in-process; no human in loop).
+        permissionMode: 'bypassPermissions',
+      } as never,
+    });
+    for await (const msg of q) {
+      if ((msg as Record<string, unknown>).type === 'assistant') {
+        const m = msg as { message?: { content?: Array<{ type: string; text?: string }> } };
+        for (const block of m.message?.content ?? []) {
+          if (block.type === 'text' && block.text) assistantText += block.text;
+        }
+      }
+    }
+  } catch (err) {
+    return c.json(
+      {
+        error: `subscription chat failed: ${(err as Error).message}. ` +
+          `Make sure Claude Code is installed and you've run 'claude login'. ` +
+          `Or switch to API Key mode.`,
+      },
+      500,
+    );
+  }
+  return c.json({ assistantText: assistantText || '(no text)', actions });
+}
+
+async function applyTool(s: Session, name: string, input: Record<string, unknown>): Promise<void> {
+  // Dispatch to the local handlers — same code paths that the inspector uses.
+  // We bypass HTTP here for efficiency.
+  const fakeReq = (b: unknown): Request => new Request('http://x/', { method: 'POST', body: JSON.stringify(b), headers: { 'content-type': 'application/json' } });
+  void fakeReq;
+  const messagePath = join(s.dir, 'extracted', '04_decoded', 'message.json');
+  const raw = readFileSync(messagePath, 'utf8');
+  const msg = JSON.parse(raw) as { nodeChanges?: Array<Record<string, unknown>> };
+  const findNode = (guid: string): Record<string, unknown> | undefined => msg.nodeChanges?.find((n) => {
+    const g = n.guid as { sessionID?: number; localID?: number } | undefined;
+    return g && `${g.sessionID}:${g.localID}` === guid;
+  });
+  const mirrorClient = (guid: string, mutator: (n: Record<string, unknown>) => void): void => {
+    function walk(n: Record<string, unknown>): boolean {
+      const g = n.guid as { sessionID: number; localID: number } | undefined;
+      if (g && `${g.sessionID}:${g.localID}` === guid) { mutator(n); return true; }
+      const ch = n.children as Array<Record<string, unknown>> | undefined;
+      if (Array.isArray(ch)) for (const c of ch) if (walk(c)) return true;
+      return false;
+    }
+    walk(s.documentJson as unknown as Record<string, unknown>);
+  };
+
+  switch (name) {
+    case 'set_text': {
+      const node = findNode(String(input.guid));
+      if (!node) throw new Error(`node ${input.guid} not found`);
+      ((node.textData ??= {}) as Record<string, unknown>).characters = String(input.value);
+      writeFileSync(messagePath, JSON.stringify(msg));
+      mirrorClient(String(input.guid), (n) => { ((n.textData ??= {}) as Record<string, unknown>).characters = String(input.value); });
+      // Refresh component-text snapshots
+      function refresh(n: Record<string, unknown>): void {
+        const refs = n._componentTexts as ComponentTextRef[] | undefined;
+        if (Array.isArray(refs)) for (const r of refs) if (r.guid === input.guid) r.characters = String(input.value);
+        const ch = n.children as Array<Record<string, unknown>> | undefined;
+        if (Array.isArray(ch)) for (const c of ch) refresh(c);
+      }
+      refresh(s.documentJson as unknown as Record<string, unknown>);
+      break;
+    }
+    case 'override_instance_text': {
+      const inst = findNode(String(input.instanceGuid));
+      if (!inst) throw new Error(`INSTANCE ${input.instanceGuid} not found`);
+      const [ms, ml] = String(input.masterTextGuid).split(':').map((x) => parseInt(x, 10));
+      inst.symbolData = (inst.symbolData ?? {}) as Record<string, unknown>;
+      const sd = inst.symbolData as { symbolOverrides?: Array<Record<string, unknown>> };
+      sd.symbolOverrides = sd.symbolOverrides ?? [];
+      let entry = sd.symbolOverrides.find((o) => {
+        const g = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+        return Array.isArray(g) && g.length === 1 && g[0]?.sessionID === ms && g[0]?.localID === ml;
+      });
+      if (!entry) {
+        entry = {
+          guidPath: { guids: [{ sessionID: ms, localID: ml }] },
+          textData: { characters: String(input.value), lines: [{ lineType: 'PLAIN', styleId: 0, indentationLevel: 0, sourceDirectionality: 'AUTO', listStartOffset: 0, isFirstLineOfList: false }] },
+        };
+        sd.symbolOverrides.push(entry);
+      } else {
+        ((entry.textData ??= {}) as Record<string, unknown>).characters = String(input.value);
+      }
+      writeFileSync(messagePath, JSON.stringify(msg));
+      mirrorClient(String(input.instanceGuid), (n) => {
+        const m = (n._instanceOverrides ??= {}) as Record<string, string>;
+        m[String(input.masterTextGuid)] = String(input.value);
+      });
+      break;
+    }
+    case 'set_position': {
+      const node = findNode(String(input.guid));
+      if (!node) throw new Error(`node ${input.guid} not found`);
+      const t = (node.transform ??= {}) as Record<string, number>;
+      t.m02 = Number(input.x); t.m12 = Number(input.y);
+      writeFileSync(messagePath, JSON.stringify(msg));
+      mirrorClient(String(input.guid), (n) => {
+        const t2 = (n.transform ??= {}) as Record<string, number>;
+        t2.m02 = Number(input.x); t2.m12 = Number(input.y);
+      });
+      break;
+    }
+    case 'set_size': {
+      const node = findNode(String(input.guid));
+      if (!node) throw new Error(`node ${input.guid} not found`);
+      node.size = { x: Math.max(1, Number(input.w)), y: Math.max(1, Number(input.h)) };
+      writeFileSync(messagePath, JSON.stringify(msg));
+      mirrorClient(String(input.guid), (n) => {
+        n.size = { x: Math.max(1, Number(input.w)), y: Math.max(1, Number(input.h)) };
+      });
+      break;
+    }
+    case 'set_fill_color': {
+      const node = findNode(String(input.guid));
+      if (!node) throw new Error(`node ${input.guid} not found`);
+      const fps = (node.fillPaints as Array<Record<string, unknown>> | undefined) ?? [];
+      const first = fps[0] ?? { type: 'SOLID', visible: true, opacity: 1 };
+      first.color = { r: Number(input.r), g: Number(input.g), b: Number(input.b), a: Number(input.a) };
+      fps[0] = first;
+      node.fillPaints = fps;
+      writeFileSync(messagePath, JSON.stringify(msg));
+      mirrorClient(String(input.guid), (n) => {
+        const fps2 = (n.fillPaints as Array<Record<string, unknown>> | undefined) ?? [];
+        const f0 = fps2[0] ?? { type: 'SOLID', visible: true, opacity: 1 };
+        f0.color = { r: Number(input.r), g: Number(input.g), b: Number(input.b), a: Number(input.a) };
+        fps2[0] = f0;
+        n.fillPaints = fps2;
+      });
+      break;
+    }
+    default:
+      throw new Error(`unknown tool: ${name}`);
+  }
+}
 
 // Cleanup: simple LRU — drop sessions older than 1h on each upload (sufficient for PoC).
 function gcSessions(): void {

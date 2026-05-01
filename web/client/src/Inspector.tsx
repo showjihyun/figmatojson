@@ -13,7 +13,7 @@
  * the backend, but every keystroke still ends up in message.json before save.
  */
 import { useMemo, useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
-import { patchNode } from './api';
+import { patchNode, setInstanceTextOverride } from './api';
 
 interface InspectorProps {
   page: any;
@@ -157,6 +157,8 @@ function TabbedBody({
               node._componentTexts.length > 0 && (
                 <Section title="Component Texts">
                   <ComponentTextsSection
+                    instanceGuid={guid}
+                    instanceOverrides={(node._instanceOverrides ?? {}) as Record<string, string>}
                     refs={node._componentTexts}
                     sessionId={sessionId}
                     onChange={onChange}
@@ -723,14 +725,21 @@ interface ComponentTextRef {
 }
 
 function ComponentTextsSection({
+  instanceGuid,
+  instanceOverrides,
   refs,
   sessionId,
   onChange,
 }: {
+  instanceGuid: string;
+  instanceOverrides: Record<string, string>;
   refs: ComponentTextRef[];
   sessionId: string;
   onChange: () => void;
 }) {
+  // Per-component default mode — most users want INSTANCE-only edits
+  // (Figma's default behavior). Master mode is opt-in.
+  const [mode, setMode] = useState<'instance' | 'master'>('instance');
   return (
     <>
       <div
@@ -741,11 +750,38 @@ function ComponentTextsSection({
           lineHeight: 1.5,
         }}
       >
-        Edit text inside this component. Changes apply to the master and may
-        affect other instances of the same component.
+        {mode === 'instance' ? (
+          <>
+            <strong style={{ color: '#a3e3a3' }}>Instance override:</strong> changes apply only to
+            this instance. Master and other instances stay intact.
+          </>
+        ) : (
+          <>
+            <strong style={{ color: '#ffb86c' }}>Master:</strong> changes propagate to <em>all</em>{' '}
+            instances of this component.
+          </>
+        )}
+      </div>
+      <div style={{ padding: '0 4px 8px' }}>
+        <ToggleButtons<'instance' | 'master'>
+          value={mode}
+          options={[
+            { label: 'Override This', value: 'instance' },
+            { label: 'Edit Master', value: 'master' },
+          ]}
+          onCommit={setMode}
+        />
       </div>
       {refs.map((r) => (
-        <ComponentTextRow key={r.guid} item={r} sessionId={sessionId} onChange={onChange} />
+        <ComponentTextRow
+          key={r.guid}
+          item={r}
+          mode={mode}
+          instanceGuid={instanceGuid}
+          override={instanceOverrides[r.guid]}
+          sessionId={sessionId}
+          onChange={onChange}
+        />
       ))}
     </>
   );
@@ -753,16 +789,25 @@ function ComponentTextsSection({
 
 function ComponentTextRow({
   item,
+  mode,
+  instanceGuid,
+  override,
   sessionId,
   onChange,
 }: {
   item: ComponentTextRef;
+  mode: 'instance' | 'master';
+  instanceGuid: string;
+  override: string | undefined;
   sessionId: string;
   onChange: () => void;
 }) {
-  const [val, setVal] = useState(item.characters);
-  useEffect(() => setVal(item.characters), [item.characters]);
-  const dirty = val !== item.characters;
+  // The displayed value: in instance mode, prefer the override if any.
+  const displayed = mode === 'instance' && typeof override === 'string' ? override : item.characters;
+  const [val, setVal] = useState(displayed);
+  useEffect(() => setVal(displayed), [displayed]);
+  const dirty = val !== displayed;
+  const overridden = typeof override === 'string';
   return (
     <div
       style={{
@@ -776,6 +821,21 @@ function ComponentTextRow({
       <div style={{ fontSize: 10, color: '#888', display: 'flex', gap: 6, alignItems: 'center' }}>
         <span style={{ color: '#aaa', fontWeight: 600 }}>{item.name ?? 'Text'}</span>
         {item.path && <span style={{ color: '#555' }}>· {item.path}</span>}
+        {overridden && (
+          <span
+            style={{
+              fontSize: 9,
+              padding: '1px 5px',
+              borderRadius: 3,
+              background: '#2a4a2a',
+              color: '#a3e3a3',
+              fontWeight: 600,
+              letterSpacing: 0.4,
+            }}
+          >
+            OVERRIDE
+          </span>
+        )}
         <span style={{ marginLeft: 'auto', fontFamily: 'Menlo, monospace', color: '#444' }}>
           {item.guid}
         </span>
@@ -794,7 +854,7 @@ function ComponentTextRow({
       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
         {dirty && (
           <button
-            onClick={() => setVal(item.characters)}
+            onClick={() => setVal(displayed)}
             style={{
               background: 'transparent',
               color: '#888',
@@ -812,7 +872,11 @@ function ComponentTextRow({
           onClick={async () => {
             if (!dirty) return;
             try {
-              await patchNode(sessionId, item.guid, 'textData.characters', val);
+              if (mode === 'instance') {
+                await setInstanceTextOverride(sessionId, instanceGuid, item.guid, val);
+              } else {
+                await patchNode(sessionId, item.guid, 'textData.characters', val);
+              }
               onChange();
             } catch (err) {
               alert(`Failed: ${(err as Error).message}`);
@@ -820,7 +884,7 @@ function ComponentTextRow({
           }}
           disabled={!dirty}
           style={{
-            background: dirty ? '#0a84ff' : '#1c1c1c',
+            background: dirty ? (mode === 'instance' ? '#0a84ff' : '#cc7a3b') : '#1c1c1c',
             color: dirty ? 'white' : '#555',
             border: 'none',
             padding: '4px 12px',
@@ -830,7 +894,7 @@ function ComponentTextRow({
             fontWeight: 600,
           }}
         >
-          Apply
+          Apply{mode === 'master' ? ' to Master' : ''}
         </button>
       </div>
     </div>

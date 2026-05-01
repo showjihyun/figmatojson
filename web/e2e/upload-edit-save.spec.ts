@@ -41,7 +41,7 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
     await expect(page.getByText('figma_reverse · Tier 2 PoC')).toBeVisible();
 
     // 1. Upload — wire through the file input.
-    const fileInput = page.locator('input[type="file"]');
+    const fileInput = page.locator('input[type="file"][accept=".fig"]');
     await fileInput.setInputFiles(SAMPLE_FIG);
 
     // 2. Page selector should appear AND populate with 6 pages (metarich sample).
@@ -102,7 +102,7 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
     });
 
     await page.goto('/');
-    await page.locator('input[type="file"]').setInputFiles(SAMPLE_FIG);
+    await page.locator('input[type="file"][accept=".fig"]').setInputFiles(SAMPLE_FIG);
     await expect(page.locator('select')).toBeVisible({ timeout: 60_000 });
     await expect(page.locator('select option')).toHaveCount(6, { timeout: 60_000 });
     expect(sessionId).toBeTruthy();
@@ -153,6 +153,133 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
     }
   });
 
+  test('per-instance text override leaves the master untouched', async ({ page, request }) => {
+    test.setTimeout(180_000);
+    let sessionId = '';
+    page.on('request', (req) => {
+      const m = req.url().match(/\/api\/doc\/(s[a-z0-9]+)/);
+      if (m && !sessionId) sessionId = m[1]!;
+    });
+    await page.goto('/');
+    await page.locator('input[type="file"][accept=".fig"]').setInputFiles(SAMPLE_FIG);
+    await expect(page.locator('select option')).toHaveCount(6, { timeout: 60_000 });
+    expect(sessionId).toBeTruthy();
+
+    const doc = await request.get(`http://localhost:5274/api/doc/${sessionId}`).then((r) => r.json());
+    function findInst(n: any): any | null {
+      if (n?.type === 'INSTANCE' && Array.isArray(n._componentTexts) && n._componentTexts.length > 0) return n;
+      if (Array.isArray(n?.children)) for (const c of n.children) { const r = findInst(c); if (r) return r; }
+      return null;
+    }
+    const inst = findInst(doc);
+    expect(inst).toBeTruthy();
+    const ref = inst._componentTexts[0];
+    const instGuid = `${inst.guid.sessionID}:${inst.guid.localID}`;
+    const masterGuid = ref.guid;
+    const originalMasterText = ref.characters;
+    const overrideText = '_INSTANCE_ONLY_';
+
+    // Write per-instance override
+    const r = await request.post(`http://localhost:5274/api/instance-override/${sessionId}`, {
+      data: { instanceGuid: instGuid, masterTextGuid: masterGuid, value: overrideText },
+    });
+    expect(r.ok()).toBeTruthy();
+
+    // Save and re-extract
+    const sav = await request.post(`http://localhost:5274/api/save/${sessionId}`);
+    const bytes = Buffer.from(await sav.body());
+    const tmp = await mkdtemp(join(tmpdir(), 'figrev-e2e-'));
+    try {
+      const dl = join(tmp, 'override.fig');
+      const fsp = await import('node:fs/promises');
+      await fsp.writeFile(dl, bytes);
+      const { loadContainer } = await import('../../src/container.js');
+      const { decodeFigCanvas } = await import('../../src/decoder.js');
+      const { dumpStage4Decoded } = await import('../../src/intermediate.js');
+      const c = loadContainer(dl);
+      const d = decodeFigCanvas(c.canvasFig);
+      const intOpts = { enabled: true, dir: join(tmp, 'extracted'), includeFullMessage: true, minify: true };
+      dumpStage4Decoded(intOpts, d);
+      const messageJson = await readFile(join(tmp, 'extracted', '04_decoded', 'message.json'), 'utf8');
+      // Override text should be present
+      expect(messageJson).toContain(`"${overrideText}"`);
+      // Master text should still be the original — instance-only edit must not mutate master
+      // Find the master node and verify its textData.characters is unchanged
+      const msg = JSON.parse(messageJson);
+      const [ms, ml] = (masterGuid as string).split(':').map((x: string) => parseInt(x, 10));
+      const master = (msg.nodeChanges as Array<any>).find(
+        (n: any) => n.guid?.sessionID === ms && n.guid?.localID === ml,
+      );
+      expect(master?.textData?.characters).toBe(originalMasterText);
+      console.log(`[override-e2e] override "${overrideText}" landed; master "${originalMasterText}" preserved`);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('session snapshot save → load round-trips edits', async ({ page, request }) => {
+    test.setTimeout(180_000);
+    let sessionId = '';
+    page.on('request', (req) => {
+      const m = req.url().match(/\/api\/doc\/(s[a-z0-9]+)/);
+      if (m && !sessionId) sessionId = m[1]!;
+    });
+    await page.goto('/');
+    await page.locator('input[type="file"][accept=".fig"]').setInputFiles(SAMPLE_FIG);
+    await expect(page.locator('select option')).toHaveCount(6, { timeout: 60_000 });
+    expect(sessionId).toBeTruthy();
+
+    const doc = await request.get(`http://localhost:5274/api/doc/${sessionId}`).then((r) => r.json());
+    function findText(n: any): any | null {
+      if (n?.type === 'TEXT' && n.textData?.characters && n.guid) return n;
+      if (Array.isArray(n?.children)) for (const c of n.children) { const f = findText(c); if (f) return f; }
+      return null;
+    }
+    const t = findText(doc);
+    const guid = `${t.guid.sessionID}:${t.guid.localID}`;
+    const marker = '_SNAPSHOT_E2E_';
+    await request.patch(`http://localhost:5274/api/doc/${sessionId}`, {
+      data: { nodeGuid: guid, field: 'textData.characters', value: marker },
+    });
+
+    // Snapshot
+    const snap = await request.get(`http://localhost:5274/api/session/${sessionId}/snapshot`);
+    expect(snap.ok()).toBeTruthy();
+    const body = await snap.text();
+    expect(body).toContain(marker);
+
+    // Load it back as a new session
+    const loaded = await request.post('http://localhost:5274/api/session/load', {
+      data: body,
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(loaded.ok()).toBeTruthy();
+    const lr = await loaded.json();
+    expect(lr.nodeCount).toBeGreaterThan(0);
+
+    // Save the loaded session as .fig and confirm marker preserved
+    const sav = await request.post(`http://localhost:5274/api/save/${lr.sessionId}`);
+    const bytes = Buffer.from(await sav.body());
+    const tmp = await mkdtemp(join(tmpdir(), 'figrev-e2e-'));
+    try {
+      const dl = join(tmp, 'from-snapshot.fig');
+      const fsp = await import('node:fs/promises');
+      await fsp.writeFile(dl, bytes);
+      const { loadContainer } = await import('../../src/container.js');
+      const { decodeFigCanvas } = await import('../../src/decoder.js');
+      const { dumpStage4Decoded } = await import('../../src/intermediate.js');
+      const c = loadContainer(dl);
+      const d = decodeFigCanvas(c.canvasFig);
+      const intOpts = { enabled: true, dir: join(tmp, 'extracted'), includeFullMessage: true, minify: true };
+      dumpStage4Decoded(intOpts, d);
+      const messageJson = await readFile(join(tmp, 'extracted', '04_decoded', 'message.json'), 'utf8');
+      expect(messageJson).toContain(`"${marker}"`);
+      console.log(`[snapshot-e2e] marker survived save → load → export`);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   test('edit-via-API then save preserves the edit through round-trip', async ({ page, request }) => {
     test.setTimeout(180_000);
 
@@ -164,7 +291,7 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
     });
 
     await page.goto('/');
-    const fileInput = page.locator('input[type="file"]');
+    const fileInput = page.locator('input[type="file"][accept=".fig"]');
     await fileInput.setInputFiles(SAMPLE_FIG);
     await expect(page.locator('select')).toBeVisible({ timeout: 60_000 });
     await expect(page.locator('select option')).toHaveCount(6, { timeout: 60_000 });
