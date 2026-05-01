@@ -37,7 +37,9 @@ async function waitForDocLoaded(
   expectedPages: number,
   timeout = 60_000,
 ) {
-  const re = new RegExp(`${expectedPages}\\s+pages`);
+  // Anchor with a word boundary so `6\s+pages` doesn't match "16 pages" (or
+  // "26 pages") as a substring once the sample grows past 9 pages.
+  const re = new RegExp(`\\b${expectedPages}\\s+pages\\b`);
   await expect(page.getByText(re).first()).toBeVisible({ timeout });
 }
 
