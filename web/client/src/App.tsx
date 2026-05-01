@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Download, FileUp, FolderOpen, Redo2, Save, Undo2 } from 'lucide-react';
 import { Inspector } from './Inspector';
 import { ChatPanel } from './ChatPanel';
@@ -42,18 +42,24 @@ export function App() {
   // usePatch in Inspector.tsx), so they don't share this queue.
   const moveQueue = useRef<Promise<void>>(Promise.resolve());
 
-  function handleSelect(guid: string | null, mode: 'replace' | 'toggle' = 'replace') {
-    setSelectedGuids((prev) => {
-      if (guid === null) return new Set();
-      if (mode === 'toggle') {
-        const next = new Set(prev);
-        if (next.has(guid)) next.delete(guid);
-        else next.add(guid);
-        return next;
-      }
-      return new Set([guid]);
-    });
-  }
+  // Stable identity so the memoized Canvas/NodeShape tree doesn't see a new
+  // `onSelect` prop on every App render — that would defeat React.memo and
+  // re-render every NodeShape on selection clicks.
+  const handleSelect = useCallback(
+    (guid: string | null, mode: 'replace' | 'toggle' = 'replace') => {
+      setSelectedGuids((prev) => {
+        if (guid === null) return new Set();
+        if (mode === 'toggle') {
+          const next = new Set(prev);
+          if (next.has(guid)) next.delete(guid);
+          else next.add(guid);
+          return next;
+        }
+        return new Set([guid]);
+      });
+    },
+    [],
+  );
   // Convenience accessor for the inspector / single-selection consumers.
   const selectedGuid = selectedGuids.size === 1 ? [...selectedGuids][0]! : null;
 
@@ -123,11 +129,11 @@ export function App() {
     }
   }
 
-  async function onRefreshDoc() {
+  const onRefreshDoc = useCallback(async () => {
     if (!session) return;
     const d = await documentService.fetch(session.sessionId);
     setDoc(d);
-  }
+  }, [session]);
 
   async function onUndo() {
     if (!session) return;
@@ -181,7 +187,7 @@ export function App() {
     // every render — but the linter wants `session` listed; safe either way.
   }, [session]);
 
-  async function onMoveMany(updates: Array<{ guid: string; x: number; y: number }>) {
+  const onMoveMany = useCallback(async (updates: Array<{ guid: string; x: number; y: number }>) => {
     if (!session) return;
     const sid = session.sessionId;
     moveQueue.current = moveQueue.current.then(async () => {
@@ -196,9 +202,9 @@ export function App() {
       }
     });
     await moveQueue.current;
-  }
+  }, [session, onRefreshDoc]);
 
-  async function onResize(guid: string, x: number, y: number, w: number, h: number) {
+  const onResize = useCallback(async (guid: string, x: number, y: number, w: number, h: number) => {
     if (!session) return;
     const sid = session.sessionId;
     moveQueue.current = moveQueue.current.then(async () => {
@@ -210,11 +216,11 @@ export function App() {
       }
     });
     await moveQueue.current;
-  }
+  }, [session, onRefreshDoc]);
 
-  async function onResizeMany(
+  const onResizeMany = useCallback(async (
     updates: Array<{ guid: string; x: number; y: number; w: number; h: number }>,
-  ) {
+  ) => {
     if (!session) return;
     const sid = session.sessionId;
     moveQueue.current = moveQueue.current.then(async () => {
@@ -228,7 +234,7 @@ export function App() {
       }
     });
     await moveQueue.current;
-  }
+  }, [session, onRefreshDoc]);
 
   const pages = doc?.children?.filter((c: any) => c.type === 'CANVAS') ?? [];
   const currentPage = pages[pageIdx];
