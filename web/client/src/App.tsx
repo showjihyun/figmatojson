@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
+import { Download, FileUp, FolderOpen, Save } from 'lucide-react';
 import { Canvas } from './Canvas';
 import { Inspector } from './Inspector';
 import { ChatPanel } from './ChatPanel';
+import { Button } from '@/components/ui/button';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   uploadFig,
   fetchDoc,
@@ -22,6 +31,7 @@ export function App() {
   // inspector panel.
   const [selectedGuids, setSelectedGuids] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const figFileInputRef = useRef<HTMLInputElement>(null);
   const sessionFileInputRef = useRef<HTMLInputElement>(null);
 
   function handleSelect(guid: string | null, mode: 'replace' | 'toggle' = 'replace') {
@@ -50,6 +60,7 @@ export function App() {
       setDoc(d);
       setPageIdx(0);
       setSelectedGuids(new Set());
+      e.target.value = '';
     } catch (err) {
       alert(`Upload error: ${(err as Error).message}`);
     } finally {
@@ -144,7 +155,6 @@ export function App() {
   ) {
     if (!session) return;
     try {
-      // Sequential — backend mutates a single message.json, same shape as onMoveMany.
       for (const u of updates) {
         await resizeNode(session.sessionId, u.guid, u.x, u.y, u.w, u.h);
       }
@@ -158,24 +168,20 @@ export function App() {
   const currentPage = pages[pageIdx];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
-      <header
-        style={{
-          padding: '8px 16px',
-          borderBottom: '1px solid #333',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 12,
-          background: '#222',
-        }}
-      >
-        <strong style={{ fontSize: 14 }}>figma_reverse · Tier 2 PoC</strong>
+    <div className="flex h-screen flex-col bg-background text-foreground">
+      <header className="flex h-14 items-center gap-3 border-b border-border bg-card px-4">
+        <div className="text-sm font-semibold tracking-tight">
+          figma_reverse <span className="text-muted-foreground font-normal">· Tier 2 PoC</span>
+        </div>
+
+        {/* Hidden native file inputs — buttons trigger them via ref. */}
         <input
+          ref={figFileInputRef}
           type="file"
           accept=".fig"
           onChange={onUpload}
           disabled={busy}
-          style={{ color: '#bbb' }}
+          className="hidden"
         />
         <input
           ref={sessionFileInputRef}
@@ -183,95 +189,92 @@ export function App() {
           accept=".json"
           onChange={onLoadSession}
           disabled={busy}
-          style={{ display: 'none' }}
+          className="hidden"
         />
-        <button
+
+        <Button
+          variant="outline"
+          size="default"
+          onClick={() => figFileInputRef.current?.click()}
+          disabled={busy}
+          title="Upload a .fig file"
+        >
+          <FileUp />
+          Upload .fig
+        </Button>
+        <Button
+          variant="outline"
+          size="default"
           onClick={() => sessionFileInputRef.current?.click()}
           disabled={busy}
-          style={{
-            background: 'transparent',
-            color: '#bbb',
-            border: '1px solid #444',
-            padding: '5px 10px',
-            borderRadius: 4,
-            fontSize: 12,
-            cursor: busy ? 'wait' : 'pointer',
-          }}
           title="Load a previously-saved session snapshot"
         >
-          📂 Load Session
-        </button>
+          <FolderOpen />
+          Load Session
+        </Button>
+
         {session && (
           <>
-            <span style={{ fontSize: 12, color: '#999' }}>
-              {session.origName} · {session.nodeCount} nodes · {pages.length} pages
+            <span className="text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">{session.origName}</span>
+              {' · '}
+              {session.nodeCount.toLocaleString()} nodes
+              {' · '}
+              {pages.length} pages
             </span>
-            <select
-              value={pageIdx}
-              onChange={(e) => {
-                setPageIdx(Number(e.target.value));
+            <Select
+              value={String(pageIdx)}
+              onValueChange={(v) => {
+                setPageIdx(Number(v));
                 setSelectedGuids(new Set());
               }}
-              style={{ background: '#333', color: '#eee', border: '1px solid #555', padding: '4px 8px' }}
             >
-              {pages.map((p: any, i: number) => (
-                <option key={i} value={i}>
-                  {p.name ?? `page ${i}`}
-                </option>
-              ))}
-            </select>
-            <button
-              onClick={onSaveSession}
-              disabled={busy}
-              style={{
-                background: '#2c2c2c',
-                color: '#eee',
-                border: '1px solid #444',
-                padding: '6px 12px',
-                borderRadius: 4,
-                cursor: busy ? 'wait' : 'pointer',
-                fontSize: 12,
-                marginLeft: 'auto',
-              }}
-              title="Save the current edit state as a JSON snapshot you can resume later"
-            >
-              💾 Save Session
-            </button>
-            <button
-              onClick={onSaveFig}
-              disabled={busy}
-              style={{
-                background: '#0a84ff',
-                color: 'white',
-                border: 'none',
-                padding: '6px 14px',
-                borderRadius: 4,
-                cursor: busy ? 'wait' : 'pointer',
-                fontWeight: 600,
-              }}
-              title="Export to .fig (downloads a Figma-importable file)"
-            >
-              ⬇ Export .fig
-            </button>
+              <SelectTrigger className="w-44">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {pages.map((p: any, i: number) => (
+                  <SelectItem key={i} value={String(i)}>
+                    {p.name ?? `page ${i}`}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="ml-auto flex items-center gap-2">
+              <Button
+                variant="secondary"
+                size="default"
+                onClick={onSaveSession}
+                disabled={busy}
+                title="Save the current edit state as a JSON snapshot you can resume later"
+              >
+                <Save />
+                Save Session
+              </Button>
+              <Button
+                variant="default"
+                size="lg"
+                onClick={onSaveFig}
+                disabled={busy}
+                title="Export to .fig (downloads a Figma-importable file)"
+              >
+                <Download />
+                Export .fig
+              </Button>
+            </div>
           </>
         )}
       </header>
-      <main style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        <aside
-          style={{
-            width: 320,
-            display: 'flex',
-            flexDirection: 'column',
-            minHeight: 0,
-          }}
-        >
+
+      <main className="flex min-h-0 flex-1">
+        <aside className="flex w-80 min-h-0 flex-col border-r border-border">
           <ChatPanel
             sessionId={session?.sessionId ?? null}
             selectedGuid={selectedGuid}
             onChange={onRefreshDoc}
           />
         </aside>
-        <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#0e0e0e' }}>
+        <div className="relative flex-1 overflow-hidden bg-[#0e0e0e]">
           {currentPage ? (
             <Canvas
               page={currentPage}
@@ -282,21 +285,18 @@ export function App() {
               onResizeMany={onResizeMany}
             />
           ) : (
-            <div style={{ padding: 32, color: '#888' }}>
-              Upload a .fig file or load a saved session to begin.
+            <div className="flex h-full items-center justify-center px-8">
+              <div className="max-w-sm text-center">
+                <h2 className="text-lg font-semibold">No document open</h2>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Upload a <code className="rounded bg-muted px-1.5 py-0.5 text-xs">.fig</code> file
+                  or load a saved session to begin.
+                </p>
+              </div>
             </div>
           )}
         </div>
-        <aside
-          style={{
-            width: 360,
-            borderLeft: '1px solid #333',
-            background: '#1a1a1a',
-            display: 'flex',
-            flexDirection: 'column',
-            minHeight: 0,
-          }}
-        >
+        <aside className="flex w-[360px] min-h-0 flex-col border-l border-border bg-card">
           {session && currentPage && (
             <Inspector
               page={currentPage}
