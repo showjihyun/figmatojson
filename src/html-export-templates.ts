@@ -488,7 +488,9 @@ body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
   color: var(--fg-dim);
   user-select: none;
 }
-.pen-toggle.empty { color: transparent; }
+/* "is-leaf" not "empty": the global empty-state selector adds padding 48px,
+   which would stretch our 14px toggle to ~102px. Using is-leaf avoids the collision. */
+.pen-toggle.is-leaf { color: transparent; }
 .pen-type {
   display: inline-block;
   font-size: 10px;
@@ -1030,7 +1032,7 @@ export function renderApp(): string {
     const hasKids = kids && kids.length > 0;
     const collapsed = depth >= 2;
     const toggle = hasKids ? (collapsed ? '▶' : '▼') : '·';
-    const toggleCls = hasKids ? 'pen-toggle' : 'pen-toggle empty';
+    const toggleCls = hasKids ? 'pen-toggle' : 'pen-toggle is-leaf';
     const type = (node.type || '?').toLowerCase();
     const enabled = node.enabled === false;
 
@@ -1088,7 +1090,7 @@ export function renderApp(): string {
             const prev = p.previousElementSibling;
             if (prev && prev.classList.contains('pen-row')) {
               const tg = prev.querySelector('.pen-toggle');
-              if (tg && !tg.classList.contains('empty')) tg.textContent = '▼';
+              if (tg && !tg.classList.contains('is-leaf')) tg.textContent = '▼';
             }
           }
           p = p.parentElement;
@@ -1102,7 +1104,7 @@ export function renderApp(): string {
     if (!tree) return;
     tree.querySelectorAll('.pen-children').forEach((el) => el.classList.toggle('collapsed', collapse));
     tree.querySelectorAll('.pen-toggle').forEach((t) => {
-      if (!t.classList.contains('empty')) t.textContent = collapse ? '▶' : '▼';
+      if (!t.classList.contains('is-leaf')) t.textContent = collapse ? '▶' : '▼';
     });
   }
 
