@@ -52,6 +52,7 @@ export function App() {
   async function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
+    const target = e.target;
     setBusy(true);
     try {
       const result = await uploadFig(f);
@@ -60,11 +61,13 @@ export function App() {
       setDoc(d);
       setPageIdx(0);
       setSelectedGuids(new Set());
-      e.target.value = '';
     } catch (err) {
       alert(`Upload error: ${(err as Error).message}`);
     } finally {
       setBusy(false);
+      // Always reset the input value so the user can re-pick the same file
+      // after an error (browsers de-dupe identical selections otherwise).
+      target.value = '';
     }
   }
 
@@ -95,6 +98,7 @@ export function App() {
   async function onLoadSession(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
+    const target = e.target;
     setBusy(true);
     try {
       const result = await loadSessionSnapshot(f);
@@ -103,11 +107,11 @@ export function App() {
       setDoc(d);
       setPageIdx(0);
       setSelectedGuids(new Set());
-      e.target.value = '';
     } catch (err) {
       alert(`Load error: ${(err as Error).message}`);
     } finally {
       setBusy(false);
+      target.value = '';
     }
   }
 
