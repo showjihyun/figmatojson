@@ -8,7 +8,7 @@ web/dist-client/
 web/node_modules/
 web/test-results/
 web/playwright-report/
-web/e2e/_rendered.png
+web/e2e/_*.png
 
 # Dependencies
 node_modules/
