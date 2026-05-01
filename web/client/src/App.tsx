@@ -1,8 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { Download, FileUp, FolderOpen, Redo2, Save, Undo2 } from 'lucide-react';
-import { Canvas } from './Canvas';
 import { Inspector } from './Inspector';
 import { ChatPanel } from './ChatPanel';
+
+// Lazy-load the Konva-backed canvas. Pulls the ~334 kB konva chunk only
+// after the user opens a document — the upload-empty landing screen never
+// pays for it.
+const Canvas = lazy(() =>
+  import('./Canvas').then((m) => ({ default: m.Canvas })),
+);
 import { Button } from '@/components/ui/button';
 import {
   Select,
@@ -356,15 +362,23 @@ export function App() {
         </aside>
         <div className="relative flex-1 overflow-hidden bg-[#0e0e0e]">
           {currentPage ? (
-            <Canvas
-              page={currentPage}
-              selectedGuids={selectedGuids}
-              onSelect={handleSelect}
-              onMoveMany={onMoveMany}
-              onResize={onResize}
-              onResizeMany={onResizeMany}
-              sessionId={session?.sessionId ?? null}
-            />
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                  Loading canvas…
+                </div>
+              }
+            >
+              <Canvas
+                page={currentPage}
+                selectedGuids={selectedGuids}
+                onSelect={handleSelect}
+                onMoveMany={onMoveMany}
+                onResize={onResize}
+                onResizeMany={onResizeMany}
+                sessionId={session?.sessionId ?? null}
+              />
+            </Suspense>
           ) : (
             <div className="flex h-full items-center justify-center px-8">
               <div className="max-w-sm text-center">
