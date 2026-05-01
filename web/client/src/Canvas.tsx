@@ -10,12 +10,14 @@
  *   - vectorData / fillGeometry → bbox rect placeholder
  */
 import { useEffect, useRef, useState, useMemo } from 'react';
-import { Stage, Layer, Rect, Text as KText, Group } from 'react-konva';
+import { Stage, Layer, Rect, Text as KText, Group, Path } from 'react-konva';
+import type Konva from 'konva';
 
 interface CanvasProps {
   page: any;
   selectedGuid: string | null;
   onSelect: (guid: string | null) => void;
+  onMove?: (guid: string, x: number, y: number) => void;
 }
 
 function guidStr(g: any): string | null {
@@ -49,14 +51,26 @@ function strokeOf(node: any): { color: string; width: number } | null {
   };
 }
 
+const VECTOR_TYPES = new Set([
+  'VECTOR',
+  'STAR',
+  'LINE',
+  'ELLIPSE',
+  'REGULAR_POLYGON',
+  'BOOLEAN_OPERATION',
+  'ROUNDED_RECTANGLE',
+]);
+
 function NodeShape({
   node,
   selectedGuid,
   onSelect,
+  onMove,
 }: {
   node: any;
   selectedGuid: string | null;
   onSelect: (g: string | null) => void;
+  onMove?: (guid: string, x: number, y: number) => void;
 }) {
   if (node.visible === false) return null;
   const x = node.transform?.m02 ?? 0;
@@ -66,6 +80,14 @@ function NodeShape({
   const guid = guidStr(node.guid);
   const stroke = strokeOf(node);
   const cornerR = node.cornerRadius ?? 0;
+  const isSelected = !!guid && guid === selectedGuid;
+
+  // Common drag handler — emits parent-local coords to the onMove callback.
+  const onDragEnd = (e: Konva.KonvaEventObject<DragEvent>): void => {
+    if (!guid || !onMove) return;
+    const t = e.target;
+    onMove(guid, t.x(), t.y());
+  };
 
   if (node.type === 'TEXT') {
     const chars = node.textData?.characters ?? '';
@@ -89,6 +111,7 @@ function NodeShape({
         fill={fillColor}
         width={w || undefined}
         height={h || undefined}
+        draggable={isSelected}
         onClick={(e) => {
           e.cancelBubble = true;
           onSelect(guid);
@@ -97,8 +120,38 @@ function NodeShape({
           e.cancelBubble = true;
           onSelect(guid);
         }}
+        onDragEnd={onDragEnd}
         listening
       />
+    );
+  }
+
+  // VECTOR family: render as Konva.Path if we have geometry; else colored rect.
+  if (VECTOR_TYPES.has(node.type) && typeof node._path === 'string' && node._path.length > 0) {
+    const pathFill = colorOfWithDefault(node, 'transparent');
+    return (
+      <Group
+        x={x}
+        y={y}
+        draggable={isSelected}
+        onClick={(e) => {
+          e.cancelBubble = true;
+          onSelect(guid);
+        }}
+        onTap={(e) => {
+          e.cancelBubble = true;
+          onSelect(guid);
+        }}
+        onDragEnd={onDragEnd}
+      >
+        <Path
+          data={node._path}
+          fill={pathFill}
+          stroke={stroke?.color}
+          strokeWidth={stroke?.width}
+          listening
+        />
+      </Group>
     );
   }
 
@@ -106,7 +159,20 @@ function NodeShape({
   const isContainer = Array.isArray(node.children) && node.children.length > 0;
 
   return (
-    <Group x={x} y={y}>
+    <Group
+      x={x}
+      y={y}
+      draggable={isSelected}
+      onClick={(e) => {
+        e.cancelBubble = true;
+        onSelect(guid);
+      }}
+      onTap={(e) => {
+        e.cancelBubble = true;
+        onSelect(guid);
+      }}
+      onDragEnd={onDragEnd}
+    >
       <Rect
         x={0}
         y={0}
@@ -116,22 +182,25 @@ function NodeShape({
         stroke={stroke?.color}
         strokeWidth={stroke?.width}
         cornerRadius={cornerR}
-        onClick={(e) => {
-          e.cancelBubble = true;
-          onSelect(guid);
-        }}
-        onTap={(e) => {
-          e.cancelBubble = true;
-          onSelect(guid);
-        }}
         listening
       />
       {isContainer &&
         node.children.map((c: any, i: number) => (
-          <NodeShape key={i} node={c} selectedGuid={selectedGuid} onSelect={onSelect} />
+          <NodeShape
+            key={i}
+            node={c}
+            selectedGuid={selectedGuid}
+            onSelect={onSelect}
+            onMove={onMove}
+          />
         ))}
     </Group>
   );
+}
+
+function colorOfWithDefault(node: any, fallback: string): string {
+  const c = colorOf(node);
+  return c === 'transparent' ? fallback : c;
 }
 
 /** Compute the absolute bounds of the selected node by walking the tree.
@@ -219,7 +288,7 @@ function SelectionOverlay({
   );
 }
 
-export function Canvas({ page, selectedGuid, onSelect }: CanvasProps) {
+export function Canvas({ page, selectedGuid, onSelect, onMove }: CanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [scale, setScale] = useState(0.25);
@@ -272,6 +341,47 @@ export function Canvas({ page, selectedGuid, onSelect }: CanvasProps) {
     };
   }, []);
 
+  // Wheel handler — Figma semantics:
+  //   - Ctrl/⌘ + wheel  → zoom toward cursor (preventDefault to override
+  //                        the browser's page-zoom shortcut)
+  //   - Bare wheel      → pan vertically; shift+wheel pans horizontally
+  // React's onWheel synthetic event is passive in some setups so
+  // preventDefault is unreliable — we attach a non-passive native listener
+  // directly on the container element.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent): void => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const rect = el.getBoundingClientRect();
+        const cx = e.clientX - rect.left;
+        const cy = e.clientY - rect.top;
+        const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+        setScale((s) => {
+          const ns = Math.max(0.02, Math.min(8, s * factor));
+          setOffset((o) => {
+            const stageX = (cx - o.x) / s;
+            const stageY = (cy - o.y) / s;
+            return { x: cx - stageX * ns, y: cy - stageY * ns };
+          });
+          return ns;
+        });
+      } else {
+        // Pan with the wheel — also preventDefault so the page doesn't scroll.
+        e.preventDefault();
+        if (e.shiftKey) {
+          // shift+wheel maps deltaY to horizontal pan
+          setOffset((o) => ({ x: o.x - e.deltaY, y: o.y - e.deltaX }));
+        } else {
+          setOffset((o) => ({ x: o.x - e.deltaX, y: o.y - e.deltaY }));
+        }
+      }
+    };
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, []);
+
   // Auto-fit page bbox to viewport on first render of a new page (id-based, so
   // edits to the same page don't re-trigger the fit and reset zoom).
   useEffect(() => {
@@ -320,24 +430,6 @@ export function Canvas({ page, selectedGuid, onSelect }: CanvasProps) {
         position: 'relative',
         cursor: spaceHeld ? (panRef.current.active ? 'grabbing' : 'grab') : 'default',
       }}
-      onWheel={(e) => {
-        e.preventDefault();
-        // Figma-style: zoom toward cursor (anchored).
-        const rect = containerRef.current?.getBoundingClientRect();
-        const cx = rect ? e.clientX - rect.left : 0;
-        const cy = rect ? e.clientY - rect.top : 0;
-        const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-        setScale((s) => {
-          const ns = Math.max(0.02, Math.min(8, s * factor));
-          // Keep the cursor's stage point fixed during zoom.
-          setOffset((o) => {
-            const sx = (cx - o.x) / s;
-            const sy = (cy - o.y) / s;
-            return { x: cx - sx * ns, y: cy - sy * ns };
-          });
-          return ns;
-        });
-      }}
       onMouseDown={(e) => {
         if (spaceHeld) {
           e.preventDefault();
@@ -376,7 +468,13 @@ export function Canvas({ page, selectedGuid, onSelect }: CanvasProps) {
           }}
         >
           {(page.children ?? []).map((c: any, i: number) => (
-            <NodeShape key={i} node={c} selectedGuid={selectedGuid} onSelect={onSelect} />
+            <NodeShape
+              key={i}
+              node={c}
+              selectedGuid={selectedGuid}
+              onSelect={onSelect}
+              onMove={onMove}
+            />
           ))}
         </Layer>
         {selectionBounds && (

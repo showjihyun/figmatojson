@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Canvas } from './Canvas';
 import { Inspector } from './Inspector';
-import { uploadFig, fetchDoc, downloadFig, type UploadResult } from './api';
+import { uploadFig, fetchDoc, downloadFig, patchNode, type UploadResult } from './api';
 
 export function App() {
   const [session, setSession] = useState<UploadResult | null>(null);
@@ -44,6 +44,18 @@ export function App() {
     if (!session) return;
     const d = await fetchDoc(session.sessionId);
     setDoc(d);
+  }
+
+  // Drag-to-move on canvas → patch transform.m02/m12 of the node.
+  async function onMove(guid: string, x: number, y: number) {
+    if (!session) return;
+    try {
+      await patchNode(session.sessionId, guid, 'transform.m02', x);
+      await patchNode(session.sessionId, guid, 'transform.m12', y);
+      onRefreshDoc();
+    } catch (err) {
+      console.error('drag patch failed', err);
+    }
   }
 
   const pages = doc?.children?.filter((c: any) => c.type === 'CANVAS') ?? [];
@@ -109,7 +121,12 @@ export function App() {
       <main style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#0e0e0e' }}>
           {currentPage ? (
-            <Canvas page={currentPage} selectedGuid={selectedGuid} onSelect={setSelectedGuid} />
+            <Canvas
+              page={currentPage}
+              selectedGuid={selectedGuid}
+              onSelect={setSelectedGuid}
+              onMove={onMove}
+            />
           ) : (
             <div style={{ padding: 32, color: '#888' }}>
               Upload a .fig file to begin.
