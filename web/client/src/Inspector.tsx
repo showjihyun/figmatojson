@@ -14,7 +14,7 @@
  */
 import { useMemo, useState, useEffect, useRef, type ReactNode } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
-import { patchNode, setInstanceTextOverride } from './api';
+import { documentService } from '@/services';
 import { usePatch } from './hooks/usePatch';
 import { rgbaToHex, hexToRgb01 } from '@core/domain/color';
 import { findById } from '@core/domain/tree';
@@ -758,9 +758,9 @@ function ComponentTextRow({
             if (!dirty) return;
             try {
               if (mode === 'instance') {
-                await setInstanceTextOverride(sessionId, instanceGuid, item.guid, val);
+                await documentService.setInstanceTextOverride(sessionId, instanceGuid, item.guid, val);
               } else {
-                await patchNode(sessionId, item.guid, 'textData.characters', val);
+                await documentService.patch(sessionId, item.guid, 'textData.characters', val);
               }
               userTouched.current = false;
               onChange();
