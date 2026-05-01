@@ -9,13 +9,42 @@
  *   - transform.m02/m12 → x/y (rotation/skew skipped)
  *   - vectorData / fillGeometry → bbox rect placeholder
  */
-import { useEffect, useRef, useState, useMemo } from 'react';
+import {
+  createContext,
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { Stage, Layer, Rect, Text as KText, Group, Path, Image as KImage } from 'react-konva';
 import type Konva from 'konva';
 import { cornerDrag, groupBbox, projectMembers, type Corner } from './multiResize';
 import { solidFillCss, solidStrokeCss } from '@core/domain/color';
 import { imageHashHex } from '@core/domain/image';
 import { guidStr } from '@core/domain/tree';
+import {
+  SelectionContext,
+  SelectionStore,
+  useIsSelected,
+} from './canvas-selection';
+
+// ─── Drag-snapshot plumbing ──────────────────────────────────────────────
+//
+// On dragStart we walk the tree once to capture every selected node's
+// initial parent-local position; on dragEnd each NodeShape reads the same
+// map so multi-select drag fans out a delta atomically. Storing the map
+// in a ref behind a stable context value means selection changes never
+// invalidate NodeShape's memoization.
+
+interface DragSnapshotApi {
+  prepare(): void;
+  get(guid: string): { x: number; y: number } | null;
+}
+const DragSnapshotContext = createContext<DragSnapshotApi | null>(null);
 
 interface CanvasProps {
   page: any;
@@ -121,36 +150,40 @@ const VECTOR_TYPES = new Set([
 
 interface NodeShapeProps {
   node: any;
-  selectedGuids: Set<string>;
   onSelect: (g: string | null, mode?: 'replace' | 'toggle') => void;
   onDragGroup?: (guid: string, dx: number, dy: number) => void;
-  dragSnapshot?: Map<string, { x: number; y: number }>;
   sessionId: string | null;
 }
 
-function NodeShape({
+function NodeShapeImpl({
   node,
-  selectedGuids,
   onSelect,
   onDragGroup,
-  dragSnapshot,
   sessionId,
 }: NodeShapeProps) {
+  const guid = guidStr(node.guid);
+  const isSelected = useIsSelected(guid);
+  const dragApi = useContext(DragSnapshotContext);
+
   if (node.visible === false) return null;
   const x = node.transform?.m02 ?? 0;
   const y = node.transform?.m12 ?? 0;
   const w = node.size?.x ?? 0;
   const h = node.size?.y ?? 0;
-  const guid = guidStr(node.guid);
   const stroke = strokeOf(node);
   const cornerR = node.cornerRadius ?? 0;
-  const isSelected = !!guid && selectedGuids.has(guid);
+
+  const onDragStart = (): void => {
+    // Build the snapshot lazily: cheap when nobody drags, correct because
+    // it sees the latest selection + page state at the moment dragging begins.
+    dragApi?.prepare();
+  };
 
   // Drag-end → compute delta from initial position, emit to onDragGroup
   // which handles fanout to every selected node.
   const onDragEnd = (e: Konva.KonvaEventObject<DragEvent>): void => {
     if (!guid || !onDragGroup) return;
-    const initial = dragSnapshot?.get(guid);
+    const initial = dragApi?.get(guid);
     if (!initial) {
       // Fallback: no snapshot — just emit the absolute new position.
       onDragGroup(guid, e.target.x() - x, e.target.y() - y);
@@ -196,6 +229,7 @@ function NodeShape({
         draggable={isSelected}
         onClick={onShapeClick}
         onTap={onShapeClick}
+        onDragStart={onDragStart}
         onDragEnd={onDragEnd}
         listening
       />
@@ -211,6 +245,7 @@ function NodeShape({
         draggable={isSelected}
         onClick={onShapeClick}
         onTap={onShapeClick}
+        onDragStart={onDragStart}
         onDragEnd={onDragEnd}
       >
         <Path
@@ -245,6 +280,7 @@ function NodeShape({
       draggable={isSelected}
       onClick={onShapeClick}
       onTap={onShapeClick}
+      onDragStart={onDragStart}
       onDragEnd={onDragEnd}
     >
       <Rect
@@ -266,16 +302,20 @@ function NodeShape({
           <NodeShape
             key={i}
             node={c}
-            selectedGuids={selectedGuids}
             onSelect={onSelect}
             onDragGroup={onDragGroup}
-            dragSnapshot={dragSnapshot}
             sessionId={sessionId}
           />
         ))}
     </Group>
   );
 }
+
+// Memoized so that re-renders triggered by pan/zoom/selection at the Canvas
+// level skip every NodeShape whose data + handlers haven't changed. Selection
+// state for THIS node comes from `useIsSelected` (subscription), not props,
+// so a click that flips one guid only re-renders the affected nodes.
+const NodeShape = memo(NodeShapeImpl);
 
 function colorOfWithDefault(node: any, fallback: string): string {
   const c = colorOf(node);
@@ -532,6 +572,49 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
     setPageId(page.id);
   }, [page, size.width, size.height, pageId]);
 
+  // External-store mirror of `selectedGuids`. Created once; .set()'d on every
+  // change. NodeShapes subscribe via `useIsSelected` so only the changed
+  // guids re-render — the other 35K nodes skip reconciliation entirely.
+  const selectionStoreRef = useRef<SelectionStore | null>(null);
+  if (selectionStoreRef.current === null) {
+    selectionStoreRef.current = new SelectionStore();
+  }
+  const selectionStore = selectionStoreRef.current;
+  // useLayoutEffect (not useEffect) so subscribers see the new selection
+  // before the browser paints — avoids a one-frame lag where the previous
+  // selection's `draggable={isSelected}` is still in effect.
+  useLayoutEffect(() => {
+    selectionStore.set(selectedGuids);
+  }, [selectionStore, selectedGuids]);
+
+  // Drag snapshot: a stable API object whose `prepare()` walks the tree once
+  // when a drag begins. Keeping the API in useMemo([]) means NodeShape's
+  // useContext consumer never re-renders from this context updating.
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  const selectedGuidsRef = useRef(selectedGuids);
+  selectedGuidsRef.current = selectedGuids;
+  const dragSnapshotMapRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const dragSnapshotApi = useMemo<DragSnapshotApi>(() => ({
+    prepare(): void {
+      const m = new Map<string, { x: number; y: number }>();
+      const sel = selectedGuidsRef.current;
+      function visit(n: any): void {
+        if (!n || typeof n !== 'object') return;
+        const g = n.guid ? `${n.guid.sessionID}:${n.guid.localID}` : null;
+        if (g && sel.has(g)) {
+          m.set(g, { x: n.transform?.m02 ?? 0, y: n.transform?.m12 ?? 0 });
+        }
+        if (Array.isArray(n.children)) for (const c of n.children) visit(c);
+      }
+      visit(pageRef.current);
+      dragSnapshotMapRef.current = m;
+    },
+    get(guid): { x: number; y: number } | null {
+      return dragSnapshotMapRef.current.get(guid) ?? null;
+    },
+  }), []);
+
   // Compute selection bounds for every selected node (absolute coords).
   const selectionBoundsList = useMemo(() => {
     const out: Array<{ guid: string; bounds: { x: number; y: number; w: number; h: number } }> = [];
@@ -544,34 +627,21 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
   // Single-selection bounds (used for resize handles)
   const singleBounds = selectedGuid ? selectionBoundsList[0]?.bounds ?? null : null;
 
-  // Drag-group: capture initial parent-local positions on drag start, fan
-  // the delta out across every selected node on drag end.
-  const dragSnapshot = useMemo(() => {
-    const m = new Map<string, { x: number; y: number }>();
-    function visit(n: any): void {
-      if (!n || typeof n !== 'object') return;
-      const g = n.guid ? `${n.guid.sessionID}:${n.guid.localID}` : null;
-      if (g && selectedGuids.has(g)) {
-        m.set(g, { x: n.transform?.m02 ?? 0, y: n.transform?.m12 ?? 0 });
-      }
-      if (Array.isArray(n.children)) for (const c of n.children) visit(c);
-    }
-    visit(page);
-    return m;
-  }, [page, selectedGuids]);
-
-  const onDragGroup = (anchorGuid: string, dx: number, dy: number): void => {
+  // Stable callback so memoized NodeShapes don't re-render on every Canvas
+  // state tick (size / scale / offset / spaceHeld). Reads selection from the
+  // ref so the closure doesn't need to refresh.
+  const onDragGroup = useCallback((anchorGuid: string, dx: number, dy: number): void => {
     if (!onMoveMany) return;
     if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
     const updates: Array<{ guid: string; x: number; y: number }> = [];
-    for (const g of selectedGuids) {
-      const start = dragSnapshot.get(g);
+    for (const g of selectedGuidsRef.current) {
+      const start = dragSnapshotMapRef.current.get(g);
       if (!start) continue;
       updates.push({ guid: g, x: start.x + dx, y: start.y + dy });
     }
     void anchorGuid;
     if (updates.length > 0) onMoveMany(updates);
-  };
+  }, [onMoveMany]);
 
   return (
     <div
@@ -620,17 +690,19 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
             if (e.target === e.target.getStage()) onSelect(null);
           }}
         >
-          {(page.children ?? []).map((c: any, i: number) => (
-            <NodeShape
-              key={i}
-              node={c}
-              selectedGuids={selectedGuids}
-              onSelect={onSelect}
-              onDragGroup={onDragGroup}
-              dragSnapshot={dragSnapshot}
-              sessionId={sessionId}
-            />
-          ))}
+          <SelectionContext.Provider value={selectionStore}>
+            <DragSnapshotContext.Provider value={dragSnapshotApi}>
+              {(page.children ?? []).map((c: any, i: number) => (
+                <NodeShape
+                  key={i}
+                  node={c}
+                  onSelect={onSelect}
+                  onDragGroup={onDragGroup}
+                  sessionId={sessionId}
+                />
+              ))}
+            </DragSnapshotContext.Provider>
+          </SelectionContext.Provider>
         </Layer>
         {selectionBoundsList.length > 0 && (
           <Layer listening={!spaceHeld}>
