@@ -1006,11 +1006,18 @@ async function runSubscriptionChat(
   const prompt = `${transcript}\n\nApply edits via the figma_editor tools. Be concise.`;
 
   let assistantText = '';
+  // Hard cap so a hung/uncredentialed Agent SDK call doesn't make the UI
+  // stall indefinitely. Anything beyond this we surface as an error with
+  // actionable next steps.
+  const TIMEOUT_MS = 90_000;
+  const abortController = new AbortController();
+  const timer = setTimeout(() => abortController.abort(), TIMEOUT_MS);
   try {
     const q = query({
       prompt,
       options: {
         model,
+        abortController,
         mcpServers: { figma_editor: editServer },
         // Restrict tools to only ours — no Bash/Read/Write etc.
         allowedTools: [
@@ -1024,7 +1031,6 @@ async function runSubscriptionChat(
 Document summary:
 ${summary}`,
         maxTurns: 5,
-        // Auto-approve every tool call (we're in-process; no human in loop).
         permissionMode: 'bypassPermissions',
       } as never,
     });
@@ -1037,14 +1043,22 @@ ${summary}`,
       }
     }
   } catch (err) {
+    clearTimeout(timer);
+    const aborted = abortController.signal.aborted;
     return c.json(
       {
-        error: `subscription chat failed: ${(err as Error).message}. ` +
-          `Make sure Claude Code is installed and you've run 'claude login'. ` +
-          `Or switch to API Key mode.`,
+        error: aborted
+          ? `subscription chat timed out after ${TIMEOUT_MS / 1000}s. ` +
+            `Likely cause: Claude Code is not logged in on this machine. ` +
+            `Run 'claude login' in a terminal, or switch to API Key mode.`
+          : `subscription chat failed: ${(err as Error).message}. ` +
+            `Make sure Claude Code is installed and you've run 'claude login'. ` +
+            `Or switch to API Key mode.`,
       },
       500,
     );
+  } finally {
+    clearTimeout(timer);
   }
   return c.json({ assistantText: assistantText || '(no text)', actions });
 }
