@@ -38,6 +38,10 @@ import { tokenizePath, setPath } from '../core/domain/path.js';
 import { findById } from '../core/domain/tree.js';
 import { sniffImageMime as sniffImageMimeCore } from '../core/domain/image.js';
 import { summarizeDoc as summarizeDocCore } from '../core/domain/summary.js';
+import { FsSessionStore } from './adapters/driven/FsSessionStore.js';
+import { toClientNode, buildSymbolIndex } from '../core/domain/clientNode.js';
+import type { Session as CoreSession } from '../core/domain/entities/Session.js';
+import type { DocumentNode as CoreDocumentNode } from '../core/domain/entities/Document.js';
 import {
   dumpStage1Container,
   dumpStage3Decompressed,
@@ -49,271 +53,24 @@ import { parseVectorNetworkBlob, vectorNetworkToPath } from '../../src/vector.js
 import type { TreeNode } from '../../src/types.js';
 import type Anthropic from '@anthropic-ai/sdk';
 
-interface Session {
-  id: string;
-  dir: string;          // tmp working dir with extracted/ structure
-  origName: string;
-  archiveVersion: number;
-  documentJson: ClientNode;
-}
+// Local aliases — the canonical types live in core/domain/entities/.
+// Kept here so the rest of this file (which still references `Session`
+// and `ClientNode` by name) doesn't need a sweep until phase 5.
+type Session = CoreSession;
+type ClientNode = CoreDocumentNode;
 
-/**
- * React-friendly view of a TreeNode — spreads `data` fields onto the node so
- * `node.textData.characters`, `node.fillPaints`, etc. work directly without
- * indirection through `.raw`. Drops binary fields (Uint8Array → null) and
- * cyclical references; keeps everything the canvas / inspector cares about.
- */
-interface ClientNode {
-  id: string;          // guidStr
-  guid: { sessionID: number; localID: number };
-  type: string;
-  name?: string;
-  children?: ClientNode[];
-  _path?: string;      // pre-decoded SVG path (vector nodes)
-  _componentTexts?: ComponentTextRef[];  // editable text refs inside an INSTANCE's master
-  /**
-   * For INSTANCE nodes that have no native children, this carries the
-   * MASTER's expanded subtree so the canvas can actually render the
-   * component's contents (icons, labels, etc.). Each rendered child keeps
-   * its master GUID so edits / clicks behave the same as editing the master,
-   * but a `_isInstanceChild: true` marker tells the client this is a virtual
-   * render-only branch (don't recurse into "children of children of an
-   * instance" forever).
-   */
-  _renderChildren?: ClientNode[];
-  _isInstanceChild?: boolean;
-  /** When this INSTANCE child rendering applies a per-instance text override,
-   *  this is the override text (replaces the master's textData.characters
-   *  during render). Edits via the overlay still flow through the parent
-   *  INSTANCE's symbolOverrides. */
-  _renderTextOverride?: string;
-  [k: string]: unknown;
-}
+// `ClientNode` and `ComponentTextRef` live in core/domain/entities/Document.ts.
+// Local alias for `ComponentTextRef` to keep callers below identical:
+import type { ComponentTextRef } from '../core/domain/entities/Document.js';
 
-interface ComponentTextRef {
-  guid: string;        // master text node's guidStr (e.g. "11:506")
-  name?: string;       // display name
-  path: string;        // dotted ancestor names ("Button / Label / Text")
-  characters: string;  // current text content
-}
+// `VECTOR_TYPES`, `toClientNode`, `toClientChildForRender`, `collectTexts`,
+// `collectTextOverridesFromInstance` all live in core/domain/clientNode.ts now.
 
-const VECTOR_TYPES = new Set([
-  'VECTOR',
-  'STAR',
-  'LINE',
-  'ELLIPSE',
-  'REGULAR_POLYGON',
-  'BOOLEAN_OPERATION',
-  'ROUNDED_RECTANGLE',
-]);
-
-function toClientNode(
-  n: TreeNode,
-  blobs: Array<{ bytes: Uint8Array }>,
-  symbolIndex: Map<string, TreeNode>,
-): ClientNode {
-  const data = (n.data ?? {}) as Record<string, unknown>;
-  const out: ClientNode = {
-    id: n.guidStr,
-    guid: n.guid,
-    type: n.type,
-    name: n.name,
-    children: n.children.map((c) => toClientNode(c, blobs, symbolIndex)),
-  };
-
-  // Pre-decode the vectorNetworkBlob into an SVG path string so the canvas
-  // can render real shapes via Konva.Path. Without this, every vector
-  // becomes a colored bbox rectangle (no shape fidelity).
-  if (VECTOR_TYPES.has(n.type)) {
-    const vd = data.vectorData as { vectorNetworkBlob?: number } | undefined;
-    if (vd && typeof vd.vectorNetworkBlob === 'number') {
-      const blob = blobs[vd.vectorNetworkBlob];
-      if (blob?.bytes) {
-        const vn = parseVectorNetworkBlob(blob.bytes);
-        if (vn) out._path = vectorNetworkToPath(vn);
-      }
-    }
-  }
-
-  // INSTANCE: collect editable TEXT descendants + attach the master's
-  // expanded subtree as `_renderChildren` so the canvas can show actual
-  // button shapes / icons / labels (without these the instance is just an
-  // empty colored rectangle).
-  if (n.type === 'INSTANCE' && n.children.length === 0) {
-    const sd = data.symbolData as {
-      symbolID?: { sessionID?: number; localID?: number };
-      symbolOverrides?: Array<Record<string, unknown>>;
-    } | undefined;
-    const sid = sd?.symbolID;
-    if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
-      const masterKey = `${sid.sessionID}:${sid.localID}`;
-      const master = symbolIndex.get(masterKey);
-      if (master) {
-        const texts: ComponentTextRef[] = [];
-        collectTexts(master, [], texts, symbolIndex, 0);
-        if (texts.length > 0) out._componentTexts = texts;
-
-        // Build the override map BEFORE expanding so render-time text
-        // substitutions can happen for each child node.
-        const textOverrides = collectTextOverridesFromInstance(sd?.symbolOverrides);
-        const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, 0),
-        );
-        if (expanded.length > 0) out._renderChildren = expanded;
-      }
-    }
-  }
-
-  for (const k of Object.keys(data)) {
-    if (k === 'guid' || k === 'type' || k === 'name') continue;
-    const v = data[k];
-    // Drop Uint8Array / large binary fields — Konva-side rendering doesn't need them
-    if (v instanceof Uint8Array) continue;
-    if (k === 'derivedSymbolData' || k === 'derivedTextData') continue;
-    if (k === 'fillGeometry' || k === 'strokeGeometry') continue;
-    if (k === 'vectorData') continue;
-    out[k] = v;
-  }
-  return out;
-}
-
-/**
- * Pull text overrides out of an INSTANCE's symbolOverrides[]. Each override
- * targets a master text by its single-step guidPath. Returns a map of
- * "sess:local" → override-text, keyed by the master text node's guidStr.
- */
-function collectTextOverridesFromInstance(
-  overrides: Array<Record<string, unknown>> | undefined,
-): Map<string, string> {
-  const m = new Map<string, string>();
-  if (!Array.isArray(overrides)) return m;
-  for (const o of overrides) {
-    const td = o.textData as { characters?: string } | undefined;
-    if (typeof td?.characters !== 'string') continue;
-    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
-    if (!Array.isArray(guids) || guids.length === 0) continue;
-    // Use the LAST guid in the path — that's the actual text node target.
-    const last = guids[guids.length - 1]!;
-    if (typeof last.sessionID !== 'number' || typeof last.localID !== 'number') continue;
-    m.set(`${last.sessionID}:${last.localID}`, td.characters);
-  }
-  return m;
-}
-
-/**
- * Render-only version of toClientNode used inside INSTANCE expansion. Keeps
- * the master's GUIDs (so editing still targets the master node), tags every
- * descendant with `_isInstanceChild: true`, and applies any per-instance
- * text overrides at render time so the canvas reflects them immediately.
- *
- * Recursion is depth-limited (8) and stops at nested INSTANCEs (their own
- * `_renderChildren` will be filled in when toClientNode visits them
- * separately as part of the main tree walk).
- */
-function toClientChildForRender(
-  n: TreeNode,
-  blobs: Array<{ bytes: Uint8Array }>,
-  symbolIndex: Map<string, TreeNode>,
-  textOverrides: Map<string, string>,
-  depth: number,
-): ClientNode {
-  if (depth > 8) {
-    return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
-  }
-  const data = (n.data ?? {}) as Record<string, unknown>;
-  const out: ClientNode = {
-    id: n.guidStr,
-    guid: n.guid,
-    type: n.type,
-    name: n.name,
-    _isInstanceChild: true,
-    children: n.children.map((c) => toClientChildForRender(c, blobs, symbolIndex, textOverrides, depth + 1)),
-  };
-  // Attach SVG path for vector descendants
-  if (VECTOR_TYPES.has(n.type)) {
-    const vd = data.vectorData as { vectorNetworkBlob?: number } | undefined;
-    if (vd && typeof vd.vectorNetworkBlob === 'number') {
-      const blob = blobs[vd.vectorNetworkBlob];
-      if (blob?.bytes) {
-        const vn = parseVectorNetworkBlob(blob.bytes);
-        if (vn) out._path = vectorNetworkToPath(vn);
-      }
-    }
-  }
-  // Apply per-instance text override at render time
-  if (n.type === 'TEXT') {
-    const ov = textOverrides.get(n.guidStr);
-    if (typeof ov === 'string') out._renderTextOverride = ov;
-  }
-  // Nested INSTANCE inside the master tree — recurse into ITS master too,
-  // applying the OUTER overrides (single-level for PoC; nested overrides
-  // would need path-aware filtering).
-  if (n.type === 'INSTANCE' && n.children.length === 0) {
-    const sd = data.symbolData as { symbolID?: { sessionID?: number; localID?: number } } | undefined;
-    const sid = sd?.symbolID;
-    if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
-      const master = symbolIndex.get(`${sid.sessionID}:${sid.localID}`);
-      if (master) {
-        out._renderChildren = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, depth + 1),
-        );
-      }
-    }
-  }
-  // Carry over the data fields the canvas / inspector needs
-  for (const k of Object.keys(data)) {
-    if (k === 'guid' || k === 'type' || k === 'name') continue;
-    const v = data[k];
-    if (v instanceof Uint8Array) continue;
-    if (k === 'derivedSymbolData' || k === 'derivedTextData') continue;
-    if (k === 'fillGeometry' || k === 'strokeGeometry') continue;
-    if (k === 'vectorData') continue;
-    out[k] = v;
-  }
-  return out;
-}
-
-/** Walk a master tree and collect every TEXT descendant (with breadcrumb path).
- *  Recurses through nested INSTANCEs by following their master via symbolIndex
- *  (capped at depth 6 to avoid pathological nesting). */
-function collectTexts(
-  n: TreeNode,
-  ancestors: string[],
-  out: ComponentTextRef[],
-  symbolIndex: Map<string, TreeNode>,
-  depth: number,
-): void {
-  if (depth > 6) return;
-  const data = n.data as Record<string, unknown>;
-  if (n.type === 'TEXT') {
-    const td = data.textData as { characters?: string } | undefined;
-    out.push({
-      guid: n.guidStr,
-      name: n.name,
-      path: ancestors.join(' / '),
-      characters: td?.characters ?? '',
-    });
-    return;
-  }
-  // Descend into children
-  for (const c of n.children) {
-    collectTexts(c, [...ancestors, c.name ?? c.type], out, symbolIndex, depth + 1);
-  }
-  // Nested INSTANCE → resolve via master and descend
-  if (n.type === 'INSTANCE' && n.children.length === 0) {
-    const sd = data.symbolData as { symbolID?: { sessionID?: number; localID?: number } } | undefined;
-    const sid = sd?.symbolID;
-    if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
-      const master = symbolIndex.get(`${sid.sessionID}:${sid.localID}`);
-      if (master) {
-        for (const c of master.children) {
-          collectTexts(c, [...ancestors, c.name ?? c.type], out, symbolIndex, depth + 1);
-        }
-      }
-    }
-  }
-}
-const sessions = new Map<string, Session>();
+const sessionStore = new FsSessionStore();
+// Legacy alias — exposes the adapter's underlying map so the existing route
+// handlers (which still call `sessions.get`/`sessions.set`) keep working
+// during the phase-3→5 migration. New code should use `sessionStore` directly.
+const sessions = sessionStore.rawMap();
 
 const app = new Hono();
 app.use('*', cors());
@@ -327,58 +84,32 @@ app.post('/api/upload', async (c) => {
     return c.json({ error: 'no file uploaded' }, 400);
   }
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const tmpDir = mkdtempSync(join(tmpdir(), 'figrev-web-'));
   try {
-    // loadContainer expects a file path; write the upload to disk first.
-    const inPath = join(tmpDir, 'in.fig');
-    writeFileSync(inPath, bytes);
-    const container = loadContainer(inPath);
-    const decoded = decodeFigCanvas(container.canvasFig);
-    const tree = buildTree(decoded.message);
-    if (!tree.document) throw new Error('no DOCUMENT root in tree');
-
-    // dump intermediates so repack(--mode json) can later rebuild
-    const intOpts = {
-      enabled: true,
-      dir: join(tmpDir, 'extracted'),
-      includeFullMessage: true,
-      minify: true,
-    };
-    dumpStage1Container(intOpts, container);
-    dumpStage3Decompressed(intOpts, decoded);
-    dumpStage4Decoded(intOpts, decoded);
-    dumpStage5Tree(intOpts, tree);
-
-    const id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    const blobs = (decoded.message as { blobs?: Array<{ bytes: Uint8Array }> }).blobs ?? [];
-    // SymbolIndex by guidStr — needed to resolve INSTANCE → master for component-text panels.
-    const symbolIndex = new Map<string, TreeNode>();
-    for (const node of tree.allNodes.values()) {
-      if (node.type === 'SYMBOL' || node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
-        symbolIndex.set(node.guidStr, node);
-      }
-      // Also accept FRAME masters that INSTANCEs may reference (rare but possible).
-      symbolIndex.set(node.guidStr, node);
-    }
-    const documentJson = toClientNode(tree.document, blobs, symbolIndex);
-    sessions.set(id, {
-      id,
-      dir: tmpDir,
-      origName: file.name,
-      archiveVersion: decoded.archiveVersion,
-      documentJson,
-    });
+    const session = await sessionStore.create(bytes, file.name);
+    const doc = session.documentJson;
+    const pageCount = Array.isArray(doc.children)
+      ? doc.children.filter((n: any) => n.type === 'CANVAS').length
+      : 0;
     return c.json({
-      sessionId: id,
-      origName: file.name,
-      pageCount: tree.document.children.filter((n) => n.type === 'CANVAS').length,
-      nodeCount: tree.allNodes.size,
+      sessionId: session.id,
+      origName: session.origName,
+      pageCount,
+      // nodeCount is not exposed via the SessionStore port (no consumer
+      // outside upload). For now we count from the documentJson tree;
+      // when a `Stats` port lands we'll replace this with a structured value.
+      nodeCount: countNodes(doc),
     });
   } catch (err) {
-    rmSync(tmpDir, { recursive: true, force: true });
     return c.json({ error: (err as Error).message }, 500);
   }
 });
+
+function countNodes(n: any): number {
+  if (!n || typeof n !== 'object') return 0;
+  let count = 1;
+  if (Array.isArray(n.children)) for (const c of n.children) count += countNodes(c);
+  return count;
+}
 
 app.get('/api/doc/:id', (c) => {
   const s = sessions.get(c.req.param('id'));
