@@ -32,6 +32,7 @@ import {
   dumpStage5Tree,
 } from '../../src/intermediate.js';
 import { repack } from '../../src/repack.js';
+import { parseVectorNetworkBlob, vectorNetworkToPath } from '../../src/vector.js';
 import type { TreeNode } from '../../src/types.js';
 
 interface Session {
@@ -54,18 +55,44 @@ interface ClientNode {
   type: string;
   name?: string;
   children?: ClientNode[];
+  _path?: string;      // pre-decoded SVG path (vector nodes)
   [k: string]: unknown;
 }
 
-function toClientNode(n: TreeNode): ClientNode {
+const VECTOR_TYPES = new Set([
+  'VECTOR',
+  'STAR',
+  'LINE',
+  'ELLIPSE',
+  'REGULAR_POLYGON',
+  'BOOLEAN_OPERATION',
+  'ROUNDED_RECTANGLE',
+]);
+
+function toClientNode(n: TreeNode, blobs: Array<{ bytes: Uint8Array }>): ClientNode {
   const data = (n.data ?? {}) as Record<string, unknown>;
   const out: ClientNode = {
     id: n.guidStr,
     guid: n.guid,
     type: n.type,
     name: n.name,
-    children: n.children.map(toClientNode),
+    children: n.children.map((c) => toClientNode(c, blobs)),
   };
+
+  // Pre-decode the vectorNetworkBlob into an SVG path string so the canvas
+  // can render real shapes via Konva.Path. Without this, every vector
+  // becomes a colored bbox rectangle (no shape fidelity).
+  if (VECTOR_TYPES.has(n.type)) {
+    const vd = data.vectorData as { vectorNetworkBlob?: number } | undefined;
+    if (vd && typeof vd.vectorNetworkBlob === 'number') {
+      const blob = blobs[vd.vectorNetworkBlob];
+      if (blob?.bytes) {
+        const vn = parseVectorNetworkBlob(blob.bytes);
+        if (vn) out._path = vectorNetworkToPath(vn);
+      }
+    }
+  }
+
   for (const k of Object.keys(data)) {
     if (k === 'guid' || k === 'type' || k === 'name') continue;
     const v = data[k];
@@ -115,7 +142,8 @@ app.post('/api/upload', async (c) => {
     dumpStage5Tree(intOpts, tree);
 
     const id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    const documentJson = toClientNode(tree.document);
+    const blobs = (decoded.message as { blobs?: Array<{ bytes: Uint8Array }> }).blobs ?? [];
+    const documentJson = toClientNode(tree.document, blobs);
     sessions.set(id, {
       id,
       dir: tmpDir,
