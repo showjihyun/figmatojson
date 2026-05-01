@@ -4,6 +4,8 @@ output/
 extracted/
 dashboard/
 *.tsbuildinfo
+web/dist-client/
+web/node_modules/
 
 # Dependencies
 node_modules/
