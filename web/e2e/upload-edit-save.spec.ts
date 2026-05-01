@@ -70,6 +70,109 @@ test.describe('Tier 2 PoC — full upload/edit/save flow', () => {
     expect(tFirstPaint).toBeLessThan(30_000);
   });
 
+  // Selection-click perf gate. The per-node useSyncExternalStore subscription
+  // was supposed to take this from O(N) reconciliation (200-500 ms on 35K
+  // nodes) to O(changes) (1 or 2 NodeShape re-renders per click). This test
+  // is the regression gate on that work. Uses the `window.__select(guid)`
+  // hook App.tsx exposes for tests — Konva canvas doesn't surface individual
+  // shapes for click() in headless mode, so we drive selection through the
+  // same callback the canvas would.
+  test('large-doc perf gate: selection-click round-trip under 100ms', async ({ page, request }) => {
+    test.setTimeout(120_000);
+
+    // Capture sessionId BEFORE upload — same pattern as the other tests
+    // in this file. `page.waitForRequest` after the upload would miss the
+    // request that already fired during `waitForDocLoaded`.
+    let sessionId = '';
+    page.on('request', (req) => {
+      const m = req.url().match(/\/api\/doc\/(s[a-z0-9]+)/);
+      if (m && !sessionId) sessionId = m[1]!;
+    });
+
+    await page.goto('/');
+    await page.locator('input[type="file"][accept=".fig"]').setInputFiles(SAMPLE_FIG);
+    await waitForDocLoaded(page, 6);
+    expect(sessionId, 'sessionId from /api/doc/:id').toBeTruthy();
+
+    const doc = await request
+      .get(`http://localhost:5274/api/doc/${sessionId}`)
+      .then((r) => r.json());
+    function findText(n: { type?: string; textData?: { characters?: string }; guid?: { sessionID?: number; localID?: number }; children?: unknown[] }): { guid?: { sessionID?: number; localID?: number } } | null {
+      if (n?.type === 'TEXT' && n.textData?.characters && n.guid) return n;
+      if (Array.isArray(n?.children)) {
+        for (const c of n.children) {
+          const f = findText(c as Parameters<typeof findText>[0]);
+          if (f) return f;
+        }
+      }
+      return null;
+    }
+    const t = findText(doc);
+    expect(t, 'a TEXT node in the sample').toBeTruthy();
+    const targetGuid = `${t!.guid!.sessionID}:${t!.guid!.localID}`;
+
+    // Run the selection cycle a few times, take the median to smooth out
+    // run-to-run jitter from animation-frame scheduling.
+    const samples: number[] = await page.evaluate(async (guid: string) => {
+      const w = window as unknown as { __select?: (g: string | null) => void };
+      if (!w.__select) throw new Error('window.__select not exposed (did App.tsx mount?)');
+      const out: number[] = [];
+      const nextFrame = () => new Promise<void>((res) => requestAnimationFrame(() => res()));
+      // Warm-up — first click after page load can pull in late-bound code paths.
+      w.__select(guid);
+      await nextFrame(); await nextFrame();
+      w.__select(null);
+      await nextFrame(); await nextFrame();
+
+      for (let i = 0; i < 5; i++) {
+        const t0 = performance.now();
+        w.__select(guid);
+        await nextFrame();
+        await nextFrame();
+        const t1 = performance.now();
+        out.push(t1 - t0);
+        // Deselect between runs so the next click is a real flip.
+        w.__select(null);
+        await nextFrame();
+      }
+      return out;
+    }, targetGuid);
+
+    const median = [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)];
+    console.log(`[perf-gate] selection-click round-trip (35,660 nodes): samples=${samples.map((x) => x.toFixed(1)).join('/')} ms, median=${median.toFixed(1)} ms`);
+
+    // Budget: 100 ms. The per-node memo + useSyncExternalStore work targets
+    // 1-2 NodeShape re-renders per click, which on a fast machine measures
+    // <10 ms. 100 ms catches a regression to "full-tree reconciliation"
+    // (which was 200-500 ms on this sample pre-refactor).
+    expect(median).toBeLessThan(100);
+  });
+
+  // Vector-heavy variant: bvp.fig has SECTION nodes, Figma variables, and
+  // a much higher proportion of VECTOR / BOOLEAN_OPERATION nodes than the
+  // metarich sample. Path-parsing in toClientNode is the dominant cost
+  // here, so it's a different regression surface than the 35K dense-text
+  // gate above. Smaller doc (3,155 nodes / 3 pages) → tighter budget.
+  test('vector-heavy doc perf gate: bvp.fig upload + first-render under 15s', async ({ page }) => {
+    test.setTimeout(60_000);
+    if (!existsSync(BVP_FIG)) test.skip(true, `sample missing: ${BVP_FIG}`);
+
+    await page.goto('/');
+    await expect(page.getByText('figma_reverse · Tier 2 PoC')).toBeVisible();
+
+    const tStart = Date.now();
+    await page.locator('input[type="file"][accept=".fig"]').setInputFiles(BVP_FIG);
+    await waitForDocLoaded(page, 3);
+    const tFirstPaint = Date.now() - tStart;
+    console.log(`[perf-gate] bvp.fig upload + first paint (3,155 nodes, vector-heavy): ${tFirstPaint}ms`);
+
+    // Budget: 15s. Clean run is ~2-3s; the wider window absorbs CI variance.
+    // A future regression in vector-path parsing or VECTOR_TYPES rendering
+    // should still fit comfortably below this — anything over 15s warrants
+    // investigation.
+    expect(tFirstPaint).toBeLessThan(15_000);
+  });
+
   test('upload .fig, edit a text node, save back to .fig', async ({ page }) => {
     test.setTimeout(180_000);
 
