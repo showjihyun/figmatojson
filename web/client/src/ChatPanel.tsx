@@ -1,9 +1,27 @@
 /**
  * Left-sidebar AI chat. Talks to /api/chat which proxies to Anthropic with
- * tool-use enabled. The user supplies their own API key (stored in
- * localStorage) — no key ever rides through the bundle.
+ * tool-use enabled.
+ *
+ * Two auth modes:
+ *   - Subscription (default): uses the user's local Claude Code login,
+ *                             no key needed. Recommended.
+ *   - API Key:                user-supplied sk-ant-... key, stored in
+ *                             localStorage only (never in the bundle).
  */
 import { useEffect, useRef, useState } from 'react';
+import { ArrowUp, ChevronDown, Check, Crown, KeyRound, Loader2, ShieldCheck } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { cn } from '@/lib/utils';
 
 interface ChatMsg {
   role: 'user' | 'assistant';
@@ -39,10 +57,17 @@ const MODELS: ModelOption[] = [
 ];
 const DEFAULT_MODEL = 'claude-opus-4-6';
 
+/** Tiny color cue per model family — gold opus, blue sonnet, green haiku. */
+function modelDot(id: string): string {
+  if (id.includes('opus-4-7')) return '#ffd166';
+  if (id.includes('opus-4-6')) return '#cc9933';
+  if (id.includes('sonnet')) return '#7eb6ff';
+  if (id.includes('haiku')) return '#a3e3a3';
+  return '#888';
+}
+
 export function ChatPanel({ sessionId, selectedGuid, onChange }: ChatPanelProps) {
   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem(KEY_STORE) ?? '');
-  // Default to Subscription — uses the user's local Claude Code login,
-  // no key needed. API Key mode is the explicit fallback.
   const [authMode, setAuthMode] = useState<AuthMode>(
     () => (localStorage.getItem(AUTH_MODE_STORE) as AuthMode) || 'subscription',
   );
@@ -143,138 +168,114 @@ export function ChatPanel({ sessionId, selectedGuid, onChange }: ChatPanelProps)
   }
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        background: '#1a1a1a',
-        borderRight: '1px solid #2a2a2a',
-        minHeight: 0,
-      }}
-    >
-      <div
-        style={{
-          padding: '10px 14px',
-          borderBottom: '1px solid #2a2a2a',
-          background: '#181818',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-        }}
-      >
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 11, color: '#777', letterSpacing: 0.5 }}>AI ASSISTANT</div>
-          <div style={{ fontSize: 13, color: '#eee', fontWeight: 600, marginTop: 2 }}>
-            Claude{' '}
+    <div className="flex h-full min-h-0 flex-col bg-card">
+      {/* Header */}
+      <div className="flex flex-shrink-0 items-center gap-2 border-b border-border bg-card px-4 py-3">
+        <div className="flex-1 min-w-0">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            AI Assistant
+          </div>
+          <div className="mt-0.5 flex items-center gap-2 text-sm font-semibold text-foreground">
+            Claude
             <span
-              style={{
-                fontSize: 10,
-                color: authMode === 'subscription' ? '#a3e3a3' : '#7eb6ff',
-                fontWeight: 500,
-                marginLeft: 4,
-              }}
+              className={cn(
+                'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium',
+                authMode === 'subscription'
+                  ? 'bg-emerald-950 text-emerald-300'
+                  : 'bg-blue-950 text-blue-300',
+              )}
             >
-              {authMode === 'subscription' ? '⊕ Subscription' : '🔑 API Key' + (apiKey ? '' : ' (not set)')}
+              {authMode === 'subscription' ? (
+                <>
+                  <ShieldCheck className="h-3 w-3" />
+                  Subscription
+                </>
+              ) : (
+                <>
+                  <KeyRound className="h-3 w-3" />
+                  API Key{!apiKey && ' (not set)'}
+                </>
+              )}
             </span>
           </div>
         </div>
-        <button
-          onClick={() => setShowAuth(true)}
-          style={{
-            background: 'transparent',
-            color: '#888',
-            border: '1px solid #2c2c2c',
-            padding: '4px 8px',
-            borderRadius: 4,
-            fontSize: 11,
-            cursor: 'pointer',
-          }}
-        >
+        <Button variant="outline" size="sm" onClick={() => setShowAuth(true)}>
           Auth
-        </button>
+        </Button>
       </div>
 
-      <div ref={scrollerRef} style={{ flex: 1, overflow: 'auto', padding: 14, minHeight: 0 }}>
+      {/* Message list */}
+      <div ref={scrollerRef} className="flex-1 overflow-auto px-4 py-3 min-h-0">
         {messages.length === 0 && (
-          <div style={{ color: '#666', fontSize: 12, lineHeight: 1.6 }}>
-            Try:
-            <ul style={{ paddingLeft: 18, marginTop: 6 }}>
-              <li>"Change the selected text to ..."</li>
-              <li>"Move the selected node to (200, 100)"</li>
-              <li>"Resize selection to 400×60"</li>
-              <li>"Make the fill green (rgb 0.2, 0.8, 0.3)"</li>
-              <li>"Override this instance's button text to 'Save'"</li>
+          <div className="text-sm leading-relaxed text-muted-foreground">
+            <div className="mb-2 font-medium text-foreground">Try:</div>
+            <ul className="space-y-1.5 pl-1">
+              <li className="rounded-md border border-border bg-background px-3 py-2 text-xs">
+                "Change the selected text to <span className="text-foreground">…</span>"
+              </li>
+              <li className="rounded-md border border-border bg-background px-3 py-2 text-xs">
+                "Move the selected node to <span className="text-foreground">(200, 100)</span>"
+              </li>
+              <li className="rounded-md border border-border bg-background px-3 py-2 text-xs">
+                "Resize selection to <span className="text-foreground">400×60</span>"
+              </li>
+              <li className="rounded-md border border-border bg-background px-3 py-2 text-xs">
+                "Make the fill green (rgb 0.2, 0.8, 0.3)"
+              </li>
+              <li className="rounded-md border border-border bg-background px-3 py-2 text-xs">
+                "Override this instance's button text to 'Save'"
+              </li>
             </ul>
           </div>
         )}
         {messages.map((m, i) => (
-          <div key={i} style={{ marginBottom: 14 }}>
+          <div key={i} className="mb-4">
             <div
-              style={{
-                fontSize: 10,
-                textTransform: 'uppercase',
-                letterSpacing: 0.6,
-                color: m.role === 'user' ? '#0a84ff' : '#999',
-                marginBottom: 4,
-                fontWeight: 600,
-              }}
+              className={cn(
+                'mb-1 text-[10px] font-semibold uppercase tracking-wider',
+                m.role === 'user' ? 'text-primary' : 'text-muted-foreground',
+              )}
             >
               {m.role === 'user' ? 'You' : 'Claude'}
             </div>
             <div
-              style={{
-                background: m.role === 'user' ? '#1f3a5f' : '#222',
-                color: '#eee',
-                padding: '8px 12px',
-                borderRadius: 6,
-                fontSize: 13,
-                lineHeight: 1.5,
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-              }}
+              className={cn(
+                'whitespace-pre-wrap break-words rounded-md px-3 py-2 text-sm leading-relaxed',
+                m.role === 'user'
+                  ? 'bg-primary/15 text-foreground border border-primary/30'
+                  : 'bg-muted text-foreground border border-border',
+              )}
             >
               {m.content}
             </div>
             {m.actions && m.actions.length > 0 && (
-              <div style={{ marginTop: 6, fontSize: 11, color: '#888' }}>
+              <div className="mt-1.5 space-y-1">
                 {m.actions.map((a, j) => (
-                  <div key={j} style={{ marginTop: 2 }}>
-                    <code style={{ color: '#7eb6ff' }}>{a.tool}</code>
-                    <span style={{ color: '#666' }}>(</span>
-                    <code style={{ color: '#a3e3a3' }}>
+                  <div key={j} className="font-mono text-[11px] text-muted-foreground">
+                    <span className="text-blue-400">{a.tool}</span>
+                    <span className="text-muted-foreground/60">(</span>
+                    <span className="text-emerald-400">
                       {JSON.stringify(a.input).slice(0, 80)}
-                    </code>
-                    <span style={{ color: '#666' }}>)</span>
+                    </span>
+                    <span className="text-muted-foreground/60">)</span>
                   </div>
                 ))}
               </div>
             )}
           </div>
         ))}
-        {busy && <div style={{ color: '#888', fontSize: 12 }}>Thinking…</div>}
+        {busy && (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Thinking…
+          </div>
+        )}
       </div>
 
-      <div
-        style={{
-          padding: 10,
-          borderTop: '1px solid #2a2a2a',
-          background: '#1a1a1a',
-        }}
-      >
-        {/* Pencil.dev-style composer: textarea + bottom bar with model picker + send. */}
-        <div
-          style={{
-            background: '#0c0c0c',
-            border: '1px solid #2c2c2c',
-            borderRadius: 8,
-            padding: 8,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 6,
-          }}
-        >
-          <textarea
+      {/* Composer (pencil.dev-style: textarea + bottom bar with model picker + send) */}
+      <div className="flex-shrink-0 border-t border-border bg-card p-3">
+        <div className="flex flex-col gap-2 rounded-lg border border-input bg-background p-2 focus-within:ring-2 focus-within:ring-ring">
+          <Textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -283,162 +284,95 @@ export function ChatPanel({ sessionId, selectedGuid, onChange }: ChatPanelProps)
                 send();
               }
             }}
-            placeholder={apiKey ? 'Ask Claude to edit…' : 'Set API key first'}
+            placeholder={
+              authMode === 'subscription'
+                ? 'Ask Claude to edit…'
+                : apiKey
+                  ? 'Ask Claude to edit…'
+                  : 'Set API key first'
+            }
             rows={2}
             disabled={busy}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              color: '#e8e8e8',
-              padding: '4px 4px 0',
-              fontSize: 13,
-              fontFamily: 'inherit',
-              resize: 'none',
-              outline: 'none',
-              width: '100%',
-              minHeight: 38,
-            }}
+            className="min-h-[44px] resize-none border-0 bg-transparent px-1 py-1 text-sm shadow-none focus-visible:ring-0"
           />
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-            }}
-          >
-            <div ref={modelMenuRef} style={{ position: 'relative' }}>
-              <button
+          <div className="flex items-center gap-2">
+            {/* Model picker — custom popover so we can show label+blurb per item */}
+            <div ref={modelMenuRef} className="relative">
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => setModelMenuOpen((o) => !o)}
-                style={{
-                  background: 'transparent',
-                  border: '1px solid #2c2c2c',
-                  borderRadius: 6,
-                  color: '#bbb',
-                  padding: '4px 10px',
-                  fontSize: 12,
-                  fontFamily: 'inherit',
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
                 title={currentModel.blurb}
+                className="gap-2"
               >
                 <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: 2,
-                    background: modelDot(currentModel.id),
-                    display: 'inline-block',
-                  }}
+                  className="inline-block h-2 w-2 rounded-sm"
+                  style={{ background: modelDot(currentModel.id) }}
                 />
-                <span style={{ fontWeight: 600 }}>{currentModel.label}</span>
-                <span style={{ fontSize: 10, color: '#666' }}>▾</span>
-              </button>
+                {currentModel.label}
+                <ChevronDown className="h-3 w-3 opacity-60" />
+              </Button>
               {modelMenuOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    bottom: 'calc(100% + 6px)',
-                    left: 0,
-                    background: '#1a1a1a',
-                    border: '1px solid #2c2c2c',
-                    borderRadius: 8,
-                    boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
-                    minWidth: 240,
-                    zIndex: 50,
-                    padding: 4,
-                  }}
-                >
+                <div className="absolute bottom-[calc(100%+6px)] left-0 z-50 min-w-[260px] rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-xl">
                   {MODELS.map((m) => (
                     <button
+                      type="button"
                       key={m.id}
                       onClick={() => pickModel(m.id)}
-                      style={{
-                        display: 'flex',
-                        width: '100%',
-                        background: m.id === model ? '#222' : 'transparent',
-                        border: 'none',
-                        borderRadius: 4,
-                        padding: '8px 10px',
-                        textAlign: 'left',
-                        cursor: 'pointer',
-                        gap: 10,
-                        alignItems: 'center',
-                      }}
+                      className={cn(
+                        'flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors',
+                        m.id === model ? 'bg-accent' : 'hover:bg-accent/60',
+                      )}
                     >
                       <span
-                        style={{
-                          width: 10,
-                          height: 10,
-                          borderRadius: 3,
-                          background: modelDot(m.id),
-                          flexShrink: 0,
-                        }}
+                        className="h-2.5 w-2.5 flex-shrink-0 rounded"
+                        style={{ background: modelDot(m.id) }}
                       />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ color: '#eee', fontSize: 12, fontWeight: 600 }}>{m.label}</div>
-                        <div style={{ color: '#888', fontSize: 11, marginTop: 1 }}>{m.blurb}</div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold leading-tight">{m.label}</div>
+                        <div className="mt-0.5 text-xs text-muted-foreground">{m.blurb}</div>
                       </div>
-                      {m.id === model && <span style={{ color: '#0a84ff', fontSize: 14 }}>✓</span>}
+                      {m.id === model && <Check className="h-4 w-4 flex-shrink-0 text-primary" />}
                     </button>
                   ))}
                 </div>
               )}
             </div>
-            <button
+            <Button
               onClick={send}
               disabled={busy || !input.trim()}
-              style={{
-                marginLeft: 'auto',
-                background: busy || !input.trim() ? '#1c1c1c' : '#0a84ff',
-                color: busy || !input.trim() ? '#555' : 'white',
-                border: 'none',
-                borderRadius: 6,
-                padding: '5px 14px',
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: busy || !input.trim() ? 'default' : 'pointer',
-              }}
+              size="default"
+              className="ml-auto"
+              title="Send (Enter)"
             >
-              {busy ? '…' : 'Send ↵'}
-            </button>
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp />}
+              Send
+            </Button>
           </div>
         </div>
       </div>
 
-      {showAuth && (
-        <AuthModal
-          mode={authMode}
-          apiKey={apiKey}
-          onPickMode={pickAuthMode}
-          onSaveKey={saveKey}
-          onClose={() => setShowAuth(false)}
-        />
-      )}
+      <AuthModal
+        open={showAuth}
+        mode={authMode}
+        apiKey={apiKey}
+        onPickMode={pickAuthMode}
+        onSaveKey={saveKey}
+        onClose={() => setShowAuth(false)}
+      />
     </div>
   );
 }
 
-/** Tiny color cue per model family — matches the icon's tier (gold opus,
- *  blue sonnet, green haiku) so users can tell at a glance which one is
- *  active. Pencil.dev uses a similar visual mnemonic. */
-function modelDot(id: string): string {
-  if (id.includes('opus-4-7')) return '#ffd166'; // brightest gold — newest
-  if (id.includes('opus-4-6')) return '#cc9933'; // darker gold
-  if (id.includes('sonnet')) return '#7eb6ff';   // blue
-  if (id.includes('haiku')) return '#a3e3a3';    // green
-  return '#888';
-}
-
 function AuthModal({
+  open,
   mode,
   apiKey,
   onPickMode,
   onSaveKey,
   onClose,
 }: {
+  open: boolean;
   mode: AuthMode;
   apiKey: string;
   onPickMode: (m: AuthMode) => void;
@@ -446,159 +380,144 @@ function AuthModal({
   onClose: () => void;
 }) {
   const [val, setVal] = useState(apiKey);
+  useEffect(() => setVal(apiKey), [apiKey]);
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.7)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 1000,
-      }}
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: '#1a1a1a',
-          border: '1px solid #2a2a2a',
-          borderRadius: 10,
-          padding: 24,
-          width: 520,
-          maxWidth: '92vw',
-        }}
-      >
-        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Claude Authentication</div>
-        <div style={{ fontSize: 12, color: '#888', marginBottom: 16, lineHeight: 1.5 }}>
-          Choose how this app calls Claude. Subscription mode is recommended — it uses your local
-          Claude Code login so no key is needed.
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="text-base">Claude Authentication</DialogTitle>
+          <DialogDescription>
+            Choose how this app calls Claude. Subscription mode is recommended — it uses your local
+            Claude Code login so no key is needed.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-2.5">
+          {/* Subscription card */}
+          <button
+            type="button"
+            onClick={() => onPickMode('subscription')}
+            className={cn(
+              'group flex w-full items-start gap-3 rounded-lg border p-3.5 text-left transition-colors',
+              mode === 'subscription'
+                ? 'border-emerald-700 bg-emerald-950/40'
+                : 'border-border bg-background hover:border-emerald-900',
+            )}
+          >
+            <div
+              className={cn(
+                'mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md',
+                mode === 'subscription' ? 'bg-emerald-900' : 'bg-muted',
+              )}
+            >
+              <ShieldCheck
+                className={cn(
+                  'h-5 w-5',
+                  mode === 'subscription' ? 'text-emerald-300' : 'text-muted-foreground',
+                )}
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-foreground">Subscription</span>
+                <span className="rounded bg-emerald-700 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white">
+                  Default
+                </span>
+                {mode === 'subscription' && (
+                  <Check className="ml-auto h-4 w-4 text-emerald-400" />
+                )}
+              </div>
+              <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Uses your existing Claude Code session (read from <code className="rounded bg-muted px-1">~/.claude/</code>).
+                No key required. Run <code className="rounded bg-muted px-1">claude login</code> once if you haven't yet.
+              </div>
+            </div>
+          </button>
+
+          {/* API Key card */}
+          <button
+            type="button"
+            onClick={() => onPickMode('api-key')}
+            className={cn(
+              'group flex w-full items-start gap-3 rounded-lg border p-3.5 text-left transition-colors',
+              mode === 'api-key'
+                ? 'border-blue-700 bg-blue-950/40'
+                : 'border-border bg-background hover:border-blue-900',
+            )}
+          >
+            <div
+              className={cn(
+                'mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md',
+                mode === 'api-key' ? 'bg-blue-900' : 'bg-muted',
+              )}
+            >
+              <KeyRound
+                className={cn(
+                  'h-5 w-5',
+                  mode === 'api-key' ? 'text-blue-300' : 'text-muted-foreground',
+                )}
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-foreground">Anthropic API Key</span>
+                {mode === 'api-key' && <Check className="ml-auto h-4 w-4 text-blue-400" />}
+              </div>
+              <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Paste an <code className="rounded bg-muted px-1">sk-ant-…</code> key. Stored only in
+                your browser's localStorage. Get one at{' '}
+                <a
+                  href="https://console.anthropic.com/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-primary underline-offset-2 hover:underline"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  console.anthropic.com
+                </a>
+                .
+              </div>
+            </div>
+          </button>
         </div>
 
-        {/* Subscription card */}
-        <button
-          onClick={() => onPickMode('subscription')}
-          style={{
-            width: '100%',
-            background: mode === 'subscription' ? '#1f3a2a' : '#0c0c0c',
-            border: `1px solid ${mode === 'subscription' ? '#3a6e4a' : '#2c2c2c'}`,
-            borderRadius: 8,
-            padding: '12px 14px',
-            textAlign: 'left',
-            cursor: 'pointer',
-            marginBottom: 10,
-            color: '#eee',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ fontSize: 13, fontWeight: 700 }}>⊕ Subscription</span>
-            <span style={{ fontSize: 10, padding: '1px 6px', background: '#3a6e4a', color: 'white', borderRadius: 3, fontWeight: 600 }}>
-              DEFAULT
-            </span>
-            {mode === 'subscription' && <span style={{ marginLeft: 'auto', color: '#a3e3a3' }}>✓</span>}
-          </div>
-          <div style={{ fontSize: 11, color: '#bbb', lineHeight: 1.5 }}>
-            Uses your existing Claude Code session (read from <code>~/.claude/</code>). No key
-            required. Run <code>claude login</code> once if you haven't yet.
-          </div>
-        </button>
-
-        {/* API Key card */}
-        <button
-          onClick={() => onPickMode('api-key')}
-          style={{
-            width: '100%',
-            background: mode === 'api-key' ? '#1f2f4a' : '#0c0c0c',
-            border: `1px solid ${mode === 'api-key' ? '#3a5a8a' : '#2c2c2c'}`,
-            borderRadius: 8,
-            padding: '12px 14px',
-            textAlign: 'left',
-            cursor: 'pointer',
-            color: '#eee',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ fontSize: 13, fontWeight: 700 }}>🔑 Anthropic API Key</span>
-            {mode === 'api-key' && <span style={{ marginLeft: 'auto', color: '#7eb6ff' }}>✓</span>}
-          </div>
-          <div style={{ fontSize: 11, color: '#bbb', lineHeight: 1.5 }}>
-            Paste an <code>sk-ant-…</code> key. Stored only in your browser's localStorage. Get
-            one at{' '}
-            <a
-              href="https://console.anthropic.com/"
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: '#0a84ff' }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              console.anthropic.com
-            </a>
-            .
-          </div>
-        </button>
-
         {mode === 'api-key' && (
-          <div style={{ marginTop: 14 }}>
-            <input
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground" htmlFor="api-key-input">
+              API Key
+            </label>
+            <Input
+              id="api-key-input"
               type="password"
               value={val}
               onChange={(e) => setVal(e.target.value)}
               placeholder="sk-ant-api03-..."
               autoFocus
-              style={{
-                width: '100%',
-                background: '#0c0c0c',
-                border: '1px solid #2c2c2c',
-                borderRadius: 4,
-                color: '#e8e8e8',
-                padding: '8px 10px',
-                fontSize: 12,
-                fontFamily: 'Menlo, Consolas, monospace',
-              }}
+              className="font-mono"
             />
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
-          <button
-            onClick={onClose}
-            style={{
-              background: 'transparent',
-              color: '#888',
-              border: '1px solid #2c2c2c',
-              padding: '6px 14px',
-              borderRadius: 4,
-              fontSize: 12,
-              cursor: 'pointer',
-            }}
-          >
+        <DialogFooter>
+          <Button variant="outline" size="default" onClick={onClose}>
             Close
-          </button>
+          </Button>
           {mode === 'api-key' && (
-            <button
+            <Button
+              size="default"
               onClick={() => {
                 if (val && !val.startsWith('sk-ant-')) {
                   if (!confirm('Key does not start with sk-ant- — save anyway?')) return;
                 }
                 onSaveKey(val.trim());
               }}
-              style={{
-                background: '#0a84ff',
-                color: 'white',
-                border: 'none',
-                padding: '6px 14px',
-                borderRadius: 4,
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: 'pointer',
-              }}
             >
+              <Crown />
               Save Key
-            </button>
+            </Button>
           )}
-        </div>
-      </div>
-    </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

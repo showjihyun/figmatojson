@@ -170,8 +170,8 @@ export function App() {
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
       <header className="flex h-14 items-center gap-3 border-b border-border bg-card px-4">
-        <div className="text-sm font-semibold tracking-tight">
-          figma_reverse <span className="text-muted-foreground font-normal">· Tier 2 PoC</span>
+        <div className="text-sm font-semibold tracking-tight whitespace-nowrap">
+          figma_reverse · Tier 2 PoC
         </div>
 
         {/* Hidden native file inputs — buttons trigger them via ref. */}
