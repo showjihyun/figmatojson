@@ -141,6 +141,36 @@ app.get('/api/doc/:id', (c) => {
   return c.json(s.documentJson);
 });
 
+/**
+ * Path tokenizer — supports dotted keys + bracket indices:
+ *   "textData.characters"        → ["textData", "characters"]
+ *   "fillPaints[0].color.r"      → ["fillPaints", 0, "color", "r"]
+ *   "stack.padding[2]"           → ["stack", "padding", 2]
+ */
+function tokenizePath(path: string): Array<string | number> {
+  const tokens: Array<string | number> = [];
+  const re = /([^.[\]]+)|\[(\d+)\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(path)) !== null) {
+    if (m[2] !== undefined) tokens.push(parseInt(m[2], 10));
+    else if (m[1] !== undefined) tokens.push(m[1]);
+  }
+  return tokens;
+}
+
+/** Walk into `obj` along path tokens, creating intermediate {}/ [] as needed. */
+function setPath(obj: any, tokens: Array<string | number>, value: unknown): boolean {
+  let cur = obj;
+  for (let i = 0; i < tokens.length - 1; i++) {
+    const t = tokens[i]!;
+    const next = tokens[i + 1]!;
+    if (cur[t] == null) cur[t] = typeof next === 'number' ? [] : {};
+    cur = cur[t];
+  }
+  cur[tokens[tokens.length - 1]!] = value;
+  return true;
+}
+
 app.patch('/api/doc/:id', async (c) => {
   const s = sessions.get(c.req.param('id'));
   if (!s) return c.json({ error: 'session not found' }, 404);
@@ -149,8 +179,6 @@ app.patch('/api/doc/:id', async (c) => {
     field: string;          // e.g. "textData.characters" or "fillPaints[0].color.r"
     value: unknown;
   };
-  // Apply edit to message.json on disk so repack picks it up.
-  // We use a path-based mutation on the JSON text (simple but effective for PoC).
   const messagePath = join(s.dir, 'extracted', '04_decoded', 'message.json');
   if (!existsSync(messagePath)) return c.json({ error: 'message.json missing' }, 500);
   const raw = readFileSync(messagePath, 'utf8');
@@ -159,27 +187,17 @@ app.patch('/api/doc/:id', async (c) => {
     (n) => `${(n.guid as { sessionID: number; localID: number })?.sessionID}:${(n.guid as { sessionID: number; localID: number })?.localID}` === body.nodeGuid,
   );
   if (!node) return c.json({ error: `node ${body.nodeGuid} not found` }, 404);
-  // Path navigation: "textData.characters" → node.textData.characters
-  const segments = body.field.split('.');
-  let cur: Record<string, unknown> | undefined = node;
-  for (let i = 0; i < segments.length - 1; i++) {
-    cur = cur?.[segments[i]!] as Record<string, unknown> | undefined;
-    if (cur === undefined) return c.json({ error: `path ${segments.slice(0, i + 1).join('.')} undefined` }, 400);
-  }
-  const lastKey = segments[segments.length - 1]!;
-  cur[lastKey] = body.value;
+
+  const tokens = tokenizePath(body.field);
+  if (tokens.length === 0) return c.json({ error: 'empty field path' }, 400);
+  setPath(node, tokens, body.value);
   writeFileSync(messagePath, JSON.stringify(msg));
 
-  // Update the in-memory documentJson too (so subsequent /doc fetches reflect the edit)
-  // Walk our tree-backed normalized doc and patch the matching node.
+  // Mirror the patch on the in-memory client doc so subsequent /doc fetches reflect the edit.
   function walk(n: Record<string, unknown>): boolean {
     const guid = n.guid as { sessionID: number; localID: number } | undefined;
     if (guid && `${guid.sessionID}:${guid.localID}` === body.nodeGuid) {
-      let p: Record<string, unknown> = n;
-      for (let i = 0; i < segments.length - 1; i++) {
-        p = (p[segments[i]!] ??= {}) as Record<string, unknown>;
-      }
-      p[lastKey] = body.value;
+      setPath(n, tokens, body.value);
       return true;
     }
     const children = n.children as Array<Record<string, unknown>> | undefined;

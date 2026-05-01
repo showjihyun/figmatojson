@@ -21,7 +21,7 @@ export default defineConfig({
     command: 'npm run dev',
     url: 'http://localhost:5273',
     timeout: 60_000,
-    reuseExistingServer: false,    // port 5173 was occupied by another app on dev machine
+    reuseExistingServer: true,    // port 5173 was occupied by another app on dev machine
     stdout: 'pipe',
     stderr: 'pipe',
   },
