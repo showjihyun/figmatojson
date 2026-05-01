@@ -5,8 +5,9 @@
 
 /*
  * shadcn/ui design tokens — dark theme by default for this app.
- * Values are HSL channels (no hsl() wrapper) so Tailwind can compose
- * them with alpha modifiers like `bg-background/50`.
+ * Values are full hsl(...) colors. Tailwind v4 composes alpha modifiers
+ * (e.g. `bg-background/50`) via color-mix at runtime, so the wrapper is
+ * fine here — no need to drop down to bare HSL channels.
  */
 @theme {
   --radius: 0.5rem;
