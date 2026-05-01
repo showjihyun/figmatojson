@@ -304,6 +304,7 @@ export function App() {
               onMoveMany={onMoveMany}
               onResize={onResize}
               onResizeMany={onResizeMany}
+              sessionId={session?.sessionId ?? null}
             />
           ) : (
             <div className="flex h-full items-center justify-center px-8">

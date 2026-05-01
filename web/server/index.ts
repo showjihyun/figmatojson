@@ -383,6 +383,45 @@ app.get('/api/doc/:id', (c) => {
 });
 
 /**
+ * Stream an extracted image asset for the canvas to render IMAGE fillPaints.
+ *
+ * Files in `extracted/01_container/images/` are named after their 20-byte
+ * SHA-1 image hash (the same hash that appears in fillPaints[0].image.hash
+ * inside the document). The hash param is the lowercase hex of those bytes.
+ *
+ * MIME type is sniffed from the magic-byte header — Figma containers can hold
+ * PNG / JPEG / GIF / WebP fills.
+ */
+function sniffImageMime(buf: Buffer): string {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length >= 6 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif';
+  if (
+    buf.length >= 12 &&
+    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+  ) return 'image/webp';
+  return 'application/octet-stream';
+}
+
+app.get('/api/asset/:id/:hash', (c) => {
+  const s = sessions.get(c.req.param('id'));
+  if (!s) return c.json({ error: 'session not found' }, 404);
+  const hash = c.req.param('hash');
+  // Reject anything that isn't a 40-char lowercase hex string — defensive
+  // against path traversal even though we then join under a fixed prefix.
+  if (!/^[0-9a-f]{40}$/.test(hash)) return c.json({ error: 'invalid hash' }, 400);
+  const assetPath = join(s.dir, 'extracted', '01_container', 'images', hash);
+  if (!existsSync(assetPath)) return c.json({ error: 'asset not found' }, 404);
+  const buf = readFileSync(assetPath);
+  return c.body(buf as unknown as ArrayBuffer, 200, {
+    'Content-Type': sniffImageMime(buf),
+    'Content-Length': String(buf.byteLength),
+    'Cache-Control': 'private, max-age=3600',
+  });
+});
+
+/**
  * Path tokenizer — supports dotted keys + bracket indices:
  *   "textData.characters"        → ["textData", "characters"]
  *   "fillPaints[0].color.r"      → ["fillPaints", 0, "color", "r"]
