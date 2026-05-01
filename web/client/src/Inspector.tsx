@@ -19,6 +19,7 @@ interface InspectorProps {
   page: any;
   sessionId: string;
   selectedGuid: string | null;
+  selectedCount?: number;
   onChange: () => void;
 }
 
@@ -61,16 +62,41 @@ const FONT_WEIGHT_STYLES = [
   { label: 'Black', value: 'Black' },
 ];
 
-export function Inspector({ page, sessionId, selectedGuid, onChange }: InspectorProps) {
+export function Inspector({ page, sessionId, selectedGuid, selectedCount, onChange }: InspectorProps) {
   const node = useMemo(
     () => (selectedGuid ? findByGuid(page, selectedGuid) : null),
     [page, selectedGuid],
   );
 
-  if (!selectedGuid) {
+  if (!selectedGuid && (selectedCount ?? 0) === 0) {
     return (
-      <div style={{ padding: 16, color: '#888', fontSize: 12 }}>
+      <div style={{ padding: 16, color: '#888', fontSize: 12, lineHeight: 1.6 }}>
         Click a shape on the canvas to inspect / edit.
+        <br />
+        <span style={{ color: '#666' }}>Shift+click to select multiple nodes.</span>
+      </div>
+    );
+  }
+  if (!selectedGuid && (selectedCount ?? 0) > 1) {
+    return (
+      <div style={{ padding: 16, color: '#aaa', fontSize: 12, lineHeight: 1.7 }}>
+        <div
+          style={{
+            fontSize: 13,
+            fontWeight: 700,
+            color: '#eee',
+            marginBottom: 8,
+          }}
+        >
+          {selectedCount} nodes selected
+        </div>
+        <div style={{ color: '#888' }}>
+          Drag any of them on the canvas to move all selected nodes together.
+        </div>
+        <div style={{ color: '#666', marginTop: 8 }}>
+          Per-property editing requires a single-node selection — Shift+click extras to deselect, or
+          click empty canvas to clear.
+        </div>
       </div>
     );
   }
@@ -92,8 +118,8 @@ export function Inspector({ page, sessionId, selectedGuid, onChange }: Inspector
         fontSize: 12,
       }}
     >
-      <Header node={node} guid={selectedGuid} />
-      <TabbedBody node={node} sessionId={sessionId} guid={selectedGuid} onChange={onChange} />
+      <Header node={node} guid={selectedGuid!} />
+      <TabbedBody node={node} sessionId={sessionId} guid={selectedGuid!} onChange={onChange} />
     </div>
   );
 }

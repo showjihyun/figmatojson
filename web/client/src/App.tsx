@@ -17,9 +17,27 @@ export function App() {
   const [session, setSession] = useState<UploadResult | null>(null);
   const [doc, setDoc] = useState<any>(null);
   const [pageIdx, setPageIdx] = useState(0);
-  const [selectedGuid, setSelectedGuid] = useState<string | null>(null);
+  // Multi-select: Set of node GUIDs. When size === 1, behaves like single
+  // selection; size > 1 enables drag grouping and shows the multi-select
+  // inspector panel.
+  const [selectedGuids, setSelectedGuids] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const sessionFileInputRef = useRef<HTMLInputElement>(null);
+
+  function handleSelect(guid: string | null, mode: 'replace' | 'toggle' = 'replace') {
+    setSelectedGuids((prev) => {
+      if (guid === null) return new Set();
+      if (mode === 'toggle') {
+        const next = new Set(prev);
+        if (next.has(guid)) next.delete(guid);
+        else next.add(guid);
+        return next;
+      }
+      return new Set([guid]);
+    });
+  }
+  // Convenience accessor for the inspector / single-selection consumers.
+  const selectedGuid = selectedGuids.size === 1 ? [...selectedGuids][0]! : null;
 
   async function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -31,7 +49,7 @@ export function App() {
       const d = await fetchDoc(result.sessionId);
       setDoc(d);
       setPageIdx(0);
-      setSelectedGuid(null);
+      setSelectedGuids(new Set());
     } catch (err) {
       alert(`Upload error: ${(err as Error).message}`);
     } finally {
@@ -73,7 +91,7 @@ export function App() {
       const d = await fetchDoc(result.sessionId);
       setDoc(d);
       setPageIdx(0);
-      setSelectedGuid(null);
+      setSelectedGuids(new Set());
       e.target.value = '';
     } catch (err) {
       alert(`Load error: ${(err as Error).message}`);
@@ -89,20 +107,25 @@ export function App() {
   }
 
   useEffect(() => {
-    (window as unknown as { __select?: (g: string | null) => void }).__select = setSelectedGuid;
+    (window as unknown as { __select?: (g: string | null) => void }).__select = (g) =>
+      handleSelect(g);
     return () => {
       delete (window as unknown as { __select?: unknown }).__select;
     };
   }, []);
 
-  async function onMove(guid: string, x: number, y: number) {
+  async function onMoveMany(updates: Array<{ guid: string; x: number; y: number }>) {
     if (!session) return;
     try {
-      await patchNode(session.sessionId, guid, 'transform.m02', x);
-      await patchNode(session.sessionId, guid, 'transform.m12', y);
+      // Sequential PATCH per node — could parallelize but the backend mutates
+      // a single message.json file so we keep it serial for safety.
+      for (const u of updates) {
+        await patchNode(session.sessionId, u.guid, 'transform.m02', u.x);
+        await patchNode(session.sessionId, u.guid, 'transform.m12', u.y);
+      }
       onRefreshDoc();
     } catch (err) {
-      console.error('drag patch failed', err);
+      console.error('group move patch failed', err);
     }
   }
 
@@ -172,7 +195,7 @@ export function App() {
               value={pageIdx}
               onChange={(e) => {
                 setPageIdx(Number(e.target.value));
-                setSelectedGuid(null);
+                setSelectedGuids(new Set());
               }}
               style={{ background: '#333', color: '#eee', border: '1px solid #555', padding: '4px 8px' }}
             >
@@ -237,9 +260,9 @@ export function App() {
           {currentPage ? (
             <Canvas
               page={currentPage}
-              selectedGuid={selectedGuid}
-              onSelect={setSelectedGuid}
-              onMove={onMove}
+              selectedGuids={selectedGuids}
+              onSelect={handleSelect}
+              onMoveMany={onMoveMany}
               onResize={onResize}
             />
           ) : (
@@ -263,6 +286,7 @@ export function App() {
               page={currentPage}
               sessionId={session.sessionId}
               selectedGuid={selectedGuid}
+              selectedCount={selectedGuids.size}
               onChange={onRefreshDoc}
             />
           )}
