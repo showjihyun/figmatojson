@@ -360,7 +360,7 @@ function ColorInput({
               a,
             });
           }}
-          className="h-8 w-16 pr-6 text-right tabular-nums"
+          className="h-8 w-20 pr-6 text-right tabular-nums"
         />
         <span className="pointer-events-none absolute right-2 text-xs text-muted-foreground">%</span>
       </div>
