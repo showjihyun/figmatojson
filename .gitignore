@@ -6,6 +6,9 @@ dashboard/
 *.tsbuildinfo
 web/dist-client/
 web/node_modules/
+web/test-results/
+web/playwright-report/
+web/e2e/_rendered.png
 
 # Dependencies
 node_modules/
