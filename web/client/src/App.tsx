@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Canvas } from './Canvas';
 import { Inspector } from './Inspector';
 import { uploadFig, fetchDoc, downloadFig, patchNode, type UploadResult } from './api';
@@ -45,6 +45,15 @@ export function App() {
     const d = await fetchDoc(session.sessionId);
     setDoc(d);
   }
+
+  // Test/dev hook: expose programmatic selection so e2e + AI agents can target
+  // a node by GUID without simulating canvas clicks.
+  useEffect(() => {
+    (window as unknown as { __select?: (g: string | null) => void }).__select = setSelectedGuid;
+    return () => {
+      delete (window as unknown as { __select?: unknown }).__select;
+    };
+  }, []);
 
   // Drag-to-move on canvas → patch transform.m02/m12 of the node.
   async function onMove(guid: string, x: number, y: number) {

@@ -148,6 +148,21 @@ function TabbedBody({
             <Section title="Layer">
               <LayerSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
             </Section>
+            {/* Component Texts section — the primary entry point for editing
+                text inside INSTANCE nodes (which have no clickable children
+                on the canvas). Surface it FIRST under Layer so users can
+                find it immediately when a component is selected. */}
+            {node.type === 'INSTANCE' &&
+              Array.isArray(node._componentTexts) &&
+              node._componentTexts.length > 0 && (
+                <Section title="Component Texts">
+                  <ComponentTextsSection
+                    refs={node._componentTexts}
+                    sessionId={sessionId}
+                    onChange={onChange}
+                  />
+                </Section>
+              )}
             <Section title="Position & Size">
               <PositionSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
             </Section>
@@ -697,6 +712,128 @@ function StrokeSection({ node, sessionId, guid, onChange }: SectionProps) {
         </Row>
       )}
     </>
+  );
+}
+
+interface ComponentTextRef {
+  guid: string;
+  name?: string;
+  path: string;
+  characters: string;
+}
+
+function ComponentTextsSection({
+  refs,
+  sessionId,
+  onChange,
+}: {
+  refs: ComponentTextRef[];
+  sessionId: string;
+  onChange: () => void;
+}) {
+  return (
+    <>
+      <div
+        style={{
+          fontSize: 10,
+          color: '#888',
+          padding: '0 4px 8px',
+          lineHeight: 1.5,
+        }}
+      >
+        Edit text inside this component. Changes apply to the master and may
+        affect other instances of the same component.
+      </div>
+      {refs.map((r) => (
+        <ComponentTextRow key={r.guid} item={r} sessionId={sessionId} onChange={onChange} />
+      ))}
+    </>
+  );
+}
+
+function ComponentTextRow({
+  item,
+  sessionId,
+  onChange,
+}: {
+  item: ComponentTextRef;
+  sessionId: string;
+  onChange: () => void;
+}) {
+  const [val, setVal] = useState(item.characters);
+  useEffect(() => setVal(item.characters), [item.characters]);
+  const dirty = val !== item.characters;
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        padding: '6px 4px',
+        borderTop: '1px solid #1f1f1f',
+      }}
+    >
+      <div style={{ fontSize: 10, color: '#888', display: 'flex', gap: 6, alignItems: 'center' }}>
+        <span style={{ color: '#aaa', fontWeight: 600 }}>{item.name ?? 'Text'}</span>
+        {item.path && <span style={{ color: '#555' }}>· {item.path}</span>}
+        <span style={{ marginLeft: 'auto', fontFamily: 'Menlo, monospace', color: '#444' }}>
+          {item.guid}
+        </span>
+      </div>
+      <textarea
+        value={val}
+        rows={Math.min(4, Math.max(1, val.split('\n').length))}
+        onChange={(e) => setVal(e.target.value)}
+        style={{
+          ...inputStyle,
+          resize: 'vertical',
+          minHeight: 30,
+          fontFamily: 'inherit',
+        }}
+      />
+      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+        {dirty && (
+          <button
+            onClick={() => setVal(item.characters)}
+            style={{
+              background: 'transparent',
+              color: '#888',
+              border: '1px solid #2c2c2c',
+              padding: '4px 10px',
+              borderRadius: 4,
+              fontSize: 11,
+              cursor: 'pointer',
+            }}
+          >
+            Cancel
+          </button>
+        )}
+        <button
+          onClick={async () => {
+            if (!dirty) return;
+            try {
+              await patchNode(sessionId, item.guid, 'textData.characters', val);
+              onChange();
+            } catch (err) {
+              alert(`Failed: ${(err as Error).message}`);
+            }
+          }}
+          disabled={!dirty}
+          style={{
+            background: dirty ? '#0a84ff' : '#1c1c1c',
+            color: dirty ? 'white' : '#555',
+            border: 'none',
+            padding: '4px 12px',
+            borderRadius: 4,
+            fontSize: 11,
+            cursor: dirty ? 'pointer' : 'default',
+            fontWeight: 600,
+          }}
+        >
+          Apply
+        </button>
+      </div>
+    </div>
   );
 }
 
