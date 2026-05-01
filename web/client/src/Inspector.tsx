@@ -377,16 +377,19 @@ function Dropdown<T extends string | number>({
   options: Array<{ label: string; value: T }>;
   onCommit: (v: T) => void;
 }) {
+  // Radix Select treats value="" as "uncontrolled" — passing one would silently
+  // blank the trigger. Pass `undefined` for missing values so the placeholder
+  // shows instead, and only become controlled once the user picks something.
   return (
     <ShadSelect
-      value={String(value ?? '')}
+      value={value !== undefined ? String(value) : undefined}
       onValueChange={(v) => {
         const opt = options.find((o) => String(o.value) === v);
         if (opt) onCommit(opt.value);
       }}
     >
       <SelectTrigger className="h-8 w-full text-sm">
-        <SelectValue />
+        <SelectValue placeholder="—" />
       </SelectTrigger>
       <SelectContent>
         {options.map((o) => (
@@ -435,18 +438,42 @@ function ToggleButtons<T extends string>({
 function usePatch(sessionId: string, guid: string, onChange: () => void) {
   const pending = useRef<Map<string, unknown>>(new Map());
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Cancel any in-flight debounce when the component unmounts so a stale
-  // timer doesn't fire patchNode against a session that may already be gone
-  // (and to avoid setState-after-unmount warnings from onChange).
+  // Flush-on-change: when guid (or sessionId) flips — selection changed,
+  // session swapped — flush any pending entries against the OLD guid before
+  // the new one takes over. Without this, refs persist across renders and
+  // a debounced patch from node A would land on node B if the user clicks
+  // away within 220ms.
+  //
+  // Same effect runs on unmount, so a pending patch never leaks past the
+  // Inspector's lifetime.
   useEffect(() => {
+    const oldSessionId = sessionId;
+    const oldGuid = guid;
     return () => {
       if (timer.current) {
         clearTimeout(timer.current);
         timer.current = null;
       }
+      const entries = [...pending.current.entries()];
       pending.current.clear();
+      if (entries.length === 0) return;
+      // Fire-and-forget against the captured old (sessionId, guid).
+      void (async () => {
+        for (const [f, v] of entries) {
+          try {
+            await patchNode(oldSessionId, oldGuid, f, v);
+          } catch (err) {
+            console.error('flush-on-guid-change patch failed', f, err);
+          }
+        }
+        onChange();
+      })();
     };
-  }, []);
+    // onChange intentionally omitted — capturing the latest is fine and
+    // including it would re-bind the effect on every parent re-render,
+    // which would flush prematurely.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [guid, sessionId]);
   return (field: string, value: unknown): void => {
     pending.current.set(field, value);
     if (timer.current) clearTimeout(timer.current);
@@ -755,7 +782,13 @@ function ComponentTextRow({
   // The displayed value: in instance mode, prefer the override if any.
   const displayed = mode === 'instance' && typeof override === 'string' ? override : item.characters;
   const [val, setVal] = useState(displayed);
-  useEffect(() => setVal(displayed), [displayed]);
+  // Track whether the user has typed since the last sync. Without this guard,
+  // any sibling row Apply (or mode toggle) re-renders this row with a fresh
+  // `displayed` value, and the effect would clobber the user's unsaved edit.
+  const userTouched = useRef(false);
+  useEffect(() => {
+    if (!userTouched.current) setVal(displayed);
+  }, [displayed]);
   const dirty = val !== displayed;
   const overridden = typeof override === 'string';
   return (
@@ -773,12 +806,22 @@ function ComponentTextRow({
       <Textarea
         value={val}
         rows={Math.min(4, Math.max(1, val.split('\n').length))}
-        onChange={(e) => setVal(e.target.value)}
+        onChange={(e) => {
+          userTouched.current = true;
+          setVal(e.target.value);
+        }}
         className="min-h-[36px] resize-y text-sm"
       />
       <div className="flex justify-end gap-1.5">
         {dirty && (
-          <Button variant="ghost" size="sm" onClick={() => setVal(displayed)}>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              userTouched.current = false;
+              setVal(displayed);
+            }}
+          >
             Cancel
           </Button>
         )}
@@ -794,6 +837,7 @@ function ComponentTextRow({
               } else {
                 await patchNode(sessionId, item.guid, 'textData.characters', val);
               }
+              userTouched.current = false;
               onChange();
             } catch (err) {
               alert(`Failed: ${(err as Error).message}`);
