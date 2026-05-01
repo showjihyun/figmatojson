@@ -10,7 +10,7 @@
  *   - vectorData / fillGeometry → bbox rect placeholder
  */
 import { useEffect, useRef, useState, useMemo } from 'react';
-import { Stage, Layer, Rect, Text as KText, Group, Path } from 'react-konva';
+import { Stage, Layer, Rect, Text as KText, Group, Path, Image as KImage } from 'react-konva';
 import type Konva from 'konva';
 import { cornerDrag, groupBbox, projectMembers, type Corner } from './multiResize';
 
@@ -23,6 +23,114 @@ interface CanvasProps {
   onResize?: (guid: string, x: number, y: number, w: number, h: number) => void;
   /** Resize-group: emits new bounds for every selected node atomically. */
   onResizeMany?: (updates: Array<{ guid: string; x: number; y: number; w: number; h: number }>) => void;
+  /** Required for IMAGE fill rendering — keys the asset URL space. */
+  sessionId: string | null;
+}
+
+/**
+ * Convert a Figma image hash (20-byte SHA-1) into its lowercase hex form.
+ *
+ * After JSON serialization the byte array arrives as either:
+ *   - a plain object {0: byte, 1: byte, ...} (typed-array default toJSON)
+ *   - a regular array
+ *   - or, on a re-revived path, a Uint8Array
+ * Returns null when the input doesn't conform to a 20-byte sequence.
+ */
+function imageHashHex(node: any): string | null {
+  const fills = node?.fillPaints;
+  if (!Array.isArray(fills)) return null;
+  const fp = fills.find((p: any) => p?.type === 'IMAGE' && p?.visible !== false);
+  const h = fp?.image?.hash;
+  if (!h) return null;
+  const bytes: number[] = [];
+  if (Array.isArray(h)) {
+    for (const b of h) bytes.push(b as number);
+  } else if (h instanceof Uint8Array) {
+    for (let i = 0; i < h.length; i++) bytes.push(h[i]!);
+  } else if (typeof h === 'object') {
+    for (let i = 0; i < 20; i++) {
+      const v = (h as Record<string, unknown>)[String(i)];
+      if (typeof v !== 'number') return null;
+      bytes.push(v);
+    }
+  } else {
+    return null;
+  }
+  if (bytes.length !== 20) return null;
+  return bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Load an HTMLImageElement from a URL with cancel-safe lifecycle.
+ * Returns null while loading or on error so callers can no-op.
+ */
+function useImageElement(src: string | null): HTMLImageElement | null {
+  const [img, setImg] = useState<HTMLImageElement | null>(null);
+  useEffect(() => {
+    if (!src) {
+      setImg(null);
+      return;
+    }
+    const im = new window.Image();
+    im.crossOrigin = 'anonymous';
+    let cancelled = false;
+    im.onload = () => {
+      if (!cancelled) setImg(im);
+    };
+    im.onerror = () => {
+      if (!cancelled) setImg(null);
+    };
+    im.src = src;
+    return () => {
+      cancelled = true;
+      im.onload = null;
+      im.onerror = null;
+    };
+  }, [src]);
+  return img;
+}
+
+/**
+ * Renders an asset-server-backed image inside a node's bbox, clipped to the
+ * node's cornerRadius. Sits below stroke/children but above the placeholder
+ * fill rect, so the rect's color shows during load.
+ */
+function ImageFill({
+  src,
+  width,
+  height,
+  cornerRadius,
+}: {
+  src: string | null;
+  width: number;
+  height: number;
+  cornerRadius: number;
+}) {
+  const img = useImageElement(src);
+  if (!img || width <= 0 || height <= 0) return null;
+  if (cornerRadius > 0) {
+    const r = Math.min(cornerRadius, width / 2, height / 2);
+    return (
+      <Group
+        clipFunc={(ctx) => {
+          ctx.beginPath();
+          ctx.moveTo(r, 0);
+          ctx.lineTo(width - r, 0);
+          ctx.arcTo(width, 0, width, r, r);
+          ctx.lineTo(width, height - r);
+          ctx.arcTo(width, height, width - r, height, r);
+          ctx.lineTo(r, height);
+          ctx.arcTo(0, height, 0, height - r, r);
+          ctx.lineTo(0, r);
+          ctx.arcTo(0, 0, r, 0, r);
+          ctx.closePath();
+        }}
+      >
+        <KImage image={img} x={0} y={0} width={width} height={height} listening={false} />
+      </Group>
+    );
+  }
+  return <KImage image={img} x={0} y={0} width={width} height={height} listening={false} />;
 }
 
 function guidStr(g: any): string | null {
@@ -72,6 +180,7 @@ interface NodeShapeProps {
   onSelect: (g: string | null, mode?: 'replace' | 'toggle') => void;
   onDragGroup?: (guid: string, dx: number, dy: number) => void;
   dragSnapshot?: Map<string, { x: number; y: number }>;
+  sessionId: string | null;
 }
 
 function NodeShape({
@@ -80,6 +189,7 @@ function NodeShape({
   onSelect,
   onDragGroup,
   dragSnapshot,
+  sessionId,
 }: NodeShapeProps) {
   if (node.visible === false) return null;
   const x = node.transform?.m02 ?? 0;
@@ -180,6 +290,9 @@ function NodeShape({
       : (node._renderChildren as any[] | undefined) ?? [];
   const hasChildren = renderableChildren.length > 0;
 
+  const imgHash = imageHashHex(node);
+  const imgSrc = imgHash && sessionId ? `/api/asset/${sessionId}/${imgHash}` : null;
+
   return (
     <Group
       x={x}
@@ -200,6 +313,9 @@ function NodeShape({
         cornerRadius={cornerR}
         listening
       />
+      {imgSrc && (
+        <ImageFill src={imgSrc} width={w} height={h} cornerRadius={cornerR} />
+      )}
       {hasChildren &&
         renderableChildren.map((c: any, i: number) => (
           <NodeShape
@@ -209,6 +325,7 @@ function NodeShape({
             onSelect={onSelect}
             onDragGroup={onDragGroup}
             dragSnapshot={dragSnapshot}
+            sessionId={sessionId}
           />
         ))}
     </Group>
@@ -342,7 +459,7 @@ function SelectionOverlay({
   );
 }
 
-export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, onResizeMany }: CanvasProps) {
+export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, onResizeMany, sessionId }: CanvasProps) {
   // Single-selection convenience for resize bounds + multi-bbox iteration.
   const selectedGuid = selectedGuids.size === 1 ? [...selectedGuids][0]! : null;
   const containerRef = useRef<HTMLDivElement>(null);
@@ -566,6 +683,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
               onSelect={onSelect}
               onDragGroup={onDragGroup}
               dragSnapshot={dragSnapshot}
+              sessionId={sessionId}
             />
           ))}
         </Layer>
