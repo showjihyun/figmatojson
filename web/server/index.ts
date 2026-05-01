@@ -12,8 +12,7 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join, dirname, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // 상위 figma_reverse 디렉터리에서 src/ 모듈 재사용. tsx watch는 ESM으로 처리한다.
@@ -27,6 +26,7 @@ import { InProcessTools } from './adapters/driven/InProcessTools.js';
 import { AnthropicChat } from './adapters/driven/AnthropicChat.js';
 import { AgentSdkChat } from './adapters/driven/AgentSdkChat.js';
 import { FsEditJournal } from './adapters/driven/FsEditJournal.js';
+import { applyTool } from './adapters/driven/applyTool.js';
 import { registerRoutes } from './adapters/driving/http/index.js';
 import { UploadFig } from '../core/application/UploadFig.js';
 import { EditNode } from '../core/application/EditNode.js';
@@ -39,30 +39,20 @@ import { ServeAsset } from '../core/application/ServeAsset.js';
 import { RunChatTurn } from '../core/application/RunChatTurn.js';
 import { Undo } from '../core/application/Undo.js';
 import { Redo } from '../core/application/Redo.js';
-import type { Session } from '../core/domain/entities/Session.js';
-import type { ComponentTextRef } from '../core/domain/entities/Document.js';
 
 // ─── Composition root: adapters + use cases ──────────────────────────────
 //
 // Single instances live for the process lifetime. The session-store is
 // stateful (in-memory id→Session map); every other adapter is stateless.
-// `applyToolFn` is wired below — it threads the legacy `applyTool` function
-// through the InProcessTools dispatcher until phase 5 replaces it.
 const sessionStore = new FsSessionStore();
 const repacker = new KiwiCodec(sessionStore);
 const assetServer = new FsAssetServer(sessionStore);
 const anthropicChat = new AnthropicChat();
 const agentSdkChat = new AgentSdkChat();
 const editJournal = new FsEditJournal(sessionStore);
-// Forward declaration — applyTool is defined later in this file. The closure
-// captures a holder object so the assignment below is visible at call time
-// without TS narrowing it to `never` after init.
-type ApplyToolFn = (s: Session, name: string, input: Record<string, unknown>) => Promise<void>;
-const applyToolHolder: { fn: ApplyToolFn | null } = { fn: null };
-const tools = new InProcessTools(sessionStore, async (s, name, input) => {
-  if (!applyToolHolder.fn) throw new Error('applyTool not wired yet');
-  await applyToolHolder.fn(s, name, input);
-});
+const tools = new InProcessTools(sessionStore, (s, name, input) =>
+  applyTool(s, name, input, editJournal),
+);
 const uploadFig = new UploadFig(sessionStore);
 const editNodeUseCase = new EditNode(sessionStore, editJournal);
 const overrideInstanceText = new OverrideInstanceText(sessionStore, editJournal);
@@ -104,183 +94,6 @@ registerRoutes(app, {
   redo: redoUseCase,
 });
 
-
-applyToolHolder.fn = applyTool;
-async function applyTool(s: Session, name: string, input: Record<string, unknown>): Promise<void> {
-  // Dispatch to the local handlers — same code paths that the inspector uses.
-  // We bypass HTTP here for efficiency.
-  const fakeReq = (b: unknown): Request => new Request('http://x/', { method: 'POST', body: JSON.stringify(b), headers: { 'content-type': 'application/json' } });
-  void fakeReq;
-  const messagePath = join(s.dir, 'extracted', '04_decoded', 'message.json');
-  const raw = readFileSync(messagePath, 'utf8');
-  const msg = JSON.parse(raw) as { nodeChanges?: Array<Record<string, unknown>> };
-  const findNode = (guid: string): Record<string, unknown> | undefined => msg.nodeChanges?.find((n) => {
-    const g = n.guid as { sessionID?: number; localID?: number } | undefined;
-    return g && `${g.sessionID}:${g.localID}` === guid;
-  });
-  const mirrorClient = (guid: string, mutator: (n: Record<string, unknown>) => void): void => {
-    function walk(n: Record<string, unknown>): boolean {
-      const g = n.guid as { sessionID: number; localID: number } | undefined;
-      if (g && `${g.sessionID}:${g.localID}` === guid) { mutator(n); return true; }
-      const ch = n.children as Array<Record<string, unknown>> | undefined;
-      if (Array.isArray(ch)) for (const c of ch) if (walk(c)) return true;
-      return false;
-    }
-    walk(s.documentJson as unknown as Record<string, unknown>);
-  };
-
-  switch (name) {
-    case 'set_text': {
-      const node = findNode(String(input.guid));
-      if (!node) throw new Error(`node ${input.guid} not found`);
-      ((node.textData ??= {}) as Record<string, unknown>).characters = String(input.value);
-      writeFileSync(messagePath, JSON.stringify(msg));
-      mirrorClient(String(input.guid), (n) => { ((n.textData ??= {}) as Record<string, unknown>).characters = String(input.value); });
-      // Refresh component-text snapshots
-      function refresh(n: Record<string, unknown>): void {
-        const refs = n._componentTexts as ComponentTextRef[] | undefined;
-        if (Array.isArray(refs)) for (const r of refs) if (r.guid === input.guid) r.characters = String(input.value);
-        const ch = n.children as Array<Record<string, unknown>> | undefined;
-        if (Array.isArray(ch)) for (const c of ch) refresh(c);
-      }
-      refresh(s.documentJson as unknown as Record<string, unknown>);
-      break;
-    }
-    case 'override_instance_text': {
-      const inst = findNode(String(input.instanceGuid));
-      if (!inst) throw new Error(`INSTANCE ${input.instanceGuid} not found`);
-      const [ms, ml] = String(input.masterTextGuid).split(':').map((x) => parseInt(x, 10));
-      inst.symbolData = (inst.symbolData ?? {}) as Record<string, unknown>;
-      const sd = inst.symbolData as { symbolOverrides?: Array<Record<string, unknown>> };
-      sd.symbolOverrides = sd.symbolOverrides ?? [];
-      let entry = sd.symbolOverrides.find((o) => {
-        const g = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
-        return Array.isArray(g) && g.length === 1 && g[0]?.sessionID === ms && g[0]?.localID === ml;
-      });
-      if (!entry) {
-        entry = {
-          guidPath: { guids: [{ sessionID: ms, localID: ml }] },
-          textData: { characters: String(input.value), lines: [{ lineType: 'PLAIN', styleId: 0, indentationLevel: 0, sourceDirectionality: 'AUTO', listStartOffset: 0, isFirstLineOfList: false }] },
-        };
-        sd.symbolOverrides.push(entry);
-      } else {
-        ((entry.textData ??= {}) as Record<string, unknown>).characters = String(input.value);
-      }
-      writeFileSync(messagePath, JSON.stringify(msg));
-      mirrorClient(String(input.instanceGuid), (n) => {
-        const m = (n._instanceOverrides ??= {}) as Record<string, string>;
-        m[String(input.masterTextGuid)] = String(input.value);
-      });
-      break;
-    }
-    case 'set_position': {
-      const node = findNode(String(input.guid));
-      if (!node) throw new Error(`node ${input.guid} not found`);
-      const t = (node.transform ??= {}) as Record<string, number>;
-      t.m02 = Number(input.x); t.m12 = Number(input.y);
-      writeFileSync(messagePath, JSON.stringify(msg));
-      mirrorClient(String(input.guid), (n) => {
-        const t2 = (n.transform ??= {}) as Record<string, number>;
-        t2.m02 = Number(input.x); t2.m12 = Number(input.y);
-      });
-      break;
-    }
-    case 'set_size': {
-      const node = findNode(String(input.guid));
-      if (!node) throw new Error(`node ${input.guid} not found`);
-      node.size = { x: Math.max(1, Number(input.w)), y: Math.max(1, Number(input.h)) };
-      writeFileSync(messagePath, JSON.stringify(msg));
-      mirrorClient(String(input.guid), (n) => {
-        n.size = { x: Math.max(1, Number(input.w)), y: Math.max(1, Number(input.h)) };
-      });
-      break;
-    }
-    case 'set_fill_color': {
-      const node = findNode(String(input.guid));
-      if (!node) throw new Error(`node ${input.guid} not found`);
-      const fps = (node.fillPaints as Array<Record<string, unknown>> | undefined) ?? [];
-      const first = fps[0] ?? { type: 'SOLID', visible: true, opacity: 1 };
-      first.color = { r: Number(input.r), g: Number(input.g), b: Number(input.b), a: Number(input.a) };
-      fps[0] = first;
-      node.fillPaints = fps;
-      writeFileSync(messagePath, JSON.stringify(msg));
-      mirrorClient(String(input.guid), (n) => {
-        const fps2 = (n.fillPaints as Array<Record<string, unknown>> | undefined) ?? [];
-        const f0 = fps2[0] ?? { type: 'SOLID', visible: true, opacity: 1 };
-        f0.color = { r: Number(input.r), g: Number(input.g), b: Number(input.b), a: Number(input.a) };
-        fps2[0] = f0;
-        n.fillPaints = fps2;
-      });
-      break;
-    }
-    case 'set_corner_radius': {
-      const node = findNode(String(input.guid));
-      if (!node) throw new Error(`node ${input.guid} not found`);
-      const r = Math.max(0, Number(input.value));
-      node.cornerRadius = r;
-      writeFileSync(messagePath, JSON.stringify(msg));
-      mirrorClient(String(input.guid), (n) => {
-        n.cornerRadius = r;
-      });
-      break;
-    }
-    case 'align_nodes': {
-      // input: { guids: string[], axis: 'left'|'center'|'right'|'top'|'middle'|'bottom' }
-      // Aligns all listed nodes within the bounding box that encloses them
-      // (the group bbox), the same way Figma's Align toolbar works.
-      const guids = (input.guids as string[]).map(String);
-      const axis = String(input.axis);
-      if (guids.length < 2) throw new Error('align_nodes needs >= 2 guids');
-      type Bbox = { x: number; y: number; w: number; h: number };
-      const targets: Array<{ node: Record<string, unknown>; bbox: Bbox }> = [];
-      for (const g of guids) {
-        const n = findNode(g);
-        if (!n) throw new Error(`node ${g} not found`);
-        const t = (n.transform as Record<string, number> | undefined) ?? {};
-        const sz = (n.size as { x?: number; y?: number } | undefined) ?? {};
-        targets.push({
-          node: n,
-          bbox: { x: t.m02 ?? 0, y: t.m12 ?? 0, w: sz.x ?? 0, h: sz.y ?? 0 },
-        });
-      }
-      // Compute the group bbox.
-      const groupX = Math.min(...targets.map((t) => t.bbox.x));
-      const groupY = Math.min(...targets.map((t) => t.bbox.y));
-      const groupRight = Math.max(...targets.map((t) => t.bbox.x + t.bbox.w));
-      const groupBottom = Math.max(...targets.map((t) => t.bbox.y + t.bbox.h));
-      const groupCx = (groupX + groupRight) / 2;
-      const groupCy = (groupY + groupBottom) / 2;
-      // Compute new positions per axis.
-      for (const t of targets) {
-        const transform = (t.node.transform ??= {}) as Record<string, number>;
-        switch (axis) {
-          case 'left':   transform.m02 = groupX; break;
-          case 'center': transform.m02 = groupCx - t.bbox.w / 2; break;
-          case 'right':  transform.m02 = groupRight - t.bbox.w; break;
-          case 'top':    transform.m12 = groupY; break;
-          case 'middle': transform.m12 = groupCy - t.bbox.h / 2; break;
-          case 'bottom': transform.m12 = groupBottom - t.bbox.h; break;
-          default: throw new Error(`align_nodes: unknown axis ${axis}`);
-        }
-      }
-      writeFileSync(messagePath, JSON.stringify(msg));
-      // Mirror onto documentJson — copy each node's new m02/m12 by guid.
-      for (const t of targets) {
-        const guid = `${(t.node.guid as { sessionID: number; localID: number }).sessionID}:${(t.node.guid as { sessionID: number; localID: number }).localID}`;
-        const newM02 = (t.node.transform as Record<string, number>).m02;
-        const newM12 = (t.node.transform as Record<string, number>).m12;
-        mirrorClient(guid, (n) => {
-          const tr = (n.transform ??= {}) as Record<string, number>;
-          tr.m02 = newM02;
-          tr.m12 = newM12;
-        });
-      }
-      break;
-    }
-    default:
-      throw new Error(`unknown tool: ${name}`);
-  }
-}
 
 // Cleanup: simple LRU — drop sessions older than 1h. Uses the FsSessionStore's
 // raw map for iteration; destruction goes through the adapter so the working
