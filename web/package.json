@@ -9,7 +9,9 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite",
     "build:client": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
@@ -20,6 +22,7 @@
     "react-konva": "^19.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.0.0",

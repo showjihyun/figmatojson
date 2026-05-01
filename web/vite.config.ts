@@ -5,9 +5,10 @@ export default defineConfig({
   plugins: [react()],
   root: 'client',
   server: {
-    port: 5173,
+    port: 5273,
+    strictPort: true,           // fail if 5273 occupied (no silent fallback)
     proxy: {
-      '/api': 'http://localhost:5174',
+      '/api': 'http://localhost:5274',
     },
   },
   build: {

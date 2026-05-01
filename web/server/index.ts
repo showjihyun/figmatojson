@@ -32,14 +32,51 @@ import {
   dumpStage5Tree,
 } from '../../src/intermediate.js';
 import { repack } from '../../src/repack.js';
-import { normalizeTree } from '../../src/normalize.js';
+import type { TreeNode } from '../../src/types.js';
 
 interface Session {
   id: string;
   dir: string;          // tmp working dir with extracted/ structure
   origName: string;
   archiveVersion: number;
-  documentJson: ReturnType<typeof normalizeTree>;
+  documentJson: ClientNode;
+}
+
+/**
+ * React-friendly view of a TreeNode — spreads `data` fields onto the node so
+ * `node.textData.characters`, `node.fillPaints`, etc. work directly without
+ * indirection through `.raw`. Drops binary fields (Uint8Array → null) and
+ * cyclical references; keeps everything the canvas / inspector cares about.
+ */
+interface ClientNode {
+  id: string;          // guidStr
+  guid: { sessionID: number; localID: number };
+  type: string;
+  name?: string;
+  children?: ClientNode[];
+  [k: string]: unknown;
+}
+
+function toClientNode(n: TreeNode): ClientNode {
+  const data = (n.data ?? {}) as Record<string, unknown>;
+  const out: ClientNode = {
+    id: n.guidStr,
+    guid: n.guid,
+    type: n.type,
+    name: n.name,
+    children: n.children.map(toClientNode),
+  };
+  for (const k of Object.keys(data)) {
+    if (k === 'guid' || k === 'type' || k === 'name') continue;
+    const v = data[k];
+    // Drop Uint8Array / large binary fields — Konva-side rendering doesn't need them
+    if (v instanceof Uint8Array) continue;
+    if (k === 'derivedSymbolData' || k === 'derivedTextData') continue;
+    if (k === 'fillGeometry' || k === 'strokeGeometry') continue;
+    if (k === 'vectorData') continue;
+    out[k] = v;
+  }
+  return out;
 }
 const sessions = new Map<string, Session>();
 
@@ -78,7 +115,7 @@ app.post('/api/upload', async (c) => {
     dumpStage5Tree(intOpts, tree);
 
     const id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    const documentJson = normalizeTree(tree.document);
+    const documentJson = toClientNode(tree.document);
     sessions.set(id, {
       id,
       dir: tmpDir,
@@ -162,10 +199,16 @@ app.post('/api/save/:id', async (c) => {
   const outFig = join(s.dir, 'out.fig');
   const result = await repack(join(s.dir, 'extracted'), outFig, { mode: 'json' });
   const bytes = readFileSync(outFig);
+  // Content-Disposition filename: HTTP headers are ByteString (≤ 0xFF). For
+  // non-ASCII filenames (Korean / Chinese / etc.), use RFC 5987 filename*
+  // encoding plus an ASCII fallback.
+  const baseAscii = s.origName.replace(/\.fig$/, '').replace(/[^\x20-\x7e]/g, '_');
+  const baseUtf8 = encodeURIComponent(s.origName.replace(/\.fig$/, ''));
   return new Response(bytes, {
     headers: {
       'Content-Type': 'application/octet-stream',
-      'Content-Disposition': `attachment; filename="${s.origName.replace(/\.fig$/, '')}-edited.fig"`,
+      'Content-Disposition':
+        `attachment; filename="${baseAscii}-edited.fig"; filename*=UTF-8''${baseUtf8}-edited.fig`,
       'X-Repack-Bytes': String(result.outBytes ?? bytes.byteLength),
     },
   });
@@ -184,8 +227,8 @@ function gcSessions(): void {
 }
 setInterval(gcSessions, 5 * 60 * 1000);
 
-const port = Number(process.env.PORT ?? 5173);
-serve({ fetch: app.fetch, port: port + 1 }, (info) => {
+const port = Number(process.env.PORT ?? 5274);
+serve({ fetch: app.fetch, port }, (info) => {
   console.log(`figma_reverse web backend on http://localhost:${info.port}`);
   console.log(`(repo root: ${repoRoot})`);
 });
