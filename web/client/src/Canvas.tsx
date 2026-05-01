@@ -26,11 +26,16 @@ import { cornerDrag, groupBbox, projectMembers, type Corner } from './multiResiz
 import { solidFillCss, solidStrokeCss } from '@core/domain/color';
 import { imageHashHex } from '@core/domain/image';
 import { guidStr } from '@core/domain/tree';
+import type { DocumentNode } from '@core/domain/entities/Document';
 import {
   SelectionContext,
   SelectionStore,
   useIsSelected,
 } from './canvas-selection';
+import {
+  cullChildrenByViewport,
+  viewportInStageCoords,
+} from './canvas-cull';
 
 // ─── Drag-snapshot plumbing ──────────────────────────────────────────────
 //
@@ -615,6 +620,17 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
     },
   }), []);
 
+  // Page-level viewport culling: skip top-level children whose bbox sits
+  // entirely outside the visible Stage rect. A typical 35K-node doc spends
+  // most of its volume inside off-screen frames; skipping those at the
+  // page level avoids reconciling all of their descendants.
+  const visibleChildren = useMemo(() => {
+    const all = (page?.children ?? []) as DocumentNode[];
+    if (size.width === 0 || size.height === 0) return all;
+    const viewport = viewportInStageCoords(size, offset, scale);
+    return cullChildrenByViewport(all, viewport);
+  }, [page, size, offset, scale]);
+
   // Compute selection bounds for every selected node (absolute coords).
   const selectionBoundsList = useMemo(() => {
     const out: Array<{ guid: string; bounds: { x: number; y: number; w: number; h: number } }> = [];
@@ -692,9 +708,12 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
         >
           <SelectionContext.Provider value={selectionStore}>
             <DragSnapshotContext.Provider value={dragSnapshotApi}>
-              {(page.children ?? []).map((c: any, i: number) => (
+              {visibleChildren.map((c) => (
+                // Key by guid so React reuses the same NodeShape instance
+                // when culling shifts the array — avoids unmount/remount of
+                // memoized subtrees on pan.
                 <NodeShape
-                  key={i}
+                  key={(c.guid as { sessionID: number; localID: number }).sessionID + ':' + (c.guid as { sessionID: number; localID: number }).localID}
                   node={c}
                   onSelect={onSelect}
                   onDragGroup={onDragGroup}
