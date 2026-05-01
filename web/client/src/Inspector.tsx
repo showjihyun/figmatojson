@@ -15,6 +15,7 @@
 import { useMemo, useState, useEffect, useRef, type ReactNode } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
 import { patchNode, setInstanceTextOverride } from './api';
+import { usePatch } from './hooks/usePatch';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -433,64 +434,6 @@ function ToggleButtons<T extends string>({
       })}
     </div>
   );
-}
-
-function usePatch(sessionId: string, guid: string, onChange: () => void) {
-  const pending = useRef<Map<string, unknown>>(new Map());
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Flush-on-change: when guid (or sessionId) flips — selection changed,
-  // session swapped — flush any pending entries against the OLD guid before
-  // the new one takes over. Without this, refs persist across renders and
-  // a debounced patch from node A would land on node B if the user clicks
-  // away within 220ms.
-  //
-  // Same effect runs on unmount, so a pending patch never leaks past the
-  // Inspector's lifetime.
-  useEffect(() => {
-    const oldSessionId = sessionId;
-    const oldGuid = guid;
-    return () => {
-      if (timer.current) {
-        clearTimeout(timer.current);
-        timer.current = null;
-      }
-      const entries = [...pending.current.entries()];
-      pending.current.clear();
-      if (entries.length === 0) return;
-      // Fire-and-forget against the captured old (sessionId, guid).
-      void (async () => {
-        for (const [f, v] of entries) {
-          try {
-            await patchNode(oldSessionId, oldGuid, f, v);
-          } catch (err) {
-            console.error('flush-on-guid-change patch failed', f, err);
-          }
-        }
-        onChange();
-      })();
-    };
-    // onChange intentionally omitted — capturing the latest is fine and
-    // including it would re-bind the effect on every parent re-render,
-    // which would flush prematurely.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [guid, sessionId]);
-  return (field: string, value: unknown): void => {
-    pending.current.set(field, value);
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(async () => {
-      const entries = [...pending.current.entries()];
-      pending.current.clear();
-      timer.current = null;
-      for (const [f, v] of entries) {
-        try {
-          await patchNode(sessionId, guid, f, v);
-        } catch (err) {
-          console.error('patch failed', f, err);
-        }
-      }
-      onChange();
-    }, 220);
-  };
 }
 
 // ─── Section bodies ──────────────────────────────────────────────────────────
