@@ -20,6 +20,8 @@ interface CanvasProps {
   /** Drag-group: emits new positions for every selected node atomically. */
   onMoveMany?: (updates: Array<{ guid: string; x: number; y: number }>) => void;
   onResize?: (guid: string, x: number, y: number, w: number, h: number) => void;
+  /** Resize-group: emits new bounds for every selected node atomically. */
+  onResizeMany?: (updates: Array<{ guid: string; x: number; y: number; w: number; h: number }>) => void;
 }
 
 function guidStr(g: any): string | null {
@@ -339,7 +341,7 @@ function SelectionOverlay({
   );
 }
 
-export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize }: CanvasProps) {
+export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, onResizeMany }: CanvasProps) {
   // Single-selection convenience for resize bounds + multi-bbox iteration.
   const selectedGuid = selectedGuids.size === 1 ? [...selectedGuids][0]! : null;
   const containerRef = useRef<HTMLDivElement>(null);
@@ -579,11 +581,15 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize }: 
                 guid={selectedGuid}
               />
             )}
-            {/* For multi-select, render plain bbox outlines (no handles) */}
-            {selectionBoundsList.length > 1 &&
-              selectionBoundsList.map(({ guid, bounds }) => (
-                <MultiBox key={guid} bounds={bounds} scale={scale} />
-              ))}
+            {/* Multi-select: group bbox + corner handles that scale all
+                selected nodes uniformly relative to the group bbox. */}
+            {selectionBoundsList.length > 1 && (
+              <MultiSelectionOverlay
+                members={selectionBoundsList}
+                scale={scale}
+                onResizeMany={onResizeMany}
+              />
+            )}
           </Layer>
         )}
       </Stage>
@@ -630,6 +636,134 @@ function MultiBox({
       fill="transparent"
       listening={false}
     />
+  );
+}
+
+/**
+ * Multi-select overlay: a single group bbox enclosing every selected node,
+ * with 4 corner handles. Dragging a corner uniformly scales each member
+ * relative to the group bbox (Figma's "scale" handle behavior).
+ *
+ * The drag preview is computed locally and rendered in-component so all
+ * member outlines move together with the group bbox; the resize-many
+ * callback fires once on drag end with the final per-node bounds.
+ */
+function MultiSelectionOverlay({
+  members,
+  scale,
+  onResizeMany,
+}: {
+  members: Array<{ guid: string; bounds: { x: number; y: number; w: number; h: number } }>;
+  scale: number;
+  onResizeMany?: (updates: Array<{ guid: string; x: number; y: number; w: number; h: number }>) => void;
+}) {
+  const HANDLE = 8 / scale;
+  const STROKE = 1.5 / scale;
+  // Original group bbox = union of all member bboxes.
+  const orig = useMemo(() => {
+    const xs = members.map((m) => m.bounds.x);
+    const ys = members.map((m) => m.bounds.y);
+    const xe = members.map((m) => m.bounds.x + m.bounds.w);
+    const ye = members.map((m) => m.bounds.y + m.bounds.h);
+    const x = Math.min(...xs);
+    const y = Math.min(...ys);
+    return { x, y, w: Math.max(...xe) - x, h: Math.max(...ye) - y };
+  }, [members]);
+
+  // Drag preview: scaled group bbox while user is dragging a corner.
+  const [drag, setDrag] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const live = drag ?? orig;
+
+  // Project each original member bbox into the live group bbox using
+  // proportional coordinates. Always safe — orig.w/h are positive (>=1)
+  // because we rendered handles only when there were 2+ members.
+  function project(b: { x: number; y: number; w: number; h: number }) {
+    const sx = live.w / Math.max(orig.w, 1);
+    const sy = live.h / Math.max(orig.h, 1);
+    return {
+      x: live.x + (b.x - orig.x) * sx,
+      y: live.y + (b.y - orig.y) * sy,
+      w: b.w * sx,
+      h: b.h * sy,
+    };
+  }
+
+  const corners: Array<{ cx: number; cy: number; ax: 'x' | 'r'; ay: 'y' | 'b' }> = [
+    { cx: live.x, cy: live.y, ax: 'x', ay: 'y' },
+    { cx: live.x + live.w, cy: live.y, ax: 'r', ay: 'y' },
+    { cx: live.x, cy: live.y + live.h, ax: 'x', ay: 'b' },
+    { cx: live.x + live.w, cy: live.y + live.h, ax: 'r', ay: 'b' },
+  ];
+
+  return (
+    <Group>
+      {/* Member outlines, projected through the live group bbox so they
+          track the drag preview. */}
+      {members.map((m) => {
+        const p = project(m.bounds);
+        return (
+          <Rect
+            key={m.guid}
+            x={p.x}
+            y={p.y}
+            width={p.w}
+            height={p.h}
+            stroke="#0a84ff"
+            strokeWidth={STROKE}
+            fill="transparent"
+            listening={false}
+          />
+        );
+      })}
+      {/* Group bbox */}
+      <Rect
+        x={live.x}
+        y={live.y}
+        width={live.w}
+        height={live.h}
+        stroke="#0a84ff"
+        strokeWidth={STROKE}
+        dash={[6 / scale, 4 / scale]}
+        fill="transparent"
+        listening={false}
+      />
+      {corners.map((c, i) => (
+        <Rect
+          key={i}
+          x={c.cx - HANDLE / 2}
+          y={c.cy - HANDLE / 2}
+          width={HANDLE}
+          height={HANDLE}
+          fill="white"
+          stroke="#0a84ff"
+          strokeWidth={STROKE}
+          draggable={!!onResizeMany}
+          onDragMove={(e) => {
+            const nx = e.target.x() + HANDLE / 2;
+            const ny = e.target.y() + HANDLE / 2;
+            let x = orig.x, y = orig.y, w = orig.w, h = orig.h;
+            if (c.ax === 'x') { w = orig.x + orig.w - nx; x = nx; }
+            else { w = nx - orig.x; }
+            if (c.ay === 'y') { h = orig.y + orig.h - ny; y = ny; }
+            else { h = ny - orig.y; }
+            // Clamp minimums; pin the opposite edge so the group doesn't fly off.
+            if (w < 1) { w = 1; if (c.ax === 'x') x = orig.x + orig.w - 1; }
+            if (h < 1) { h = 1; if (c.ay === 'y') y = orig.y + orig.h - 1; }
+            setDrag({ x, y, w, h });
+          }}
+          onDragEnd={() => {
+            if (drag && onResizeMany) {
+              const updates = members.map((m) => {
+                const p = project(m.bounds);
+                return { guid: m.guid, x: p.x, y: p.y, w: p.w, h: p.h };
+              });
+              onResizeMany(updates);
+            }
+            setDrag(null);
+          }}
+        />
+      ))}
+    </Group>
   );
 }
 
