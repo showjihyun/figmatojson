@@ -40,3 +40,6 @@ Thumbs.db
 logs/
 *.log
 *.tmp
+
+# Local scratch / audit / debug scripts (regenerable, not part of project state)
+_tmp_*
