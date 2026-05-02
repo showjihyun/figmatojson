@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Download, FileUp, FolderOpen, Redo2, Save, Undo2 } from 'lucide-react';
 import { Inspector } from './Inspector';
-import { ChatPanel } from './ChatPanel';
+import { LeftSidebar } from './components/sidebar/LeftSidebar';
 
 // Lazy-load the Konva-backed canvas. Pulls the ~334 kB konva chunk only
 // after the user opens a document — the upload-empty landing screen never
@@ -10,13 +10,6 @@ const Canvas = lazy(() =>
   import('./Canvas').then((m) => ({ default: m.Canvas })),
 );
 import { Button } from '@/components/ui/button';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import {
   documentService,
   sessionService,
@@ -294,24 +287,9 @@ export function App() {
               {' · '}
               {pages.length} pages
             </span>
-            <Select
-              value={String(pageIdx)}
-              onValueChange={(v) => {
-                setPageIdx(Number(v));
-                setSelectedGuids(new Set());
-              }}
-            >
-              <SelectTrigger className="w-44">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {pages.map((p: any, i: number) => (
-                  <SelectItem key={i} value={String(i)}>
-                    {p.name ?? `page ${i}`}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {/* Page picker now lives in the sidebar's Pages section
+                (web-left-sidebar.spec.md §4.0). The toolbar keeps just
+                the file-op buttons. */}
             <div className="ml-auto flex items-center gap-2">
               <Button
                 variant="ghost"
@@ -360,10 +338,20 @@ export function App() {
 
       <main className="flex min-h-0 flex-1">
         <aside className="flex w-80 min-h-0 flex-col border-r border-border">
-          <ChatPanel
+          <LeftSidebar
+            doc={doc}
+            pages={pages}
+            pageIdx={pageIdx}
+            setPageIdx={(idx) => {
+              setPageIdx(idx);
+              setSelectedGuids(new Set());
+            }}
+            currentPage={currentPage}
+            selectedGuids={selectedGuids}
+            onSelect={handleSelect}
             sessionId={session?.sessionId ?? null}
-            selectedGuid={selectedGuid}
-            onChange={onRefreshDoc}
+            selectedGuidForChat={selectedGuid}
+            onDocChange={onRefreshDoc}
           />
         </aside>
         <div className="relative flex-1 overflow-hidden bg-[#0e0e0e]">
