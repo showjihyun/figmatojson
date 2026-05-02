@@ -48,6 +48,8 @@ import {
 } from './lib/textStyle';
 import { applyStrokeAlign } from './lib/strokeAlign';
 import { shadowFromEffects } from './lib/shadow';
+import { rotationDegrees } from './lib/transform';
+import { konvaLineCap, konvaLineJoin } from './lib/strokeCapJoin';
 
 // ─── Drag-snapshot plumbing ──────────────────────────────────────────────
 //
@@ -206,6 +208,16 @@ function NodeShapeImpl({
   const stroke = strokeOf(node);
   const cornerR = node.cornerRadius ?? 0;
 
+  // Universal Figma props (round 3):
+  //   - rotation: pure-rotation matrices → degrees; skew falls through to
+  //     translation-only (spec I-R3).
+  //   - opacity: pass through 0..1; undefined when 1 / missing.
+  // Both apply on the OUTER element (Group / KText) so children inherit.
+  const rotation = rotationDegrees(node.transform);
+  const opacity = typeof node.opacity === 'number' && node.opacity !== 1
+    ? node.opacity
+    : undefined;
+
   // Hover: skip for instance master expansions so hover bubbles up to the
   // outer INSTANCE (spec I-S5). e.cancelBubble in onMouseEnter ensures the
   // deepest LISTENING node wins when nested groups are stacked. Also skip
@@ -281,6 +293,8 @@ function NodeShapeImpl({
       <KText
         x={x}
         y={y}
+        rotation={rotation}
+        opacity={opacity}
         text={chars}
         fontSize={fontSize}
         fontFamily={fontFamily}
@@ -313,10 +327,14 @@ function NodeShapeImpl({
   if (VECTOR_TYPES.has(node.type) && typeof node._path === 'string' && node._path.length > 0) {
     const pathFill = colorOfWithDefault(node, 'transparent');
     const vectorShadow = shadowFromEffects(node.effects);
+    const lineCap = konvaLineCap(node.strokeCap);
+    const lineJoin = konvaLineJoin(node.strokeJoin);
     return (
       <Group
         x={x}
         y={y}
+        rotation={rotation}
+        opacity={opacity}
         draggable={isSelected}
         onClick={onShapeClick}
         onTap={onShapeClick}
@@ -330,6 +348,8 @@ function NodeShapeImpl({
           fill={pathFill}
           stroke={stroke?.color}
           strokeWidth={stroke?.width}
+          lineCap={lineCap}
+          lineJoin={lineJoin}
           shadowEnabled={vectorShadow != null}
           shadowOffsetX={vectorShadow?.shadowOffsetX}
           shadowOffsetY={vectorShadow?.shadowOffsetY}
@@ -415,10 +435,15 @@ function NodeShapeImpl({
       }) as any
     : undefined;
 
+  const lineCap = konvaLineCap(node.strokeCap);
+  const lineJoin = konvaLineJoin(node.strokeJoin);
+
   return (
     <Group
       x={x}
       y={y}
+      rotation={rotation}
+      opacity={opacity}
       draggable={isSelected}
       onClick={onShapeClick}
       onTap={onShapeClick}
@@ -436,6 +461,7 @@ function NodeShapeImpl({
         fill={fill}
         stroke={wantPerSide ? undefined : stroke?.color}
         strokeWidth={wantPerSide ? undefined : stroke?.width}
+        lineJoin={lineJoin}
         cornerRadius={rectDims.cornerRadius}
         shadowEnabled={shadow != null}
         shadowOffsetX={shadow?.shadowOffsetX}
@@ -446,16 +472,16 @@ function NodeShapeImpl({
         listening
       />
       {wantPerSide && bt && bt > 0 && (
-        <Line points={[0, 0, w, 0]} stroke={stroke!.color} strokeWidth={bt} listening={false} />
+        <Line points={[0, 0, w, 0]} stroke={stroke!.color} strokeWidth={bt} lineCap={lineCap} listening={false} />
       )}
       {wantPerSide && br && br > 0 && (
-        <Line points={[w, 0, w, h]} stroke={stroke!.color} strokeWidth={br} listening={false} />
+        <Line points={[w, 0, w, h]} stroke={stroke!.color} strokeWidth={br} lineCap={lineCap} listening={false} />
       )}
       {wantPerSide && bb && bb > 0 && (
-        <Line points={[0, h, w, h]} stroke={stroke!.color} strokeWidth={bb} listening={false} />
+        <Line points={[0, h, w, h]} stroke={stroke!.color} strokeWidth={bb} lineCap={lineCap} listening={false} />
       )}
       {wantPerSide && bl && bl > 0 && (
-        <Line points={[0, 0, 0, h]} stroke={stroke!.color} strokeWidth={bl} listening={false} />
+        <Line points={[0, 0, 0, h]} stroke={stroke!.color} strokeWidth={bl} lineCap={lineCap} listening={false} />
       )}
       {imgSrc && (
         <ImageFill src={imgSrc} width={w} height={h} cornerRadius={cornerR} />
