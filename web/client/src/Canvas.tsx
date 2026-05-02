@@ -49,6 +49,8 @@ import {
   konvaTextAlign,
   konvaVerticalAlign,
 } from './lib/textStyle';
+import { applyStrokeAlign } from './lib/strokeAlign';
+import { shadowFromEffects } from './lib/shadow';
 
 // ─── Drag-snapshot plumbing ──────────────────────────────────────────────
 //
@@ -277,6 +279,7 @@ function NodeShapeImpl({
     const verticalAlign = konvaVerticalAlign(node.textAlignVertical);
     const align = konvaTextAlign(node.textAlignHorizontal);
     const fontStyle = konvaFontStyle(node.fontName?.style);
+    const shadow = shadowFromEffects(node.effects);
     return (
       <KText
         x={x}
@@ -292,6 +295,12 @@ function NodeShapeImpl({
         fill={fillColor}
         width={w || undefined}
         height={h || undefined}
+        shadowEnabled={shadow != null}
+        shadowOffsetX={shadow?.shadowOffsetX}
+        shadowOffsetY={shadow?.shadowOffsetY}
+        shadowBlur={shadow?.shadowBlur}
+        shadowColor={shadow?.shadowColor}
+        shadowOpacity={shadow?.shadowOpacity}
         draggable={isSelected}
         onClick={onShapeClick}
         onTap={onShapeClick}
@@ -306,6 +315,7 @@ function NodeShapeImpl({
 
   if (VECTOR_TYPES.has(node.type) && typeof node._path === 'string' && node._path.length > 0) {
     const pathFill = colorOfWithDefault(node, 'transparent');
+    const vectorShadow = shadowFromEffects(node.effects);
     return (
       <Group
         x={x}
@@ -323,6 +333,12 @@ function NodeShapeImpl({
           fill={pathFill}
           stroke={stroke?.color}
           strokeWidth={stroke?.width}
+          shadowEnabled={vectorShadow != null}
+          shadowOffsetX={vectorShadow?.shadowOffsetX}
+          shadowOffsetY={vectorShadow?.shadowOffsetY}
+          shadowBlur={vectorShadow?.shadowBlur}
+          shadowColor={vectorShadow?.shadowColor}
+          shadowOpacity={vectorShadow?.shadowOpacity}
           listening
         />
       </Group>
@@ -356,6 +372,52 @@ function NodeShapeImpl({
   const sidesUniform = hasPerSideValues && bt === br && br === bb && bb === bl;
   const wantPerSide = hasPerSideValues && !sidesUniform && !!stroke;
 
+  // strokeAlign INSIDE / OUTSIDE — adjust the background Rect's geometry
+  // so the stroke sits inside (or outside) the original bbox edges
+  // (spec web-render-fidelity-round2.spec.md §2). Per-side stroke uses
+  // Konva.Line segments and isn't affected.
+  const rectDims = !wantPerSide && stroke
+    ? applyStrokeAlign(
+        { x: 0, y: 0, w, h, cornerRadius: cornerR },
+        stroke.width,
+        node.strokeAlign as 'INSIDE' | 'OUTSIDE' | 'CENTER' | undefined,
+      )
+    : { x: 0, y: 0, w, h, cornerRadius: cornerR };
+
+  // Drop shadow (spec round2 §4) — first visible DROP_SHADOW from
+  // effects[]. Multiple shadows / inner shadow / blur fall through to v2.
+  const shadow = shadowFromEffects(node.effects);
+
+  // Frame clip (spec round2 §3) — when frameMaskDisabled === false,
+  // clip children to the frame's rounded-rect bounds. Konva clipFunc
+  // receives a 2D context; we draw the path the renderer should clip to.
+  const wantClip = node.frameMaskDisabled === false;
+  // Konva passes a SceneContext (its proxy around the native canvas
+  // context). The path-building methods we use exist on both but the
+  // Konva-internal type isn't easily reachable, so we type the param as
+  // the structural subset we actually call.
+  type PathCtx = Pick<CanvasRenderingContext2D, 'moveTo' | 'lineTo' | 'quadraticCurveTo' | 'rect' | 'closePath'>;
+  const clipFunc = wantClip
+    ? ((ctx: PathCtx): void => {
+        if (cornerR > 0) {
+          const r = Math.min(cornerR, w / 2, h / 2);
+          ctx.moveTo(r, 0);
+          ctx.lineTo(w - r, 0);
+          ctx.quadraticCurveTo(w, 0, w, r);
+          ctx.lineTo(w, h - r);
+          ctx.quadraticCurveTo(w, h, w - r, h);
+          ctx.lineTo(r, h);
+          ctx.quadraticCurveTo(0, h, 0, h - r);
+          ctx.lineTo(0, r);
+          ctx.quadraticCurveTo(0, 0, r, 0);
+          ctx.closePath();
+        } else {
+          ctx.rect(0, 0, w, h);
+        }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any
+    : undefined;
+
   return (
     <Group
       x={x}
@@ -367,16 +429,23 @@ function NodeShapeImpl({
       onDragEnd={onDragEnd}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
+      clipFunc={clipFunc}
     >
       <Rect
-        x={0}
-        y={0}
-        width={w}
-        height={h}
+        x={rectDims.x}
+        y={rectDims.y}
+        width={rectDims.w}
+        height={rectDims.h}
         fill={fill}
         stroke={wantPerSide ? undefined : stroke?.color}
         strokeWidth={wantPerSide ? undefined : stroke?.width}
-        cornerRadius={cornerR}
+        cornerRadius={rectDims.cornerRadius}
+        shadowEnabled={shadow != null}
+        shadowOffsetX={shadow?.shadowOffsetX}
+        shadowOffsetY={shadow?.shadowOffsetY}
+        shadowBlur={shadow?.shadowBlur}
+        shadowColor={shadow?.shadowColor}
+        shadowOpacity={shadow?.shadowOpacity}
         listening
       />
       {wantPerSide && bt && bt > 0 && (
