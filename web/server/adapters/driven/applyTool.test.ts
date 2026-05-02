@@ -402,4 +402,227 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       expect(cloneIds.has(50)).toBe(false);
     });
   });
+
+  describe('group', () => {
+    it('wraps two siblings in a fresh GROUP at their bbox; members move to GROUP-local coords', async () => {
+      // Members 0:1 (TEXT at 10,20 size 100x50) and 0:2 (RECT at 200,300
+      // size 80x40). bbox = (10,20)..(280,340), so GROUP origin = (10,20),
+      // size = (270, 320). Members translate to (0,0) and (190,280).
+      await applyTool(
+        fx.session,
+        'group',
+        { guids: ['0:1', '0:2'] },
+        journal,
+      );
+      const after = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+
+      // GROUP appended at the end.
+      const groupNode = after.nodeChanges[after.nodeChanges.length - 1] as {
+        guid: { localID: number };
+        type: string;
+        name: string;
+        transform: { m02: number; m12: number };
+        size: { x: number; y: number };
+        fillPaints: unknown[];
+        parentIndex: { guid: { localID: number }; position: string };
+      };
+      expect(groupNode.type).toBe('GROUP');
+      expect(groupNode.name).toBe('Group');
+      expect(groupNode.transform.m02).toBe(10);
+      expect(groupNode.transform.m12).toBe(20);
+      expect(groupNode.size).toEqual({ x: 270, y: 320 });
+      expect(groupNode.fillPaints).toEqual([]);
+      // GROUP parented to the CANVAS (localID 100), at position 'V'
+      // (the lex-first member's position).
+      expect(groupNode.parentIndex.guid.localID).toBe(100);
+      expect(groupNode.parentIndex.position).toBe('V');
+
+      // Members re-parented to GROUP and translated.
+      const findByLocal = (id: number) => after.nodeChanges.find((n) => {
+        const g = n.guid as { localID?: number } | undefined;
+        return g?.localID === id;
+      })!;
+      const text = findByLocal(1) as { transform: { m02: number; m12: number }; parentIndex: { guid: { localID: number } } };
+      expect(text.transform.m02).toBe(0);
+      expect(text.transform.m12).toBe(0);
+      expect(text.parentIndex.guid.localID).toBe(groupNode.guid.localID);
+
+      const rect = findByLocal(2) as { transform: { m02: number; m12: number }; parentIndex: { guid: { localID: number } } };
+      expect(rect.transform.m02).toBe(190); // 200 - 10
+      expect(rect.transform.m12).toBe(280); // 300 - 20
+      expect(rect.parentIndex.guid.localID).toBe(groupNode.guid.localID);
+    });
+
+    it('records a __msg__ sentinel patch labelled "AI: group"', async () => {
+      await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
+      const entry = journal.popUndo('sid-test');
+      expect(entry?.label).toBe('AI: group');
+      expect(entry?.patches).toHaveLength(1);
+      expect(entry!.patches[0].guid).toBe('__msg__');
+      expect(entry!.patches[0].field).toBe('nodeChanges');
+    });
+
+    it('respects a custom name', async () => {
+      await applyTool(
+        fx.session,
+        'group',
+        { guids: ['0:1', '0:2'], name: 'Header bar' },
+        journal,
+      );
+      const after = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const last = after.nodeChanges[after.nodeChanges.length - 1] as { name: string };
+      expect(last.name).toBe('Header bar');
+    });
+
+    it('rejects fewer than 2 guids', async () => {
+      await expect(
+        applyTool(fx.session, 'group', { guids: ['0:1'] }, journal),
+      ).rejects.toThrow(/needs >= 2 guids/);
+      expect(journal.depths('sid-test')).toEqual({ past: 0, future: 0 });
+    });
+
+    it('rejects guids that do not share a parent', async () => {
+      // Re-parent 0:2 onto a different node (the INSTANCE 0:3) before calling
+      // group. The fixture's 0:1 stays under CANVAS so they no longer share.
+      const raw = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const rect = raw.nodeChanges.find((n) => {
+        const g = n.guid as { localID?: number } | undefined;
+        return g?.localID === 2;
+      })! as { parentIndex: { guid: { sessionID: number; localID: number }; position: string } };
+      rect.parentIndex.guid = { sessionID: 0, localID: 3 };
+      writeFileSync(fx.messagePath, JSON.stringify(raw));
+
+      await expect(
+        applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal),
+      ).rejects.toThrow(/must share a parent/);
+      expect(journal.depths('sid-test')).toEqual({ past: 0, future: 0 });
+    });
+
+    it('rebuilds documentJson so the new GROUP is reachable in the client tree', async () => {
+      await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
+      const doc = fx.session.documentJson as { children: Array<{ children?: Array<{ type: string }> }> };
+      const canvas = doc.children[0];
+      // Originally CANVAS had 3 children (TEXT, RECT, INSTANCE). After group:
+      // GROUP + INSTANCE (TEXT and RECT moved into GROUP). So 2 direct
+      // children, with the GROUP containing the 2 originals.
+      expect(canvas.children).toHaveLength(2);
+      const types = new Set(canvas.children!.map((c) => c.type));
+      expect(types.has('GROUP')).toBe(true);
+      expect(types.has('INSTANCE')).toBe(true);
+    });
+  });
+
+  describe('ungroup', () => {
+    it('round-trips group → ungroup back to original transforms / parentage', async () => {
+      // Snapshot the pre-group state of the two members.
+      const pre = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const findById = (
+        arr: Array<Record<string, unknown>>,
+        local: number,
+      ) => arr.find((n) => (n.guid as { localID?: number } | undefined)?.localID === local)!;
+      const preText = findById(pre.nodeChanges, 1) as {
+        transform: { m02: number; m12: number };
+        parentIndex: { guid: { localID: number } };
+      };
+      const preRect = findById(pre.nodeChanges, 2) as {
+        transform: { m02: number; m12: number };
+        parentIndex: { guid: { localID: number } };
+      };
+
+      await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
+      const mid = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const groupNode = mid.nodeChanges[mid.nodeChanges.length - 1] as {
+        guid: { sessionID: number; localID: number };
+      };
+      const groupGuid = `${groupNode.guid.sessionID}:${groupNode.guid.localID}`;
+
+      await applyTool(fx.session, 'ungroup', { guid: groupGuid }, journal);
+      const after = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+
+      // GROUP gone — original 5 nodes again.
+      expect(after.nodeChanges).toHaveLength(5);
+      const postText = findById(after.nodeChanges, 1) as {
+        transform: { m02: number; m12: number };
+        parentIndex: { guid: { localID: number } };
+      };
+      const postRect = findById(after.nodeChanges, 2) as {
+        transform: { m02: number; m12: number };
+        parentIndex: { guid: { localID: number } };
+      };
+      // Transforms restored exactly (no float noise — both translations are
+      // by integer offsets in this fixture).
+      expect(postText.transform.m02).toBe(preText.transform.m02);
+      expect(postText.transform.m12).toBe(preText.transform.m12);
+      expect(postRect.transform.m02).toBe(preRect.transform.m02);
+      expect(postRect.transform.m12).toBe(preRect.transform.m12);
+      // Re-parented to CANVAS (localID 100).
+      expect(postText.parentIndex.guid.localID).toBe(100);
+      expect(postRect.parentIndex.guid.localID).toBe(100);
+    });
+
+    it('records a __msg__ sentinel patch labelled "AI: ungroup"', async () => {
+      await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
+      const mid = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const groupNode = mid.nodeChanges[mid.nodeChanges.length - 1] as {
+        guid: { sessionID: number; localID: number };
+      };
+      const groupGuid = `${groupNode.guid.sessionID}:${groupNode.guid.localID}`;
+
+      await applyTool(fx.session, 'ungroup', { guid: groupGuid }, journal);
+      // Most recent journal entry is the ungroup.
+      const entry = journal.popUndo('sid-test');
+      expect(entry?.label).toBe('AI: ungroup');
+      expect(entry?.patches[0].guid).toBe('__msg__');
+    });
+
+    it('rejects targets that are not GROUP', async () => {
+      // 0:1 is a TEXT node, not a GROUP.
+      await expect(
+        applyTool(fx.session, 'ungroup', { guid: '0:1' }, journal),
+      ).rejects.toThrow(/not a GROUP/);
+      expect(journal.depths('sid-test')).toEqual({ past: 0, future: 0 });
+    });
+
+    it('promotes children in lex order with new positions strictly between groupPos and nextSibling', async () => {
+      // Group 0:1 + 0:2; the GROUP sits at position 'V', INSTANCE at 'Z'.
+      // After ungroup, both children should land in (V, Z).
+      await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
+      const mid = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const groupNode = mid.nodeChanges[mid.nodeChanges.length - 1] as {
+        guid: { sessionID: number; localID: number };
+      };
+      const groupGuid = `${groupNode.guid.sessionID}:${groupNode.guid.localID}`;
+      await applyTool(fx.session, 'ungroup', { guid: groupGuid }, journal);
+
+      const after = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const findByLocal = (id: number) => after.nodeChanges.find((n) => {
+        const g = n.guid as { localID?: number } | undefined;
+        return g?.localID === id;
+      })!;
+      const text = findByLocal(1) as { parentIndex: { position: string } };
+      const rect = findByLocal(2) as { parentIndex: { position: string } };
+      expect(text.parentIndex.position > 'V').toBe(true);
+      expect(text.parentIndex.position < 'Z').toBe(true);
+      expect(rect.parentIndex.position > text.parentIndex.position).toBe(true);
+      expect(rect.parentIndex.position < 'Z').toBe(true);
+    });
+  });
 });

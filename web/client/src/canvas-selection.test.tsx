@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
-import { act, render } from '@testing-library/react';
-import { memo } from 'react';
+import { act, fireEvent, render } from '@testing-library/react';
+import { memo, useCallback, useMemo, useState } from 'react';
 import {
   SelectionContext,
   SelectionStore,
@@ -103,5 +103,96 @@ describe('SelectionStore + useIsSelected', () => {
     // A selection change must not flip a null-guid consumer.
     act(() => { store.set(new Set(['anything'])); });
     expect(container.textContent).toBe('false');
+  });
+});
+
+/**
+ * Pan / zoom / spaceHeld perf invariant.
+ *
+ * Canvas owns a handful of internal state pieces (offset, scale, spaceHeld)
+ * that re-render Canvas itself on every wheel / Space-key event. None of
+ * those are NodeShape props — they're consumed by the Stage component or
+ * the container div. The architectural guarantee is:
+ *
+ *   given (a) NodeShape props from useCallback/useMemo([])-stable parents
+ *   and (b) selection arriving via useSyncExternalStore subscription, NOT
+ *   props — a parent state tick that touches none of those should NOT
+ *   re-render the memoized child.
+ *
+ * This test mirrors that pattern with a synthetic Parent/Child pair so a
+ * regression in App.tsx (someone removing useCallback) or Canvas.tsx
+ * (someone passing a new identity prop on every render) shows up here as
+ * a child render-count change.
+ */
+describe('memo invariance under unrelated parent state', () => {
+  it('a memoized consumer with stable props + selection-store subscription does not re-render when only Parent state ticks', () => {
+    const renders = { parent: 0, child: 0 };
+
+    interface ChildProps {
+      onSelect: () => void;
+      api: { ping: () => void };
+      sessionId: string;
+    }
+    const Child = memo(function Child({ onSelect, api, sessionId }: ChildProps) {
+      // Subscribe to selection — same shape as the real NodeShape.
+      useIsSelected(sessionId);
+      // Reference props so TS doesn't complain (and the memoizer treats
+      // them as live). The real NodeShape uses these in its handlers.
+      void onSelect; void api;
+      renders.child++;
+      return <span data-testid="child">{sessionId}</span>;
+    });
+
+    function Parent() {
+      renders.parent++;
+      // Two pieces of internal state — analog of `spaceHeld` and `scale`
+      // that Canvas owns. Neither propagates into Child's props.
+      const [spaceHeld, setSpaceHeld] = useState(false);
+      const [scale, setScale] = useState(1);
+
+      // Stable callback identity — analog of App.tsx's useCallback wrappers
+      // for handleSelect / onMoveMany / onResize / onResizeMany.
+      const onSelect = useCallback(() => { /* no-op */ }, []);
+
+      // Stable memoized object — analog of Canvas.tsx's `dragSnapshotApi`
+      // useMemo([]) holder.
+      const api = useMemo(() => ({ ping: () => { /* no-op */ } }), []);
+
+      void spaceHeld; void scale;
+      return (
+        <SelectionContext.Provider value={selectionStore}>
+          <button data-testid="space" onClick={() => setSpaceHeld((s) => !s)}>space</button>
+          <button data-testid="zoom" onClick={() => setScale((s) => s * 1.1)}>zoom</button>
+          <Child onSelect={onSelect} api={api} sessionId="0:1" />
+        </SelectionContext.Provider>
+      );
+    }
+
+    const selectionStore = new SelectionStore();
+    const { getByTestId } = render(<Parent />);
+    expect(renders.parent).toBe(1);
+    expect(renders.child).toBe(1);
+
+    // Toggle "spaceHeld" — Parent re-renders, Child must NOT.
+    fireEvent.click(getByTestId('space'));
+    expect(renders.parent).toBe(2);
+    expect(renders.child).toBe(1);
+
+    // "Zoom" — Parent re-renders, Child must NOT.
+    fireEvent.click(getByTestId('zoom'));
+    expect(renders.parent).toBe(3);
+    expect(renders.child).toBe(1);
+
+    // A burst of unrelated parent ticks — Child still pegged at 1 render.
+    fireEvent.click(getByTestId('space'));
+    fireEvent.click(getByTestId('zoom'));
+    fireEvent.click(getByTestId('space'));
+    expect(renders.parent).toBe(6);
+    expect(renders.child).toBe(1);
+
+    // And selection of the consumer's own guid DOES re-render it — proves
+    // the subscription is live, not silently broken.
+    act(() => { selectionStore.set(new Set(['0:1'])); });
+    expect(renders.child).toBe(2);
   });
 });

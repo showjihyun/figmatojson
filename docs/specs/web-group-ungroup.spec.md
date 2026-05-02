@@ -2,9 +2,9 @@
 
 | 항목 | 값 |
 |---|---|
-| 상태 | Draft |
-| 구현 | (예정) `web/server/adapters/driven/applyTool.ts` 의 `'group'` / `'ungroup'` 케이스 |
-| 테스트 | (예정) `web/server/adapters/driven/applyTool.test.ts` |
+| 상태 | Approved |
+| 구현 | `web/server/adapters/driven/applyTool.ts` 의 `'group'` / `'ungroup'` 케이스 |
+| 테스트 | `web/server/adapters/driven/applyTool.test.ts` |
 | 의존 | `__msg__` sentinel patch + `rebuildDocumentFromMessage` (이미 `duplicate` 로 검증됨) |
 
 ## 1. 목적
@@ -28,7 +28,7 @@ ungroup = { name: 'ungroup', input: { guid: string } }
 
 - I-G1 `guids` 가 모두 같은 부모를 공유해야 함. 다른 부모면 `Error("group: guids must share a parent")`.
 - I-G2 새 GROUP 의 `guid` 는 `nodeChanges` 의 max localID + 1 (sessionID 0). `duplicate` 와 동일 규칙.
-- I-G3 새 GROUP 의 `parentIndex.guid` = 멤버들의 공통 부모. `parentIndex.position` = `between(min(memberPos), null)` — 멤버 중 가장 앞선 형제 자리에 들어간다 (즉 첫 번째 멤버가 있던 자리).
+- I-G3 새 GROUP 의 `parentIndex.guid` = 멤버들의 공통 부모. `parentIndex.position` = lex 가장 앞선 멤버의 position 그대로 — 그 멤버는 GROUP 안으로 이동하므로 부모 슬롯이 비어 그 위치를 GROUP 이 자연스럽게 차지한다 (충돌 없음).
 - I-G4 새 GROUP 의 `transform.m02 = min(member.transform.m02)`, `transform.m12 = min(member.transform.m12)` — 즉 멤버 bbox 의 좌상단.
 - I-G5 새 GROUP 의 `size` = bbox of members (`{x: maxX - minX, y: maxY - minY}`).
 - I-G6 각 멤버 노드:
@@ -43,9 +43,9 @@ ungroup = { name: 'ungroup', input: { guid: string } }
 ## 4. Ungroup invariants
 
 - I-U1 대상 노드의 `type === 'GROUP'` 이어야 함. 아니면 `Error("ungroup: target is not a GROUP")`.
-- I-U2 GROUP 의 직속 자식 N개 각각:
+- I-U2 GROUP 의 직속 자식 N개 각각 (자식들의 GROUP-내부 lex 순서대로):
   - `parentIndex.guid` ← GROUP 의 `parentIndex.guid` (할아버지)
-  - `parentIndex.position` ← GROUP 이 차지하던 자리에서 시작해 `regenerate(N)` 비율로 분배. 즉 `between(GROUP.position, nextSiblingPos)` 구간을 N등분.
+  - `parentIndex.position` ← `between(prev, nextSiblingPos)` 누적 — `prev` 는 첫 자식의 경우 `GROUP.position`, 이후엔 직전 자식이 받은 새 position. 즉 (GROUP.pos, nextSiblingPos) 구간 안에 사다리 모양으로 N개를 끼워 넣음. 자식들의 상대 lex 순서 보존.
   - `transform.m02 += GROUP.transform.m02` (할아버지-로컬 좌표로 환원)
   - `transform.m12 += GROUP.transform.m12`
 - I-U3 GROUP 노드 자체는 `nodeChanges` 에서 제거.
@@ -87,8 +87,8 @@ ungroup = { name: 'ungroup', input: { guid: string } }
 - `POST /api/ungroup/:sid` — body `{guid}`
 같은 use case (`applyTool`) 호출.
 
-## 10. Open questions
+## 10. Resolved questions
 
-- **`name` 자동생성**: 사용자가 `name` 을 안 줄 때 `"Group N"` (counter) 인지 첫 멤버 이름의 `"<name> group"` 인지. Figma 본 동작 확인 필요.
-- **GROUP 의 fillPaints**: GROUP 은 본래 fill 을 가지지 않음 (자식이 그린다). 새 GROUP 노드의 fillPaints 는 빈 배열로 둘지 omit 할지 — kiwi schema 에서 required 인지 확인 후 결정.
-- **`guidPath` 갱신**: instance override (`symbolData.symbolOverrides[].guidPath`) 가 group 멤버의 guid 를 참조하면 group 후에도 유효한가? guidPath 는 노드 guid 를 직접 가리키므로 부모 변경에 영향받지 않을 가능성이 높지만 e2e 검증 필요.
+- **`name` 자동생성**: 사용자가 `name` 을 안 주면 단순히 `"Group"` 사용. counter (`"Group 1/2/..."`) 는 추후. Figma UI 자체가 "Group" 고정값으로 시작해 사용자가 즉시 rename 하므로 재현 충실도 손실 없음.
+- **GROUP 의 fillPaints**: 빈 배열 `[]` 로 둠. kiwi schema 에서 fillPaints 는 항상 array 로 직렬화되며 빈 배열이 정상 — 누락 시 일부 codepath 가 `Array.isArray()` 검사로 fall-through 한다.
+- **`guidPath` 갱신**: 변경하지 않음. `symbolData.symbolOverrides[].guidPath` 는 노드 guid 를 직접 참조하지 parentage 를 거치지 않는다 (kiwi schema 의 `GUIDPath` = `{guids: GUID[]}` 한 레벨 절대 경로). 따라서 group/ungroup 으로 인한 parentIndex 변경은 override 의 타깃 노드 식별에 영향 없음. 회귀 발생 시 e2e 가 잡는다.
