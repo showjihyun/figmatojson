@@ -386,6 +386,205 @@ export async function applyTool(
       ]);
       break;
     }
+    case 'group': {
+      // Wrap 2+ sibling nodes in a new GROUP at their bbox. Members move
+      // into GROUP-local coords; their parentIndex.guid points at GROUP.
+      // Spec: docs/specs/web-group-ungroup.spec.md §3.
+      const guids = (input.guids as string[]).map(String);
+      const requestedName = typeof input.name === 'string' ? input.name : 'Group';
+      if (guids.length < 2) throw new Error('group needs >= 2 guids');
+
+      // Validate all members share a parent. Compare by guid string for safety.
+      const members: Array<Record<string, unknown>> = [];
+      for (const g of guids) {
+        const m = findNode(g);
+        if (!m) throw new Error(`group: node ${g} not found`);
+        members.push(m);
+      }
+      const parentKey = (n: Record<string, unknown>): string => {
+        const pi = n.parentIndex as { guid?: { sessionID?: number; localID?: number } } | undefined;
+        if (!pi?.guid) return '';
+        return `${pi.guid.sessionID}:${pi.guid.localID}`;
+      };
+      const sharedParent = parentKey(members[0]);
+      if (!sharedParent) throw new Error('group: members have no parent (cannot group root nodes)');
+      for (const m of members) {
+        if (parentKey(m) !== sharedParent) {
+          throw new Error('group: guids must share a parent');
+        }
+      }
+
+      const beforeNodeChanges = clone(msg.nodeChanges ?? []);
+
+      // Compute member bbox (in parent-local coords).
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const m of members) {
+        const t = (m.transform as Record<string, number> | undefined) ?? {};
+        const sz = (m.size as { x?: number; y?: number } | undefined) ?? {};
+        const x = t.m02 ?? 0;
+        const y = t.m12 ?? 0;
+        const w = sz.x ?? 0;
+        const h = sz.y ?? 0;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x + w > maxX) maxX = x + w;
+        if (y + h > maxY) maxY = y + h;
+      }
+      if (!isFinite(minX)) {
+        // No member had a transform/size — fall back to origin-anchored zero-size.
+        minX = 0; minY = 0; maxX = 0; maxY = 0;
+      }
+
+      // Allocate a fresh GUID — same scheme duplicate uses.
+      let nextLocalId = 1;
+      for (const n of msg.nodeChanges ?? []) {
+        const g = n.guid as { localID?: number } | undefined;
+        if (g?.localID && g.localID >= nextLocalId) nextLocalId = g.localID + 1;
+      }
+      const groupGuid = { sessionID: 0, localID: nextLocalId };
+
+      // Take the lex-smallest member's position as GROUP's position. The
+      // member moves out of the parent so the slot is free; lex order in
+      // the parent stays consistent.
+      const memberPositions = members
+        .map((m) => (m.parentIndex as { position?: string } | undefined)?.position ?? '')
+        .filter((p) => p.length > 0);
+      const groupPos = memberPositions.length > 0
+        ? memberPositions.reduce((a, b) => (a < b ? a : b))
+        : between(null, null);
+
+      const parentSessionID = Number(sharedParent.split(':')[0]);
+      const parentLocalID = Number(sharedParent.split(':')[1]);
+
+      const groupNode: Record<string, unknown> = {
+        guid: groupGuid,
+        type: 'GROUP',
+        name: requestedName,
+        parentIndex: {
+          guid: { sessionID: parentSessionID, localID: parentLocalID },
+          position: groupPos,
+        },
+        transform: { m00: 1, m01: 0, m02: minX, m10: 0, m11: 1, m12: minY },
+        size: { x: maxX - minX, y: maxY - minY },
+        // Spec §10: GROUP.fillPaints = [] (empty array, not omitted).
+        fillPaints: [],
+      };
+
+      // Mutate each member: re-parent + shift to GROUP-local coords.
+      for (const m of members) {
+        const pi = (m.parentIndex ??= { guid: groupGuid, position: '' }) as {
+          guid: { sessionID: number; localID: number };
+          position?: string;
+        };
+        pi.guid = groupGuid;
+        // Position kept — relative lex order preserved within GROUP.
+        const t = (m.transform ??= {}) as Record<string, number>;
+        t.m02 = (t.m02 ?? 0) - minX;
+        t.m12 = (t.m12 ?? 0) - minY;
+      }
+
+      msg.nodeChanges = [...(msg.nodeChanges ?? []), groupNode];
+      writeFileSync(messagePath, JSON.stringify(msg));
+      s.documentJson = rebuildDocumentFromMessage(JSON.stringify(msg));
+
+      recordChatEdit('group', [
+        {
+          guid: MSG_SENTINEL_GUID,
+          field: 'nodeChanges',
+          before: beforeNodeChanges,
+          after: clone(msg.nodeChanges),
+        },
+      ]);
+      break;
+    }
+
+    case 'ungroup': {
+      // Inverse of group — promote a GROUP's children to its parent and
+      // delete the GROUP. Children's transforms are translated back to
+      // grandparent-local coords. Spec §4.
+      const node = findNode(String(input.guid));
+      if (!node) throw new Error(`ungroup: node ${input.guid} not found`);
+      if (node.type !== 'GROUP') {
+        throw new Error('ungroup: target is not a GROUP');
+      }
+
+      const beforeNodeChanges = clone(msg.nodeChanges ?? []);
+
+      const groupKey = `${(node.guid as { sessionID: number; localID: number }).sessionID}:${(node.guid as { sessionID: number; localID: number }).localID}`;
+      const groupPi = node.parentIndex as { guid?: { sessionID: number; localID: number }; position?: string } | undefined;
+      if (!groupPi?.guid) {
+        throw new Error('ungroup: target has no parent (cannot dissolve root)');
+      }
+      const grandparentGuid = groupPi.guid;
+      const groupPos = groupPi.position ?? '';
+      const groupT = (node.transform as Record<string, number> | undefined) ?? {};
+      const groupOffsetX = groupT.m02 ?? 0;
+      const groupOffsetY = groupT.m12 ?? 0;
+
+      // Direct children of the GROUP, sorted by their current position so
+      // we re-emit them into the grandparent in the same lex order.
+      const directChildren = (msg.nodeChanges ?? []).filter((n) => {
+        const pi = n.parentIndex as { guid?: { sessionID?: number; localID?: number } } | undefined;
+        if (!pi?.guid) return false;
+        return `${pi.guid.sessionID}:${pi.guid.localID}` === groupKey;
+      });
+      directChildren.sort((a, b) => {
+        const pa = (a.parentIndex as { position?: string } | undefined)?.position ?? '';
+        const pb = (b.parentIndex as { position?: string } | undefined)?.position ?? '';
+        if (pa < pb) return -1;
+        if (pa > pb) return 1;
+        return 0;
+      });
+
+      // Find the next sibling of GROUP in the grandparent so children can
+      // ladder into the (groupPos, nextSiblingPos) range.
+      const grandparentSiblings = (msg.nodeChanges ?? []).filter((n) => {
+        const pi = n.parentIndex as { guid?: { sessionID?: number; localID?: number } } | undefined;
+        if (!pi?.guid) return false;
+        return pi.guid.sessionID === grandparentGuid.sessionID
+          && pi.guid.localID === grandparentGuid.localID;
+      });
+      let nextSiblingPos: string | null = null;
+      for (const sib of grandparentSiblings) {
+        const sibPos = (sib.parentIndex as { position?: string } | undefined)?.position ?? '';
+        if (sibPos > groupPos && (nextSiblingPos === null || sibPos < nextSiblingPos)) {
+          nextSiblingPos = sibPos;
+        }
+      }
+
+      // Promote each direct child: re-parent + translate to grandparent
+      // coords + ladder a new position string in the GROUP-occupied slot.
+      let prevPos: string = groupPos;
+      for (const c of directChildren) {
+        const pi = c.parentIndex as { guid: { sessionID: number; localID: number }; position?: string };
+        pi.guid = grandparentGuid;
+        const newPos = between(prevPos, nextSiblingPos);
+        pi.position = newPos;
+        prevPos = newPos;
+        const t = (c.transform ??= {}) as Record<string, number>;
+        t.m02 = (t.m02 ?? 0) + groupOffsetX;
+        t.m12 = (t.m12 ?? 0) + groupOffsetY;
+      }
+
+      // Drop the GROUP itself from nodeChanges.
+      msg.nodeChanges = (msg.nodeChanges ?? []).filter((n) => {
+        const g = n.guid as { sessionID: number; localID: number } | undefined;
+        if (!g) return true;
+        return `${g.sessionID}:${g.localID}` !== groupKey;
+      });
+      writeFileSync(messagePath, JSON.stringify(msg));
+      s.documentJson = rebuildDocumentFromMessage(JSON.stringify(msg));
+
+      recordChatEdit('ungroup', [
+        {
+          guid: MSG_SENTINEL_GUID,
+          field: 'nodeChanges',
+          before: beforeNodeChanges,
+          after: clone(msg.nodeChanges),
+        },
+      ]);
+      break;
+    }
     default:
       throw new Error(`unknown tool: ${name}`);
   }

@@ -139,6 +139,35 @@ const CATALOGUE = [
       required: ['guid'],
     },
   },
+  {
+    name: 'group',
+    description:
+      "Wrap 2+ sibling nodes in a new GROUP at their bounding box. Members " +
+      "must share a parent. Members move into GROUP-local coords; the GROUP " +
+      "takes the lex-first member's position in the parent.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        guids: { type: 'array', items: { type: 'string' }, minItems: 2 },
+        name: { type: 'string', description: 'Optional name. Defaults to "Group".' },
+      },
+      required: ['guids'],
+    },
+  },
+  {
+    name: 'ungroup',
+    description:
+      "Inverse of group: promote a GROUP's children to its parent and delete " +
+      "the GROUP. Children's transforms are translated back to grandparent-local " +
+      "coords. Target must be type GROUP and must have a parent.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        guid: { type: 'string' },
+      },
+      required: ['guid'],
+    },
+  },
 ] as const;
 
 export class InProcessTools implements ToolDispatcher {

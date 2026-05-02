@@ -113,6 +113,23 @@ export class AgentSdkChat implements ChatAdapter {
           wrap('duplicate', async (i: { guid: string; dx?: number; dy?: number }) =>
             this.toolHook('duplicate', i)),
         ),
+        tool('group',
+          "Wrap 2+ sibling nodes in a new GROUP at their bounding box. Members must share a parent.",
+          {
+            guids: z.array(z.string()),
+            name: z.string().optional(),
+          },
+          wrap('group', async (i: { guids: string[]; name?: string }) =>
+            this.toolHook('group', i)),
+        ),
+        tool('ungroup',
+          "Inverse of group: promote a GROUP's children to its parent and delete the GROUP.",
+          {
+            guid: z.string(),
+          },
+          wrap('ungroup', async (i: { guid: string }) =>
+            this.toolHook('ungroup', i)),
+        ),
       ],
     });
 
