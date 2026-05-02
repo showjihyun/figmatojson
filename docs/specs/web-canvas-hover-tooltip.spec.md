@@ -2,9 +2,9 @@
 
 | 항목 | 값 |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/client/src/Canvas.tsx` 의 hover state + `web/client/src/components/canvas/HoverTooltip.tsx` |
-| 테스트 | `web/client/src/components/canvas/HoverTooltip.test.tsx` |
+| 상태 | Approved (v2 — Konva-rendered border + label pill) |
+| 구현 | `web/client/src/Canvas.tsx` 의 hover state + `web/client/src/components/canvas/HoverOverlay.tsx` |
+| 테스트 | `web/client/src/components/canvas/HoverOverlay.test.tsx` |
 | 형제 | `web-left-sidebar.spec.md` (선택 동기화 / auto-reveal 과 별개 시스템) |
 
 ## 1. 목적
@@ -15,32 +15,29 @@
 - 35K-node 메타리치 같은 큰 디자인에서, 캔버스만 봐서는 어떤 컴포넌트인지 식별하기 어렵다 (이름이 보이지 않음).
 - 인스펙터는 *선택된* 노드만 보여준다 — hover-only 식별 surface 는 별개로 필요.
 
-## 2. 표시 내용
+## 2. 표시 내용 (v2 — Figma-style canvas overlay)
 
 ```
-┌──────────────────────────────┐
-│ section 1                    │   ← node.name (truncate)
-│ FRAME · 360 × 220            │   ← type + W × H (반올림된 정수)
-└──────────────────────────────┘
+┌──┬──────┐ ← name pill at top-left of bbox
+│  │ Card │
+└──┴──────┘
+┌────────────────────┐
+│                    │ ← 1px stroke around bbox (no fill)
+│                    │
+└────────────────────┘
 ```
 
-- I-T1 1줄: `node.name` (빈 이름은 `<unnamed>`, italic muted).
-- I-T2 2줄: `<type> · <round(size.x)> × <round(size.y)>`. type 은 그대로 (FRAME/INSTANCE/TEXT 등).
-- I-T3 INSTANCE 의 경우 2줄 끝에 ` · → <master.name>` 추가 — master 식별 어시스트. master 가 symbolIndex 에 없으면 master 정보 생략.
-- I-T4 사이즈가 없는 노드 (DOCUMENT/CANVAS 등) → 2줄 = `<type>` 만. dimensions 생략.
-- I-T5 **Variant container** (Figma 의 variants 묶음): 2줄에 `· N variants` 세그먼트 추가. `N = countVariantChildren(node)` (`web/client/src/lib/variants.ts`). 0 이면 세그먼트 생략. Figma 가 hover 시 variant 수를 보여주는 동작과 일치.
-- I-T5.1 **검출 규칙** (`countVariantChildren`):
-  - (a) `node.type === 'COMPONENT_SET'` 이면 직속 자식 중 `type === 'COMPONENT'` 의 개수 (newer Figma).
-  - (b) 그 외 — 직속 자식 중 `type === 'SYMBOL' || type === 'COMPONENT'` 이면서 `name` 이 `key=value` 패턴 (`/^[\w가-힣 ]+=/`) 으로 시작하는 노드의 개수. 2개 이상이면 그 개수, 1개 이하면 0 (legacy Figma — `메타리치 화면 UI Design.fig` 가 이 패턴).
-  - (a) 가 우선, (b) 는 fallback. 둘 다 만족 안 하면 0.
-- I-T5.2 type 표기 — 본 spec 의 2줄 type 라벨은 노드의 실제 type 을 그대로 (FRAME / SYMBOL / COMPONENT_SET 등). variant container 라고 해서 type 을 위조하지 않음 — variant 정보는 `· N variants` 세그먼트로만 표현.
+- I-T1 **Border**: 노드 bbox 를 둘러싸는 stroke-only Konva.Rect. fill = transparent. stroke = primary 색 (Figma 의 #0a84ff 와 동일 톤). strokeWidth = `1 / scale` 로 zoom 에 무관하게 1px 유지.
+- I-T2 **Name pill**: bbox 의 top-left 외부에 작은 Konva.Group — primary-색 채워진 Rect 배경 + 흰색 Konva.Text 로 노드 이름. 위치 = `(bbox.x, bbox.y - pillHeight)` (label 이 노드 위에 살짝 떠 있음). 좌상단이 stage 밖으로 잘리면 (음수 y) 라벨을 노드 안쪽 (`bbox.y`) 으로 푸시 — Figma 동일 동작.
+- I-T3 라벨 텍스트 = `node.name`. 빈 이름은 `<unnamed>`. 길이 제한 없이 표시 (Figma 동일).
+- I-T4 라벨/border 색은 selection overlay 의 색과 동일 (`#0a84ff`) — Figma 도 hover/select 가 같은 색.
+- I-T5 **이미 selected 인 노드는 hover overlay 미표시** — selection overlay 가 같은 자리를 이미 차지하므로 중복 표시 회피.
 
-## 3. Position
+## 3. Position (Konva-rendered)
 
-- I-P1 툴팁은 hovered 노드의 **screen-space bbox 의 좌상단 외부** 에 위치 — `(bboxLeft, bboxTop - tooltipHeight - 4px)`. 4px 갭으로 노드 자체와 겹치지 않게.
-- I-P2 좌상단이 viewport 위로 잘려 나가면 (`bboxTop < tooltipHeight + 4`) bbox **하단** 으로 떨어진다 (`bboxLeft, bboxBottom + 4`). 우측이 잘리면 `right` 정렬로 보정.
-- I-P3 노드 좌표는 parent-local. screen-space 변환은 stage 의 `offset / scale` 으로 — `(node.bbox + ancestor offsets) * scale + stage origin`. ancestor 누적은 parentIndex 체인을 따라간다 (이미 NodeShape 가 Konva Group 으로 중첩되어 있어, Konva node 의 `getAbsolutePosition()` / `getClientRect()` 로 한 줄에 가능).
-- I-P4 stage 의 `pan/zoom` 변경 시 툴팁이 노드와 함께 움직여야 함 — 즉 hover state 에 fixed pixel 좌표를 박지 말고, 매 렌더에 변환 함수를 다시 호출.
+- I-P1 hover overlay 는 **selection overlay 와 같은 Layer** 에서 그린다 (z-order 가 캔버스 콘텐츠 위, selection 과 동일 레벨). Stage 의 transform (offset/scale) 을 자동으로 받으므로 pan/zoom 시 별도 수학 없이 노드와 함께 움직인다.
+- I-P2 bbox 좌표 = `hover.designBbox` (이미 stage-local 디자인 좌표) 를 그대로 Konva.Rect 의 x/y/width/height 로 사용.
+- I-P3 라벨 폰트 / 패딩 / 두께는 모두 `1/scale` / `12/scale` 등 zoom-corrected — 줌에 무관하게 픽셀 일정.
 
 ## 4. State
 
@@ -52,13 +49,13 @@
 - I-S4 stage 자체에서 마우스가 벗어나면 (`onMouseLeave` on Stage) 툴팁 숨김.
 - I-S5 INSTANCE 의 master 자손 (`_renderChildren` 으로 expanded 된 vector/icon 등) 위에 hover 시, 그 자손의 guid 가 아니라 **outer instance** 의 guid 를 hovered 로 잡는다 — 사용자 관점에선 인스턴스 한 덩어리 (Figma 도 동일). 구현: `_isInstanceChild` 플래그를 가진 노드는 hover 무시 (`onMouseEnter` 의 cancelBubble 로 outer 까지 propagate 하지 않게 핸들러 자체를 등록하지 않음).
 
-## 5. Render
+## 5. Render (v2 — Konva)
 
-- I-R1 툴팁은 **Konva 가 아닌 DOM** 으로 렌더 — Stage 옆에 absolute-positioned `<div>`. Konva.Text 보다 폰트 / 패딩 / shadow 컨트롤이 자연스러움.
-- I-R2 `hoveredGuid` 가 null 이면 컴포넌트 자체가 `null` return — 빈 div 도 두지 않음.
-- I-R3 `pointer-events: none` — 툴팁이 마우스 이벤트를 가로채지 않게.
-- I-R4 z-index 는 selection overlay 보다 위 (selection 의 W×H 라벨이 정확히 같은 위치에 와도 hover 가 우선).
-- I-R5 다크 톤 (`bg-popover text-popover-foreground` shadcn 토큰) + 1px border + 4px radius. shadow-md.
+- I-R1 hover overlay 는 **Konva** 로 렌더 (`HoverOverlay.tsx`) — selection overlay 와 같은 Layer 에 배치. Figma 와 동일한 in-canvas 표시. (v1 의 DOM tooltip 은 deprecated.)
+- I-R2 `hover === null` 또는 `selectedGuids.has(hover.guid)` 인 경우 컴포넌트가 `null` return — 빈 노드 안 만듦.
+- I-R3 `listening = false` — overlay 가 마우스 이벤트를 가로채지 않게 (NodeShape 의 hover 핸들러가 계속 작동해야 함).
+- I-R4 z-order: selection overlay 와 같은 Layer 안에서 render 순서 = selection 다음 (코드상 뒤). 같은 노드가 selected + hovered 인 경우 I-R2 로 hover 가 미표시되므로 충돌 없음.
+- I-R5 색상: `#0a84ff` (selection 과 동일). 라벨 텍스트는 흰색.
 
 ## 6. 성능
 
