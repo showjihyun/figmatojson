@@ -20,7 +20,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Stage, Layer, Rect, Text as KText, Group, Path, Image as KImage } from 'react-konva';
+import { Stage, Layer, Rect, Text as KText, Group, Path, Image as KImage, Line } from 'react-konva';
 import type Konva from 'konva';
 import { cornerDrag, groupBbox, projectMembers, type Corner } from './multiResize';
 import { solidFillCss, solidStrokeCss } from '@core/domain/color';
@@ -42,6 +42,13 @@ import {
   type HoverInfo,
 } from './components/canvas/HoverTooltip';
 import { countVariantChildren } from './lib/variants';
+import {
+  konvaFontStyle,
+  konvaLetterSpacing,
+  konvaLineHeight,
+  konvaTextAlign,
+  konvaVerticalAlign,
+} from './lib/textStyle';
 
 // ─── Drag-snapshot plumbing ──────────────────────────────────────────────
 //
@@ -261,6 +268,15 @@ function NodeShapeImpl({
       const { r = 0, g = 0, b = 0, a = 1 } = first.color;
       return `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)},${a})`;
     })();
+    // Spec web-render-fidelity-high.spec.md §3.1–3.5 — pull the additional
+    // typography fields off the kiwi node and pass them through. Helpers
+    // return undefined for absent / default values so JSX spread props
+    // fall back to Konva's defaults without explicit branching here.
+    const letterSpacing = konvaLetterSpacing(node.letterSpacing, fontSize);
+    const lineHeight = konvaLineHeight(node.lineHeight, fontSize);
+    const verticalAlign = konvaVerticalAlign(node.textAlignVertical);
+    const align = konvaTextAlign(node.textAlignHorizontal);
+    const fontStyle = konvaFontStyle(node.fontName?.style);
     return (
       <KText
         x={x}
@@ -268,6 +284,11 @@ function NodeShapeImpl({
         text={chars}
         fontSize={fontSize}
         fontFamily={fontFamily}
+        fontStyle={fontStyle}
+        letterSpacing={letterSpacing}
+        lineHeight={lineHeight}
+        verticalAlign={verticalAlign}
+        align={align}
         fill={fillColor}
         width={w || undefined}
         height={h || undefined}
@@ -322,6 +343,19 @@ function NodeShapeImpl({
   const imgHash = imageHashHex(node);
   const imgSrc = imgHash && sessionId ? `/api/asset/${sessionId}/${imgHash}` : null;
 
+  // Per-side stroke (spec web-render-fidelity-high.spec.md §3.6) — when
+  // border{Top,Right,Bottom,Left}Weight values differ AND strokePaints is
+  // non-empty, draw individual Konva.Line segments instead of letting the
+  // background Rect carry a uniform stroke. Common Figma pattern: a row
+  // with only a 1px bottom border (table cell, calendar grid).
+  const bt = node.borderTopWeight as number | undefined;
+  const br = node.borderRightWeight as number | undefined;
+  const bb = node.borderBottomWeight as number | undefined;
+  const bl = node.borderLeftWeight as number | undefined;
+  const hasPerSideValues = bt != null || br != null || bb != null || bl != null;
+  const sidesUniform = hasPerSideValues && bt === br && br === bb && bb === bl;
+  const wantPerSide = hasPerSideValues && !sidesUniform && !!stroke;
+
   return (
     <Group
       x={x}
@@ -340,11 +374,23 @@ function NodeShapeImpl({
         width={w}
         height={h}
         fill={fill}
-        stroke={stroke?.color}
-        strokeWidth={stroke?.width}
+        stroke={wantPerSide ? undefined : stroke?.color}
+        strokeWidth={wantPerSide ? undefined : stroke?.width}
         cornerRadius={cornerR}
         listening
       />
+      {wantPerSide && bt && bt > 0 && (
+        <Line points={[0, 0, w, 0]} stroke={stroke!.color} strokeWidth={bt} listening={false} />
+      )}
+      {wantPerSide && br && br > 0 && (
+        <Line points={[w, 0, w, h]} stroke={stroke!.color} strokeWidth={br} listening={false} />
+      )}
+      {wantPerSide && bb && bb > 0 && (
+        <Line points={[0, h, w, h]} stroke={stroke!.color} strokeWidth={bb} listening={false} />
+      )}
+      {wantPerSide && bl && bl > 0 && (
+        <Line points={[0, 0, 0, h]} stroke={stroke!.color} strokeWidth={bl} listening={false} />
+      )}
       {imgSrc && (
         <ImageFill src={imgSrc} width={w} height={h} cornerRadius={cornerR} />
       )}
