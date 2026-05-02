@@ -22,6 +22,7 @@ import {
   existsSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { atomicWriteFileSync } from './atomicWrite.js';
 import { join } from 'node:path';
 
 import { loadContainer } from '../../../../src/container.js';
@@ -142,7 +143,7 @@ export class FsSessionStore implements SessionStore {
   writeMessage(id: string, json: string): void {
     const s = this.sessions.get(id);
     if (!s) throw new Error(`session ${id} not found`);
-    writeFileSync(join(s.dir, 'extracted', '04_decoded', 'message.json'), json);
+    atomicWriteFileSync(join(s.dir, 'extracted', '04_decoded', 'message.json'), json);
   }
 
   /** Read message.json — used by the legacy PATCH/instance-override paths. */

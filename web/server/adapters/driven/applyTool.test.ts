@@ -5,6 +5,8 @@ import { join } from 'node:path';
 
 import { applyTool } from './applyTool.js';
 import { InMemoryEditJournal } from './InMemoryEditJournal.js';
+import { Undo } from '../../../core/application/Undo.js';
+import { Redo } from '../../../core/application/Redo.js';
 import type { Session } from '../../../core/domain/entities/Session.js';
 import type { Document } from '../../../core/domain/entities/Document.js';
 
@@ -115,6 +117,34 @@ function buildFixture(): { dir: string; session: Session; messagePath: string } 
     documentJson,
   };
   return { dir, session, messagePath };
+}
+
+/**
+ * Disk-backed SessionStore + FsLike shim for tests that need a real Undo /
+ * Redo against the same on-disk message.json that applyTool writes through
+ * `s.dir`. Both halves share state so Undo.readMessage observes applyTool's
+ * mutations without any in-memory caching layer to keep in sync.
+ */
+function buildDiskStore(
+  f: ReturnType<typeof buildFixture>,
+): {
+  getById: (id: string) => Session | null;
+  readMessage: (id: string) => string;
+  writeMessage: (id: string, json: string) => void;
+  create: () => Promise<Session>;
+  flush: (id: string) => Promise<void>;
+  resolvePath: (id: string, ...segments: string[]) => string;
+  destroy: (id: string) => Promise<void>;
+} {
+  return {
+    getById: (id) => (id === f.session.id ? f.session : null),
+    readMessage: () => readFileSync(f.messagePath, 'utf8'),
+    writeMessage: (_id, json) => writeFileSync(f.messagePath, json),
+    create: () => { throw new Error('not used in tests'); },
+    flush: async () => {},
+    resolvePath: () => f.dir,
+    destroy: async () => {},
+  };
 }
 
 describe('applyTool — chat-driven mutations record to the journal', () => {
@@ -623,6 +653,450 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       expect(text.parentIndex.position < 'Z').toBe(true);
       expect(rect.parentIndex.position > text.parentIndex.position).toBe(true);
       expect(rect.parentIndex.position < 'Z').toBe(true);
+    });
+  });
+
+  // Spec §8 calls nesting "허용 (제약 없음)" — group of GROUPs works because
+  // every member type is treated identically by the bbox math and re-parent
+  // logic. These tests pin that down so a future refactor can't accidentally
+  // reject GROUP members.
+  describe('group — nested (group of groups)', () => {
+    it('groups two existing GROUPs into a new GROUP — children re-parented, bbox spans both', async () => {
+      // Give INSTANCE a transform/size so the outer bbox is meaningful.
+      const raw = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const inst = raw.nodeChanges.find(
+        (n) => (n.guid as { localID?: number } | undefined)?.localID === 3,
+      )! as Record<string, unknown>;
+      inst.transform = { m02: 500, m12: 600 };
+      inst.size = { x: 50, y: 50 };
+      writeFileSync(fx.messagePath, JSON.stringify(raw));
+
+      // G1 := group(TEXT, RECT). Origin (10,20), size (270,320) — same math
+      // as the leaf-level group test above.
+      await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'], name: 'G1' }, journal);
+      const mid = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const g1 = mid.nodeChanges[mid.nodeChanges.length - 1] as {
+        guid: { sessionID: number; localID: number };
+      };
+      const g1Guid = `${g1.guid.sessionID}:${g1.guid.localID}`;
+
+      // G2 := group(G1, INSTANCE). G1 has transform (10,20) size (270,320);
+      // INSTANCE at (500,600) size (50,50). Combined bbox = (10,20)..(550,650),
+      // so G2 origin = (10,20), size = (540,630).
+      await applyTool(fx.session, 'group', { guids: [g1Guid, '0:3'], name: 'G2' }, journal);
+
+      const after = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const g2 = after.nodeChanges[after.nodeChanges.length - 1] as {
+        type: string;
+        guid: { localID: number };
+        transform: { m02: number; m12: number };
+        size: { x: number; y: number };
+      };
+      expect(g2.type).toBe('GROUP');
+      expect(g2.transform.m02).toBe(10);
+      expect(g2.transform.m12).toBe(20);
+      expect(g2.size).toEqual({ x: 540, y: 630 });
+
+      const findByLocal = (id: number) => after.nodeChanges.find(
+        (n) => (n.guid as { localID?: number } | undefined)?.localID === id,
+      )!;
+
+      // Both members re-parented to G2 and translated to G2-local coords.
+      const g1After = findByLocal(g1.guid.localID) as {
+        parentIndex: { guid: { localID: number } };
+        transform: { m02: number; m12: number };
+      };
+      const instAfter = findByLocal(3) as {
+        parentIndex: { guid: { localID: number } };
+        transform: { m02: number; m12: number };
+      };
+      expect(g1After.parentIndex.guid.localID).toBe(g2.guid.localID);
+      expect(instAfter.parentIndex.guid.localID).toBe(g2.guid.localID);
+      expect(g1After.transform.m02).toBe(0);    // 10 - 10
+      expect(g1After.transform.m12).toBe(0);    // 20 - 20
+      expect(instAfter.transform.m02).toBe(490); // 500 - 10
+      expect(instAfter.transform.m12).toBe(580); // 600 - 20
+
+      // I-G8: TEXT/RECT inside G1 are untouched — the second group only
+      // affects its direct members (G1 and INSTANCE), not their descendants.
+      const text = findByLocal(1) as {
+        parentIndex: { guid: { localID: number } };
+        transform: { m02: number; m12: number };
+      };
+      const rect = findByLocal(2) as {
+        parentIndex: { guid: { localID: number } };
+        transform: { m02: number; m12: number };
+      };
+      expect(text.parentIndex.guid.localID).toBe(g1.guid.localID);
+      expect(rect.parentIndex.guid.localID).toBe(g1.guid.localID);
+      // TEXT/RECT transforms are still G1-local, NOT G2-local.
+      expect(text.transform.m02).toBe(0);
+      expect(text.transform.m12).toBe(0);
+      expect(rect.transform.m02).toBe(190);
+      expect(rect.transform.m12).toBe(280);
+    });
+
+    it('ungroup of an outer GROUP only dissolves one level — inner GROUP survives', async () => {
+      // Spec §8: "ungroup 은 한 단계만 — 재귀 ungroup 은 사용자가 반복 호출."
+      const raw = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const inst = raw.nodeChanges.find(
+        (n) => (n.guid as { localID?: number } | undefined)?.localID === 3,
+      )! as Record<string, unknown>;
+      inst.transform = { m02: 500, m12: 600 };
+      inst.size = { x: 50, y: 50 };
+      writeFileSync(fx.messagePath, JSON.stringify(raw));
+
+      await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
+      let mid = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const g1 = mid.nodeChanges[mid.nodeChanges.length - 1] as {
+        guid: { sessionID: number; localID: number };
+      };
+      const g1Guid = `${g1.guid.sessionID}:${g1.guid.localID}`;
+
+      await applyTool(fx.session, 'group', { guids: [g1Guid, '0:3'] }, journal);
+      mid = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const g2 = mid.nodeChanges[mid.nodeChanges.length - 1] as {
+        guid: { sessionID: number; localID: number };
+      };
+      const g2Guid = `${g2.guid.sessionID}:${g2.guid.localID}`;
+
+      // Ungroup the OUTER group only.
+      await applyTool(fx.session, 'ungroup', { guid: g2Guid }, journal);
+
+      const after = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      // 5 originals + G1 (G2 dissolved) = 6 total.
+      expect(after.nodeChanges).toHaveLength(6);
+      const findByLocal = (id: number) => after.nodeChanges.find(
+        (n) => (n.guid as { localID?: number } | undefined)?.localID === id,
+      );
+      expect(findByLocal(g2.guid.localID)).toBeUndefined();
+      expect(findByLocal(g1.guid.localID)).toBeDefined();
+
+      // G1 promoted up to CANVAS, transform restored from G2-local back to
+      // grandparent (CANVAS) coords: (0,0) + (10,20) = (10,20).
+      const g1After = findByLocal(g1.guid.localID) as {
+        parentIndex: { guid: { localID: number } };
+        transform: { m02: number; m12: number };
+      };
+      expect(g1After.parentIndex.guid.localID).toBe(100);
+      expect(g1After.transform.m02).toBe(10);
+      expect(g1After.transform.m12).toBe(20);
+
+      // INSTANCE also promoted — restored to its pre-outer-group position.
+      const instAfter = findByLocal(3) as {
+        parentIndex: { guid: { localID: number } };
+        transform: { m02: number; m12: number };
+      };
+      expect(instAfter.parentIndex.guid.localID).toBe(100);
+      expect(instAfter.transform.m02).toBe(500);
+      expect(instAfter.transform.m12).toBe(600);
+
+      // I-U4: inner GROUP's children are untouched. TEXT/RECT remain inside G1.
+      const text = findByLocal(1) as { parentIndex: { guid: { localID: number } } };
+      const rect = findByLocal(2) as { parentIndex: { guid: { localID: number } } };
+      expect(text.parentIndex.guid.localID).toBe(g1.guid.localID);
+      expect(rect.parentIndex.guid.localID).toBe(g1.guid.localID);
+    });
+  });
+
+  // Spec §8 lists "비대상" (out-of-scope) cases for the v1 group tool —
+  // multi-parent (rejected, already covered above), rotated members
+  // (accepted, AABB instead of OBB), nested GROUPs (allowed, covered above),
+  // and BOOLEAN_OPERATION (only GROUP is emitted). The behaviors below have
+  // no runtime guard today; these tests pin them so a regression is caught.
+  describe('group — spec §8 non-target items (current behavior is documented)', () => {
+    it('accepts rotated members but computes GROUP size as AABB (rotation channels ignored)', async () => {
+      const raw = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const text = raw.nodeChanges.find(
+        (n) => (n.guid as { localID?: number } | undefined)?.localID === 1,
+      )! as { transform: Record<string, number> };
+      // 45° rotation around the node's origin, keeping (m02, m12) at (10, 20).
+      const c = Math.cos(Math.PI / 4);
+      const s = Math.sin(Math.PI / 4);
+      text.transform = { m00: c, m01: -s, m02: 10, m10: s, m11: c, m12: 20 };
+      writeFileSync(fx.messagePath, JSON.stringify(raw));
+
+      await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
+      const after = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+
+      // GROUP origin/size match the unrotated case — confirms the bbox math
+      // reads only (m02, m12, size.x, size.y). If OBB support ever lands,
+      // this expectation flips to the corrected envelope.
+      const groupNode = after.nodeChanges[after.nodeChanges.length - 1] as {
+        type: string;
+        transform: { m02: number; m12: number };
+        size: { x: number; y: number };
+      };
+      expect(groupNode.type).toBe('GROUP');
+      expect(groupNode.transform.m02).toBe(10);
+      expect(groupNode.transform.m12).toBe(20);
+      expect(groupNode.size).toEqual({ x: 270, y: 320 });
+
+      // I-G7: rotation channels of the member survive untouched; only m02/m12
+      // are translated into GROUP-local coords.
+      const textAfter = after.nodeChanges.find(
+        (n) => (n.guid as { localID?: number } | undefined)?.localID === 1,
+      )! as { transform: Record<string, number> };
+      expect(textAfter.transform.m00).toBeCloseTo(c);
+      expect(textAfter.transform.m01).toBeCloseTo(-s);
+      expect(textAfter.transform.m10).toBeCloseTo(s);
+      expect(textAfter.transform.m11).toBeCloseTo(c);
+      expect(textAfter.transform.m02).toBe(0);
+      expect(textAfter.transform.m12).toBe(0);
+    });
+
+    it('emits type: "GROUP" only — never "BOOLEAN_OPERATION" (vector boolean is a separate tool)', async () => {
+      await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
+      const after = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const last = after.nodeChanges[after.nodeChanges.length - 1] as { type: string };
+      expect(last.type).toBe('GROUP');
+    });
+  });
+
+  // Each structural tool emits a __msg__ sentinel patch carrying the full
+  // pre/post nodeChanges array. Looping apply N times then undo N times must
+  // bring message.json back byte-for-byte — the only proof that every entry
+  // captures a complete, replayable snapshot (no subtle aliasing through the
+  // live nodeChanges array between successive operations).
+  describe('cumulative undo stress (apply ×N → undo ×N restores baseline byte-for-byte)', () => {
+    it('duplicate ×10 → undo ×10 reverts message.json bytes to baseline', async () => {
+      const baseline = readFileSync(fx.messagePath, 'utf8');
+      for (let i = 0; i < 10; i++) {
+        await applyTool(fx.session, 'duplicate', { guid: '0:1' }, journal);
+      }
+      expect(journal.depths('sid-test').past).toBe(10);
+
+      const undo = new Undo(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+        journal,
+      );
+      for (let i = 0; i < 10; i++) {
+        const r = await undo.execute({ sessionId: 'sid-test' });
+        expect(r.ok).toBe(true);
+      }
+      expect(journal.depths('sid-test').past).toBe(0);
+      expect(readFileSync(fx.messagePath, 'utf8')).toBe(baseline);
+    });
+
+    it('group ×10 (nested) → undo ×10 reverts message.json bytes to baseline', async () => {
+      const baseline = readFileSync(fx.messagePath, 'utf8');
+      // After iter 1, 0:1 and 0:2 share parent G1; iter 2 nests them in G2
+      // inside G1; iter k yields k nested GROUPs around the same two leaves.
+      for (let i = 0; i < 10; i++) {
+        await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
+      }
+      expect(journal.depths('sid-test').past).toBe(10);
+
+      const undo = new Undo(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+        journal,
+      );
+      for (let i = 0; i < 10; i++) {
+        const r = await undo.execute({ sessionId: 'sid-test' });
+        expect(r.ok).toBe(true);
+      }
+      expect(journal.depths('sid-test').past).toBe(0);
+      expect(readFileSync(fx.messagePath, 'utf8')).toBe(baseline);
+    });
+
+    it('(group → ungroup) ×10 → undo ×20 reverts message.json bytes to baseline', async () => {
+      // Round-trip pairs aren't byte-idempotent (ungroup re-ladders position
+      // strings via between() — see spec §5), but every individual entry's
+      // before/after pair IS exact, so unwinding the journal must still land
+      // on the literal baseline bytes.
+      const baseline = readFileSync(fx.messagePath, 'utf8');
+      for (let i = 0; i < 10; i++) {
+        await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
+        const mid = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+          nodeChanges: Array<{ guid: { sessionID: number; localID: number } }>;
+        };
+        const g = mid.nodeChanges[mid.nodeChanges.length - 1];
+        const gGuid = `${g.guid.sessionID}:${g.guid.localID}`;
+        await applyTool(fx.session, 'ungroup', { guid: gGuid }, journal);
+      }
+      expect(journal.depths('sid-test').past).toBe(20);
+
+      const undo = new Undo(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+        journal,
+      );
+      for (let i = 0; i < 20; i++) {
+        const r = await undo.execute({ sessionId: 'sid-test' });
+        expect(r.ok).toBe(true);
+      }
+      expect(journal.depths('sid-test').past).toBe(0);
+      expect(readFileSync(fx.messagePath, 'utf8')).toBe(baseline);
+    });
+  });
+
+  // The structural tools (duplicate / group / ungroup) rebuild documentJson
+  // wholesale via rebuildDocumentFromMessage, while the leaf tools mutate
+  // documentJson in place via mirrorClient. When the two are interleaved,
+  // the risk is subtle: a leaf undo running after a structural undo reads a
+  // freshly-rebuilt documentJson and must still find its target node; a leaf
+  // undo running BEFORE a structural undo must mutate a node that the
+  // structural undo will then erase. These tests pin both directions.
+  describe('mixed leaf + structural undo interleaving', () => {
+    it('undo of [set_text, then duplicate] reverts in order — clone removed first, then text restored', async () => {
+      await applyTool(fx.session, 'set_text', { guid: '0:1', value: 'A' }, journal);
+      await applyTool(fx.session, 'duplicate', { guid: '0:1' }, journal);
+
+      // After both: 6 nodes; both master and clone carry the leaf-edited 'A'.
+      let snap = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      expect(snap.nodeChanges).toHaveLength(6);
+      const cloneAfterB = snap.nodeChanges[snap.nodeChanges.length - 1] as {
+        textData: { characters: string };
+      };
+      expect(cloneAfterB.textData.characters).toBe('A');
+
+      const undo = new Undo(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+        journal,
+      );
+
+      // Undo B (structural): clone gone; master still 'A'.
+      await undo.execute({ sessionId: 'sid-test' });
+      snap = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      expect(snap.nodeChanges).toHaveLength(5);
+      const masterAfterUndoB = snap.nodeChanges.find(
+        (n) => (n.guid as { localID?: number } | undefined)?.localID === 1,
+      ) as { textData: { characters: string } };
+      expect(masterAfterUndoB.textData.characters).toBe('A');
+
+      // Undo A (leaf, after a structural undo just rebuilt documentJson):
+      // master back to 'hello'; documentJson mirror also reverts.
+      await undo.execute({ sessionId: 'sid-test' });
+      snap = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const masterAfterUndoA = snap.nodeChanges.find(
+        (n) => (n.guid as { localID?: number } | undefined)?.localID === 1,
+      ) as { textData: { characters: string } };
+      expect(masterAfterUndoA.textData.characters).toBe('hello');
+      const docCanvas = (fx.session.documentJson as {
+        children: Array<{ children?: Array<{ guid: { localID: number }; textData?: { characters: string } }> }>;
+      }).children[0];
+      const docText = docCanvas.children!.find((c) => c.guid.localID === 1);
+      expect(docText?.textData?.characters).toBe('hello');
+    });
+
+    it('leaf-edits a clone (created by duplicate), then undoes both — clone fully removed', async () => {
+      // Tests that a leaf op targeting a guid that ONLY EXISTS because of an
+      // earlier structural op survives undo: the leaf's findNode must hit
+      // the clone (still in msg), and the structural undo must then remove
+      // the clone entirely.
+      await applyTool(fx.session, 'duplicate', { guid: '0:1' }, journal);
+      const mid = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const clone = mid.nodeChanges[mid.nodeChanges.length - 1] as {
+        guid: { sessionID: number; localID: number };
+      };
+      const cloneGuid = `${clone.guid.sessionID}:${clone.guid.localID}`;
+
+      await applyTool(
+        fx.session,
+        'set_text',
+        { guid: cloneGuid, value: 'CLONE_EDITED' },
+        journal,
+      );
+      let snap = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const cloneAfterB = snap.nodeChanges.find(
+        (n) => (n.guid as { localID?: number } | undefined)?.localID === clone.guid.localID,
+      ) as { textData: { characters: string } };
+      expect(cloneAfterB.textData.characters).toBe('CLONE_EDITED');
+
+      const undo = new Undo(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+        journal,
+      );
+
+      // Undo B (leaf on clone): clone's text reverts to the source's value.
+      await undo.execute({ sessionId: 'sid-test' });
+      snap = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      const cloneAfterUndoB = snap.nodeChanges.find(
+        (n) => (n.guid as { localID?: number } | undefined)?.localID === clone.guid.localID,
+      ) as { textData: { characters: string } };
+      expect(cloneAfterUndoB.textData.characters).toBe('hello');
+
+      // Undo A (structural duplicate): clone disappears entirely.
+      await undo.execute({ sessionId: 'sid-test' });
+      snap = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
+        nodeChanges: Array<Record<string, unknown>>;
+      };
+      expect(snap.nodeChanges).toHaveLength(5);
+      expect(
+        snap.nodeChanges.find(
+          (n) => (n.guid as { localID?: number } | undefined)?.localID === clone.guid.localID,
+        ),
+      ).toBeUndefined();
+    });
+
+    it('5-step interleave [leaf, structural, leaf, structural, leaf] — undo×5 → baseline, redo×5 → final state', async () => {
+      // Worst-case alternation: each leaf op runs against a node whose parent
+      // linkage has been changing under it (B duplicates 0:1, D moves 0:1
+      // into a fresh GROUP), and every undo crosses a structural↔leaf
+      // boundary. Byte-equality on both ends is the strong proof.
+      const baseline = readFileSync(fx.messagePath, 'utf8');
+
+      await applyTool(fx.session, 'set_text', { guid: '0:1', value: 'A' }, journal);
+      await applyTool(fx.session, 'duplicate', { guid: '0:1' }, journal);
+      await applyTool(fx.session, 'set_position', { guid: '0:1', x: 5, y: 5 }, journal);
+      await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
+      await applyTool(fx.session, 'set_text', { guid: '0:1', value: 'FINAL' }, journal);
+
+      const stateE = readFileSync(fx.messagePath, 'utf8');
+      expect(journal.depths('sid-test').past).toBe(5);
+
+      const undo = new Undo(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+        journal,
+      );
+      for (let i = 0; i < 5; i++) {
+        const r = await undo.execute({ sessionId: 'sid-test' });
+        expect(r.ok).toBe(true);
+      }
+      expect(readFileSync(fx.messagePath, 'utf8')).toBe(baseline);
+      expect(journal.depths('sid-test')).toEqual({ past: 0, future: 5 });
+
+      const redo = new Redo(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Redo>[0],
+        journal,
+      );
+      for (let i = 0; i < 5; i++) {
+        const r = await redo.execute({ sessionId: 'sid-test' });
+        expect(r.ok).toBe(true);
+      }
+      expect(readFileSync(fx.messagePath, 'utf8')).toBe(stateE);
+      expect(journal.depths('sid-test')).toEqual({ past: 5, future: 0 });
     });
   });
 });
