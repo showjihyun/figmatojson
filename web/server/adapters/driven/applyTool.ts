@@ -14,7 +14,7 @@
  *    change onto the client-side tree so a subsequent GET /api/doc/:id sees it.
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { Session } from '../../../core/domain/entities/Session.js';
@@ -25,6 +25,7 @@ import type {
 } from '../../../core/ports/EditJournal.js';
 import { rebuildDocumentFromMessage } from '../../../core/domain/messageJson.js';
 import { between } from '../../../../src/fractional-index.js';
+import { atomicWriteFileSync } from './atomicWrite.js';
 
 interface MessageJson {
   nodeChanges?: Array<Record<string, unknown>>;
@@ -80,7 +81,7 @@ export async function applyTool(
       const before = (node.textData as { characters?: unknown } | undefined)?.characters;
       const after = String(input.value);
       ((node.textData ??= {}) as Record<string, unknown>).characters = after;
-      writeFileSync(messagePath, JSON.stringify(msg));
+      atomicWriteFileSync(messagePath, JSON.stringify(msg));
       mirrorClient(String(input.guid), (n) => {
         ((n.textData ??= {}) as Record<string, unknown>).characters = after;
       });
@@ -125,7 +126,7 @@ export async function applyTool(
       } else {
         ((entry.textData ??= {}) as Record<string, unknown>).characters = String(input.value);
       }
-      writeFileSync(messagePath, JSON.stringify(msg));
+      atomicWriteFileSync(messagePath, JSON.stringify(msg));
       mirrorClient(String(input.instanceGuid), (n) => {
         const m = (n._instanceOverrides ??= {}) as Record<string, string>;
         m[String(input.masterTextGuid)] = String(input.value);
@@ -148,7 +149,7 @@ export async function applyTool(
       const newX = Number(input.x);
       const newY = Number(input.y);
       t.m02 = newX; t.m12 = newY;
-      writeFileSync(messagePath, JSON.stringify(msg));
+      atomicWriteFileSync(messagePath, JSON.stringify(msg));
       mirrorClient(String(input.guid), (n) => {
         const t2 = (n.transform ??= {}) as Record<string, number>;
         t2.m02 = newX; t2.m12 = newY;
@@ -166,7 +167,7 @@ export async function applyTool(
       const newW = Math.max(1, Number(input.w));
       const newH = Math.max(1, Number(input.h));
       node.size = { x: newW, y: newH };
-      writeFileSync(messagePath, JSON.stringify(msg));
+      atomicWriteFileSync(messagePath, JSON.stringify(msg));
       mirrorClient(String(input.guid), (n) => {
         n.size = { x: newW, y: newH };
       });
@@ -185,7 +186,7 @@ export async function applyTool(
       first.color = { r: Number(input.r), g: Number(input.g), b: Number(input.b), a: Number(input.a) };
       fps[0] = first;
       node.fillPaints = fps;
-      writeFileSync(messagePath, JSON.stringify(msg));
+      atomicWriteFileSync(messagePath, JSON.stringify(msg));
       mirrorClient(String(input.guid), (n) => {
         const fps2 = (n.fillPaints as Array<Record<string, unknown>> | undefined) ?? [];
         const f0 = fps2[0] ?? { type: 'SOLID', visible: true, opacity: 1 };
@@ -204,7 +205,7 @@ export async function applyTool(
       const before = node.cornerRadius;
       const r = Math.max(0, Number(input.value));
       node.cornerRadius = r;
-      writeFileSync(messagePath, JSON.stringify(msg));
+      atomicWriteFileSync(messagePath, JSON.stringify(msg));
       mirrorClient(String(input.guid), (n) => {
         n.cornerRadius = r;
       });
@@ -256,7 +257,7 @@ export async function applyTool(
           default: throw new Error(`align_nodes: unknown axis ${axis}`);
         }
       }
-      writeFileSync(messagePath, JSON.stringify(msg));
+      atomicWriteFileSync(messagePath, JSON.stringify(msg));
       const patches: PatchPair[] = [];
       const isHorizontal = axis === 'left' || axis === 'center' || axis === 'right';
       for (const t of targets) {
@@ -367,7 +368,7 @@ export async function applyTool(
       }
 
       msg.nodeChanges = [...(msg.nodeChanges ?? []), ...cloned];
-      writeFileSync(messagePath, JSON.stringify(msg));
+      atomicWriteFileSync(messagePath, JSON.stringify(msg));
 
       // documentJson: re-derive the whole client tree from the new message.
       // Wholesale rebuild costs a tree walk but is the only way to keep the
@@ -484,7 +485,7 @@ export async function applyTool(
       }
 
       msg.nodeChanges = [...(msg.nodeChanges ?? []), groupNode];
-      writeFileSync(messagePath, JSON.stringify(msg));
+      atomicWriteFileSync(messagePath, JSON.stringify(msg));
       s.documentJson = rebuildDocumentFromMessage(JSON.stringify(msg));
 
       recordChatEdit('group', [
@@ -572,7 +573,7 @@ export async function applyTool(
         if (!g) return true;
         return `${g.sessionID}:${g.localID}` !== groupKey;
       });
-      writeFileSync(messagePath, JSON.stringify(msg));
+      atomicWriteFileSync(messagePath, JSON.stringify(msg));
       s.documentJson = rebuildDocumentFromMessage(JSON.stringify(msg));
 
       recordChatEdit('ungroup', [
