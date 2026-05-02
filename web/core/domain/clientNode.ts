@@ -81,8 +81,9 @@ export function toClientNode(
         if (texts.length > 0) out._componentTexts = texts;
 
         const textOverrides = collectTextOverridesFromInstance(sd?.symbolOverrides);
+        const fillOverrides = collectFillOverridesFromInstance(sd?.symbolOverrides);
         const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, 0),
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, 0),
         );
         if (expanded.length > 0) out._renderChildren = expanded;
       }
@@ -102,9 +103,35 @@ export function toClientNode(
 }
 
 /**
- * Pull text overrides out of an INSTANCE's symbolOverrides[]. Each override
- * targets a master text by its single-step guidPath. Returns a map of
- * "sess:local" → override-text, keyed by the master text node's guidStr.
+ * Convert a guidPath { guids: [...] } into a slash-joined pathKey, e.g.
+ *   [{sess:11, local:524}, {sess:11, local:506}] → "11:524/11:506"
+ *
+ * Returns null if any guid is malformed. Single-step paths come out as a
+ * plain "sess:local" string (no slash) so they remain compatible with
+ * single-step lookups in this same Map.
+ *
+ * Spec: docs/specs/web-instance-render-overrides.spec.md §3.1 I-C1.
+ */
+function pathKeyFromGuids(
+  guids: Array<{ sessionID?: number; localID?: number }> | undefined,
+): string | null {
+  if (!Array.isArray(guids) || guids.length === 0) return null;
+  const parts: string[] = [];
+  for (const g of guids) {
+    if (typeof g?.sessionID !== 'number' || typeof g?.localID !== 'number') return null;
+    parts.push(`${g.sessionID}:${g.localID}`);
+  }
+  return parts.join('/');
+}
+
+/**
+ * Pull text overrides out of an INSTANCE's symbolOverrides[]. Returns a
+ * Map<pathKey, string> where pathKey is the slash-joined full guidPath
+ * (e.g. "11:524/11:506"). Multi-step paths are required for files like
+ * `메타리치 화면 UI Design.fig` where one master is instantiated multiple
+ * times under a parent and each instance overrides the same descendant
+ * TEXT to a different value — single-step keys would collide on the
+ * shared last guid.
  */
 export function collectTextOverridesFromInstance(
   overrides: Array<Record<string, unknown>> | undefined,
@@ -115,12 +142,58 @@ export function collectTextOverridesFromInstance(
     const td = o.textData as { characters?: string } | undefined;
     if (typeof td?.characters !== 'string') continue;
     const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
-    if (!Array.isArray(guids) || guids.length === 0) continue;
-    const last = guids[guids.length - 1]!;
-    if (typeof last.sessionID !== 'number' || typeof last.localID !== 'number') continue;
-    m.set(`${last.sessionID}:${last.localID}`, td.characters);
+    const key = pathKeyFromGuids(guids);
+    if (key === null) continue;
+    m.set(key, td.characters);
   }
   return m;
+}
+
+/**
+ * Pull fillPaints overrides out of an INSTANCE's symbolOverrides[]. Same
+ * pathKey scheme as text overrides — see `collectTextOverridesFromInstance`
+ * for the rationale on multi-step keys.
+ *
+ * Spec: docs/specs/web-instance-render-overrides.spec.md §3.1
+ */
+export function collectFillOverridesFromInstance(
+  overrides: Array<Record<string, unknown>> | undefined,
+): Map<string, unknown[]> {
+  const m = new Map<string, unknown[]>();
+  if (!Array.isArray(overrides)) return m;
+  for (const o of overrides) {
+    const fps = o.fillPaints;
+    if (!Array.isArray(fps)) continue;
+    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+    const key = pathKeyFromGuids(guids);
+    if (key === null) continue;
+    m.set(key, fps);
+  }
+  return m;
+}
+
+/**
+ * Merge a nested INSTANCE's own override map into the outer overrides,
+ * prefixing each inner key with the outer path so it matches against the
+ * deeper visit path. The outer overrides remain in place (their full paths
+ * may target descendants of THIS inner instance via I-P5). Returns a new
+ * Map; inputs are not mutated.
+ *
+ * Spec: docs/specs/web-instance-render-overrides.spec.md §3.2 I-P5.
+ */
+function mergeOverridesForNested<V>(
+  outer: Map<string, V>,
+  inner: Map<string, V>,
+  pathFromOuter: string[],
+): Map<string, V> {
+  if (inner.size === 0) return outer;
+  const out = new Map(outer);
+  const prefix = pathFromOuter.join('/');
+  for (const [innerKey, innerVal] of inner) {
+    const merged = prefix.length > 0 ? `${prefix}/${innerKey}` : innerKey;
+    out.set(merged, innerVal);
+  }
+  return out;
 }
 
 /**
@@ -138,11 +211,18 @@ export function toClientChildForRender(
   blobs: Array<{ bytes: Uint8Array }>,
   symbolIndex: Map<string, TreeNode>,
   textOverrides: Map<string, string>,
+  fillOverrides: Map<string, unknown[]>,
   depth: number,
+  pathFromOuter: string[] = [],
 ): DocumentNode {
   if (depth > 8) {
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
   }
+  // Path tracking: append THIS node's guidStr so descendants see their
+  // full chain from the outer instance master root. Override Maps are
+  // keyed by the same join scheme. Spec §3.2 I-P3 / I-P4.
+  const currentPath = n.guidStr ? [...pathFromOuter, n.guidStr] : pathFromOuter;
+  const currentKey = currentPath.join('/');
   const data = (n.data ?? {}) as Record<string, unknown>;
   const out: DocumentNode = {
     id: n.guidStr,
@@ -150,7 +230,9 @@ export function toClientChildForRender(
     type: n.type,
     name: n.name,
     _isInstanceChild: true,
-    children: n.children.map((c) => toClientChildForRender(c, blobs, symbolIndex, textOverrides, depth + 1)),
+    children: n.children.map((c) =>
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, depth + 1, currentPath),
+    ),
   };
   if (VECTOR_TYPES.has(n.type)) {
     const vd = data.vectorData as { vectorNetworkBlob?: number } | undefined;
@@ -163,17 +245,29 @@ export function toClientChildForRender(
     }
   }
   if (n.type === 'TEXT') {
-    const ov = textOverrides.get(n.guidStr);
+    const ov = textOverrides.get(currentKey);
     if (typeof ov === 'string') out._renderTextOverride = ov;
   }
+  // Nested INSTANCE: merge outer overrides (already path-keyed against the
+  // outer master's tree, may contain entries that target descendants of
+  // THIS inner instance via multi-step paths) with the inner instance's
+  // OWN overrides (single-step keys, prefixed with currentPath so they
+  // match in the same path-join scheme). Spec §3.2 I-P5.
   if (n.type === 'INSTANCE' && n.children.length === 0) {
-    const sd = data.symbolData as { symbolID?: { sessionID?: number; localID?: number } } | undefined;
+    const sd = data.symbolData as {
+      symbolID?: { sessionID?: number; localID?: number };
+      symbolOverrides?: Array<Record<string, unknown>>;
+    } | undefined;
     const sid = sd?.symbolID;
     if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
       const master = symbolIndex.get(`${sid.sessionID}:${sid.localID}`);
       if (master) {
+        const innerText = collectTextOverridesFromInstance(sd?.symbolOverrides);
+        const innerFill = collectFillOverridesFromInstance(sd?.symbolOverrides);
+        const mergedText = mergeOverridesForNested(textOverrides, innerText, currentPath);
+        const mergedFill = mergeOverridesForNested(fillOverrides, innerFill, currentPath);
         out._renderChildren = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, depth + 1),
+          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, depth + 1, currentPath),
         );
       }
     }
@@ -187,6 +281,9 @@ export function toClientChildForRender(
     if (k === 'vectorData') continue;
     out[k] = v;
   }
+  // Apply fillPaints override AFTER the data spread so it wins. Spec §3.2 I-P3.
+  const fillOv = fillOverrides.get(currentKey);
+  if (fillOv) out.fillPaints = fillOv;
   return out;
 }
 
