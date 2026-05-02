@@ -36,6 +36,12 @@ import {
   cullChildrenByViewport,
   viewportInStageCoords,
 } from './canvas-cull';
+import {
+  HoverTooltip,
+  type HoverBbox,
+  type HoverInfo,
+} from './components/canvas/HoverTooltip';
+import { countVariantChildren } from './lib/variants';
 
 // ─── Drag-snapshot plumbing ──────────────────────────────────────────────
 //
@@ -50,6 +56,21 @@ interface DragSnapshotApi {
   get(guid: string): { x: number; y: number } | null;
 }
 const DragSnapshotContext = createContext<DragSnapshotApi | null>(null);
+
+/**
+ * Hover plumbing — NodeShape publishes mouse-enter/leave to the Canvas via
+ * this context, and Canvas owns the single hovered guid + bbox snapshot.
+ * Lives next to DragSnapshotContext so it gets the same memoization
+ * properties (stable identity → no NodeShape re-renders just because hover
+ * changed).
+ *
+ * Spec: docs/specs/web-canvas-hover-tooltip.spec.md §S1–S5
+ */
+interface HoverApi {
+  enter(e: Konva.KonvaEventObject<MouseEvent>, node: any): void;
+  leave(guid: string): void;
+}
+const HoverContext = createContext<HoverApi | null>(null);
 
 interface CanvasProps {
   page: any;
@@ -169,6 +190,7 @@ function NodeShapeImpl({
   const guid = guidStr(node.guid);
   const isSelected = useIsSelected(guid);
   const dragApi = useContext(DragSnapshotContext);
+  const hoverApi = useContext(HoverContext);
 
   if (node.visible === false) return null;
   const x = node.transform?.m02 ?? 0;
@@ -178,10 +200,28 @@ function NodeShapeImpl({
   const stroke = strokeOf(node);
   const cornerR = node.cornerRadius ?? 0;
 
+  // Hover: skip for instance master expansions so hover bubbles up to the
+  // outer INSTANCE (spec I-S5). e.cancelBubble in onMouseEnter ensures the
+  // deepest LISTENING node wins when nested groups are stacked. Also skip
+  // when this node has no guid — there's nothing to track.
+  const hoverEnabled = !node._isInstanceChild && guid != null;
+  const onMouseEnter = hoverEnabled
+    ? (e: Konva.KonvaEventObject<MouseEvent>): void => {
+        e.cancelBubble = true;
+        hoverApi?.enter(e, node);
+      }
+    : undefined;
+  const onMouseLeave = hoverEnabled
+    ? (): void => { hoverApi?.leave(guid as string); }
+    : undefined;
+
   const onDragStart = (): void => {
     // Build the snapshot lazily: cheap when nobody drags, correct because
     // it sees the latest selection + page state at the moment dragging begins.
     dragApi?.prepare();
+    // Hide hover during drag (spec I-S3) — Konva suppresses mouseEnter while
+    // dragging so we won't re-show until drag ends.
+    if (hoverEnabled) hoverApi?.leave(guid as string);
   };
 
   // Drag-end → compute delta from initial position, emit to onDragGroup
@@ -236,6 +276,8 @@ function NodeShapeImpl({
         onTap={onShapeClick}
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
+        onMouseEnter={onMouseEnter}
+        onMouseLeave={onMouseLeave}
         listening
       />
     );
@@ -252,6 +294,8 @@ function NodeShapeImpl({
         onTap={onShapeClick}
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
+        onMouseEnter={onMouseEnter}
+        onMouseLeave={onMouseLeave}
       >
         <Path
           data={node._path}
@@ -287,6 +331,8 @@ function NodeShapeImpl({
       onTap={onShapeClick}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
     >
       <Rect
         x={0}
@@ -643,6 +689,69 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
   // Single-selection bounds (used for resize handles)
   const singleBounds = selectedGuid ? selectionBoundsList[0]?.bounds ?? null : null;
 
+  // ── Hover state (spec docs/specs/web-canvas-hover-tooltip.spec.md) ──
+  // designBbox is in stage-local UNTRANSFORMED coords (i.e., design space) —
+  // stable under pan/zoom. We map it to viewport pixels on each render
+  // using the current offset/scale so the tooltip stays glued to the node.
+  const [hover, setHover] = useState<{
+    guid: string;
+    info: HoverInfo;
+    designBbox: { x: number; y: number; width: number; height: number };
+  } | null>(null);
+
+  const hoverApi = useMemo<HoverApi>(() => ({
+    enter(e, node) {
+      const stage = e.target.getStage();
+      if (!stage) return;
+      // {relativeTo: stage} → bbox in stage's local (design) coords;
+      // independent of stage's own scale/translate.
+      const rect = e.target.getClientRect({ relativeTo: stage });
+      const g = guidStr(node.guid);
+      if (!g) return;
+      // Variant container detection — covers both newer COMPONENT_SET and
+      // legacy FRAME-with-variant-named-SYMBOL-children shapes (spec
+      // I-T5.1). 0 ⇒ no variants segment in the tooltip.
+      const vc = countVariantChildren(node);
+      const variantCount: number | undefined = vc > 0 ? vc : undefined;
+      setHover({
+        guid: g,
+        info: {
+          name: node.name,
+          type: node.type,
+          w: node.size?.x != null ? Math.round(node.size.x) : undefined,
+          h: node.size?.y != null ? Math.round(node.size.y) : undefined,
+          variantCount,
+        },
+        designBbox: rect,
+      });
+    },
+    leave(guid) {
+      // Only clear if the leaving node is the one we currently show — a
+      // mouse zip across two adjacent shapes fires `leave(A)` then
+      // `enter(B)`, but the order can flip. This guard prevents B's
+      // tooltip from being killed by A's late `leave`.
+      setHover((cur) => (cur?.guid === guid ? null : cur));
+    },
+  }), []);
+
+  // Map design-space bbox → browser-viewport pixels (HoverTooltip uses
+  // `position: fixed`). Recomputed each render so pan/zoom never desyncs.
+  const tooltipBbox = useMemo<HoverBbox | null>(() => {
+    if (!hover) return null;
+    const el = containerRef.current;
+    if (!el) return null;
+    const sb = el.getBoundingClientRect();
+    const { x: dx, y: dy, width: dw, height: dh } = hover.designBbox;
+    const left = sb.left + dx * scale + offset.x;
+    const top = sb.top + dy * scale + offset.y;
+    return {
+      left,
+      top,
+      right: left + dw * scale,
+      bottom: top + dh * scale,
+    };
+  }, [hover, scale, offset, size]);
+
   // Stable callback so memoized NodeShapes don't re-render on every Canvas
   // state tick (size / scale / offset / spaceHeld). Reads selection from the
   // ref so the closure doesn't need to refresh.
@@ -689,6 +798,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
       }}
       onMouseLeave={() => {
         panRef.current.active = false;
+        setHover(null); // I-S4
       }}
     >
       <Stage
@@ -708,18 +818,20 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
         >
           <SelectionContext.Provider value={selectionStore}>
             <DragSnapshotContext.Provider value={dragSnapshotApi}>
-              {visibleChildren.map((c) => (
-                // Key by guid so React reuses the same NodeShape instance
-                // when culling shifts the array — avoids unmount/remount of
-                // memoized subtrees on pan.
-                <NodeShape
-                  key={(c.guid as { sessionID: number; localID: number }).sessionID + ':' + (c.guid as { sessionID: number; localID: number }).localID}
-                  node={c}
-                  onSelect={onSelect}
-                  onDragGroup={onDragGroup}
-                  sessionId={sessionId}
-                />
-              ))}
+              <HoverContext.Provider value={hoverApi}>
+                {visibleChildren.map((c) => (
+                  // Key by guid so React reuses the same NodeShape instance
+                  // when culling shifts the array — avoids unmount/remount of
+                  // memoized subtrees on pan.
+                  <NodeShape
+                    key={(c.guid as { sessionID: number; localID: number }).sessionID + ':' + (c.guid as { sessionID: number; localID: number }).localID}
+                    node={c}
+                    onSelect={onSelect}
+                    onDragGroup={onDragGroup}
+                    sessionId={sessionId}
+                  />
+                ))}
+              </HoverContext.Provider>
             </DragSnapshotContext.Provider>
           </SelectionContext.Provider>
         </Layer>
@@ -748,6 +860,12 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
           </Layer>
         )}
       </Stage>
+      {/* Hover tooltip — DOM overlay, position:fixed against viewport.
+          Hidden during drag (spec I-S3) and when the mouse leaves the
+          container (I-S4). */}
+      {hover && tooltipBbox && (
+        <HoverTooltip info={hover.info} bbox={tooltipBbox} />
+      )}
       <ZoomBadge scale={scale} />
       {spaceHeld && (
         <div
