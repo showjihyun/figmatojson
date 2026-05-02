@@ -50,6 +50,8 @@ import { applyStrokeAlign } from './lib/strokeAlign';
 import { shadowFromEffects } from './lib/shadow';
 import { rotationDegrees } from './lib/transform';
 import { konvaLineCap, konvaLineJoin } from './lib/strokeCapJoin';
+import { firstStopRgba, gradientFromPaint, type KonvaGradient } from './lib/gradient';
+import { pickTopPaint } from './lib/paint';
 
 // ─── Drag-snapshot plumbing ──────────────────────────────────────────────
 //
@@ -329,6 +331,9 @@ function NodeShapeImpl({
     const vectorShadow = shadowFromEffects(node.effects);
     const lineCap = konvaLineCap(node.strokeCap);
     const lineJoin = konvaLineJoin(node.strokeJoin);
+    const vectorDash = Array.isArray(node.dashPattern) && node.dashPattern.length > 0
+      ? (node.dashPattern as number[])
+      : undefined;
     return (
       <Group
         x={x}
@@ -348,6 +353,7 @@ function NodeShapeImpl({
           fill={pathFill}
           stroke={stroke?.color}
           strokeWidth={stroke?.width}
+          dash={vectorDash}
           lineCap={lineCap}
           lineJoin={lineJoin}
           shadowEnabled={vectorShadow != null}
@@ -362,7 +368,32 @@ function NodeShapeImpl({
     );
   }
 
-  const fill = colorOf(node);
+  // Resolve the rect's fill — last visible non-IMAGE paint wins (Figma
+  // stacks paints bottom-up, so [N-1] is the user-visible top). For
+  // SOLID we get a CSS color string; for LINEAR/RADIAL gradient we get
+  // Konva fill props; angular/diamond falls back to first-stop color.
+  // Spec web-render-fidelity-round4.spec.md §3.
+  const topPaint = pickTopPaint(node.fillPaints as Array<{ type?: string; visible?: boolean }> | undefined);
+  let fillColor: string = 'transparent';
+  let gradient: KonvaGradient | null = null;
+  if (topPaint) {
+    const t = (topPaint as { type?: string }).type;
+    if (t === 'SOLID') {
+      fillColor = colorOf(node);
+    } else if (t === 'GRADIENT_LINEAR' || t === 'GRADIENT_RADIAL') {
+      gradient = gradientFromPaint(topPaint as Parameters<typeof gradientFromPaint>[0], w, h);
+      if (!gradient) fillColor = firstStopRgba(topPaint as Parameters<typeof firstStopRgba>[0]) ?? 'transparent';
+    } else if (t === 'GRADIENT_ANGULAR' || t === 'GRADIENT_DIAMOND') {
+      // Konva doesn't render these — fall back to the first stop color.
+      fillColor = firstStopRgba(topPaint as Parameters<typeof firstStopRgba>[0]) ?? 'transparent';
+    }
+  }
+  // Per-stroke dash array (Figma stores [dash, gap, ...]); pass through
+  // to Konva's `dash` prop on stroke-bearing elements only.
+  const dash = Array.isArray(node.dashPattern) && node.dashPattern.length > 0
+    ? (node.dashPattern as number[])
+    : undefined;
+
   // Children to render: native children (FRAME etc.) OR an INSTANCE's
   // expanded master tree (`_renderChildren`). The latter lets buttons /
   // icons / labels actually appear inside an instance — without it,
@@ -458,9 +489,18 @@ function NodeShapeImpl({
         y={rectDims.y}
         width={rectDims.w}
         height={rectDims.h}
-        fill={fill}
+        fill={gradient ? undefined : fillColor}
+        fillLinearGradientStartPoint={gradient?.kind === 'linear' ? gradient.fillLinearGradientStartPoint : undefined}
+        fillLinearGradientEndPoint={gradient?.kind === 'linear' ? gradient.fillLinearGradientEndPoint : undefined}
+        fillLinearGradientColorStops={gradient?.kind === 'linear' ? gradient.fillLinearGradientColorStops : undefined}
+        fillRadialGradientStartPoint={gradient?.kind === 'radial' ? gradient.fillRadialGradientStartPoint : undefined}
+        fillRadialGradientEndPoint={gradient?.kind === 'radial' ? gradient.fillRadialGradientEndPoint : undefined}
+        fillRadialGradientStartRadius={gradient?.kind === 'radial' ? gradient.fillRadialGradientStartRadius : undefined}
+        fillRadialGradientEndRadius={gradient?.kind === 'radial' ? gradient.fillRadialGradientEndRadius : undefined}
+        fillRadialGradientColorStops={gradient?.kind === 'radial' ? gradient.fillRadialGradientColorStops : undefined}
         stroke={wantPerSide ? undefined : stroke?.color}
         strokeWidth={wantPerSide ? undefined : stroke?.width}
+        dash={wantPerSide ? undefined : dash}
         lineJoin={lineJoin}
         cornerRadius={rectDims.cornerRadius}
         shadowEnabled={shadow != null}
@@ -472,16 +512,16 @@ function NodeShapeImpl({
         listening
       />
       {wantPerSide && bt && bt > 0 && (
-        <Line points={[0, 0, w, 0]} stroke={stroke!.color} strokeWidth={bt} lineCap={lineCap} listening={false} />
+        <Line points={[0, 0, w, 0]} stroke={stroke!.color} strokeWidth={bt} lineCap={lineCap} dash={dash} listening={false} />
       )}
       {wantPerSide && br && br > 0 && (
-        <Line points={[w, 0, w, h]} stroke={stroke!.color} strokeWidth={br} lineCap={lineCap} listening={false} />
+        <Line points={[w, 0, w, h]} stroke={stroke!.color} strokeWidth={br} lineCap={lineCap} dash={dash} listening={false} />
       )}
       {wantPerSide && bb && bb > 0 && (
-        <Line points={[0, h, w, h]} stroke={stroke!.color} strokeWidth={bb} lineCap={lineCap} listening={false} />
+        <Line points={[0, h, w, h]} stroke={stroke!.color} strokeWidth={bb} lineCap={lineCap} dash={dash} listening={false} />
       )}
       {wantPerSide && bl && bl > 0 && (
-        <Line points={[0, 0, 0, h]} stroke={stroke!.color} strokeWidth={bl} lineCap={lineCap} listening={false} />
+        <Line points={[0, 0, 0, h]} stroke={stroke!.color} strokeWidth={bl} lineCap={lineCap} dash={dash} listening={false} />
       )}
       {imgSrc && (
         <ImageFill src={imgSrc} width={w} height={h} cornerRadius={cornerR} />
