@@ -36,11 +36,8 @@ import {
   cullChildrenByViewport,
   viewportInStageCoords,
 } from './canvas-cull';
-import {
-  HoverTooltip,
-  type HoverBbox,
-  type HoverInfo,
-} from './components/canvas/HoverTooltip';
+import { type HoverInfo } from './components/canvas/HoverTooltip';
+import { HoverOverlay } from './components/canvas/HoverOverlay';
 import { countVariantChildren } from './lib/variants';
 import {
   konvaFontStyle,
@@ -849,23 +846,9 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
     },
   }), []);
 
-  // Map design-space bbox → browser-viewport pixels (HoverTooltip uses
-  // `position: fixed`). Recomputed each render so pan/zoom never desyncs.
-  const tooltipBbox = useMemo<HoverBbox | null>(() => {
-    if (!hover) return null;
-    const el = containerRef.current;
-    if (!el) return null;
-    const sb = el.getBoundingClientRect();
-    const { x: dx, y: dy, width: dw, height: dh } = hover.designBbox;
-    const left = sb.left + dx * scale + offset.x;
-    const top = sb.top + dy * scale + offset.y;
-    return {
-      left,
-      top,
-      right: left + dw * scale,
-      bottom: top + dh * scale,
-    };
-  }, [hover, scale, offset, size]);
+  // (v2) hover overlay is now Konva-rendered inside the Stage's Layer,
+  // so we no longer convert design-space bbox to browser-viewport
+  // pixels here — Konva applies the Stage transform automatically.
 
   // Stable callback so memoized NodeShapes don't re-render on every Canvas
   // state tick (size / scale / offset / spaceHeld). Reads selection from the
@@ -950,7 +933,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
             </DragSnapshotContext.Provider>
           </SelectionContext.Provider>
         </Layer>
-        {selectionBoundsList.length > 0 && (
+        {(selectionBoundsList.length > 0 || hover) && (
           <Layer listening={!spaceHeld}>
             {/* Resize handles only when EXACTLY one node is selected — multi-
                 resize would need per-node directional logic; for the PoC we
@@ -972,15 +955,25 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
                 onResizeMany={onResizeMany}
               />
             )}
+            {/* Hover overlay — Figma-style 1px stroke + name pill at top-
+                left of the hovered node. Suppressed when that node is
+                already selected (the selection overlay covers it). Spec
+                docs/specs/web-canvas-hover-tooltip.spec.md (v2). */}
+            {hover && !selectedGuids.has(hover.guid) && (
+              <HoverOverlay
+                bbox={{
+                  x: hover.designBbox.x,
+                  y: hover.designBbox.y,
+                  width: hover.designBbox.width,
+                  height: hover.designBbox.height,
+                }}
+                name={hover.info.name ?? ''}
+                scale={scale}
+              />
+            )}
           </Layer>
         )}
       </Stage>
-      {/* Hover tooltip — DOM overlay, position:fixed against viewport.
-          Hidden during drag (spec I-S3) and when the mouse leaves the
-          container (I-S4). */}
-      {hover && tooltipBbox && (
-        <HoverTooltip info={hover.info} bbox={tooltipBbox} />
-      )}
       <ZoomBadge scale={scale} />
       {spaceHeld && (
         <div
