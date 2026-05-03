@@ -781,6 +781,69 @@ describe('applyInstanceReflow (spec web-instance-autolayout-reflow §2 / §3)', 
     expect((out[1] as { transform: { m12: number } }).transform.m12).toBe(20);
   });
 
+  it('T-min-1: VERTICAL MIN-aligned master with some visible-filtered children — re-pack visible from anchor (Round 19)', () => {
+    // Source: WEB lnb sidemenu — master has 9 items; outer override hides 5,
+    // remaining 4 should pack from the master's first child y (anchor=4) with
+    // the master's spacing (1). Without this round-19 fix, the kept items at
+    // their master y positions overflow the section's bbox and get clipped.
+    const c1 = child({ sx: 250, sy: 48, tx: 0, ty: 4, visible: true });   // anchor — first master child
+    const c2 = child({ sx: 250, sy: 48, tx: 0, ty: 53, visible: false }); // hidden by override
+    const c3 = child({ sx: 250, sy: 48, tx: 0, ty: 102, visible: true });
+    const c4 = child({ sx: 250, sy: 48, tx: 0, ty: 151, visible: false });
+    const c5 = child({ sx: 250, sy: 48, tx: 0, ty: 200, visible: true });
+    const masterData = { stackMode: 'VERTICAL', stackSpacing: 1 }; // primary undefined = MIN
+    const out = applyInstanceReflow([c1, c2, c3, c4, c5], masterData, { x: 250, y: 247 }, { x: 250, y: 247 });
+    // Expected: c1 at y=4 (anchor), c3 at y=53 (4+48+1), c5 at y=102 (53+48+1).
+    expect((out[0] as { transform: { m12: number } }).transform.m12).toBeCloseTo(4);
+    expect((out[2] as { transform: { m12: number } }).transform.m12).toBeCloseTo(53);
+    expect((out[4] as { transform: { m12: number } }).transform.m12).toBeCloseTo(102);
+    // Hidden children untouched.
+    expect((out[1] as { transform: { m12: number } }).transform.m12).toBe(53);
+    expect((out[3] as { transform: { m12: number } }).transform.m12).toBe(151);
+  });
+
+  it('T-min-2: HORIZONTAL MIN-aligned with hidden children — primary axis = x', () => {
+    const a = child({ sx: 60, sy: 30, tx: 8, ty: 0, visible: true });   // anchor
+    const b = child({ sx: 60, sy: 30, tx: 72, ty: 0, visible: false }); // hidden
+    const c = child({ sx: 60, sy: 30, tx: 136, ty: 0, visible: true });
+    const masterData = { stackMode: 'HORIZONTAL', stackSpacing: 4 };
+    const out = applyInstanceReflow([a, b, c], masterData, { x: 200, y: 30 }, { x: 200, y: 30 });
+    expect((out[0] as { transform: { m02: number } }).transform.m02).toBeCloseTo(8);
+    expect((out[2] as { transform: { m02: number } }).transform.m02).toBeCloseTo(72); // 8 + 60 + 4
+  });
+
+  it('T-min-3: all children visible — MIN reflow does NOT fire (master positions kept)', () => {
+    const a = child({ sx: 60, sy: 30, tx: 0, ty: 4, visible: true });
+    const b = child({ sx: 60, sy: 30, tx: 0, ty: 38, visible: true });
+    const masterData = { stackMode: 'VERTICAL', stackSpacing: 4 };
+    const out = applyInstanceReflow([a, b], masterData, { x: 60, y: 100 }, { x: 60, y: 100 });
+    // Both transforms unchanged (master positions kept).
+    expect((out[0] as { transform: { m12: number } }).transform.m12).toBe(4);
+    expect((out[1] as { transform: { m12: number } }).transform.m12).toBe(38);
+  });
+
+  it('T-min-4: explicit MIN alignment (not undefined) also fires', () => {
+    const a = child({ sx: 60, sy: 30, tx: 0, ty: 4, visible: true });
+    const b = child({ sx: 60, sy: 30, tx: 0, ty: 100, visible: false });
+    const c = child({ sx: 60, sy: 30, tx: 0, ty: 150, visible: true });
+    const masterData = { stackMode: 'VERTICAL', stackSpacing: 1, stackPrimaryAlignItems: 'MIN' };
+    const out = applyInstanceReflow([a, b, c], masterData, { x: 60, y: 200 }, { x: 60, y: 200 });
+    expect((out[0] as { transform: { m12: number } }).transform.m12).toBeCloseTo(4);
+    expect((out[2] as { transform: { m12: number } }).transform.m12).toBeCloseTo(35); // 4 + 30 + 1
+  });
+
+  it('T-min-5: anchor preserved from master first child even when hidden', () => {
+    // First child hidden but its master y (4) anchors the pack.
+    const a = child({ sx: 60, sy: 30, tx: 0, ty: 4, visible: false });
+    const b = child({ sx: 60, sy: 30, tx: 0, ty: 35, visible: true });
+    const c = child({ sx: 60, sy: 30, tx: 0, ty: 100, visible: true });
+    const masterData = { stackMode: 'VERTICAL', stackSpacing: 1 };
+    const out = applyInstanceReflow([a, b, c], masterData, { x: 60, y: 200 }, { x: 60, y: 200 });
+    // Anchor = 4 (from hidden first child); b packs at 4, c packs at 35.
+    expect((out[1] as { transform: { m12: number } }).transform.m12).toBeCloseTo(4);
+    expect((out[2] as { transform: { m12: number } }).transform.m12).toBeCloseTo(35);
+  });
+
   it('T-overlap-5: VERTICAL overlap with intervening invisible-but-overlap-positioned child', () => {
     // a at y=0 (visible), b at y=0 (hidden), c at y=0 (visible).
     // After Phase B: a stays at 0, c moves down to size+spacing (b doesn't

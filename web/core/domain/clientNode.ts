@@ -254,6 +254,45 @@ export function applyInstanceReflow(
     }
   }
 
+  // Spec §3.7 (round 19): MIN/start-aligned reflow with visibility filtering.
+  // Fires when master uses MIN/undefined primary alignment (Figma's default
+  // "pack from start") AND some children are visibility-filtered. Re-pack
+  // visible children from the master's first-child position with spacing.
+  //
+  // Source case: WEB lnb-400_4266 sidemenu — master 23:1635 has 9 items;
+  // outer Dropdown override hides 5; remaining 4 should flow into a
+  // packed sequence (y=4, 53, 102, 151) instead of staying at master
+  // positions (y=102, 298, 347, 396). Without this, 3 items overflow the
+  // section bbox and get clipped by round-12 INSTANCE auto-clip.
+  const isMinAlign = primaryAlign === undefined || primaryAlign === 'MIN';
+  const someHidden = visibleSized.length < expanded.length;
+  if (isMinAlign && someHidden) {
+    // Anchor: master's first child position, regardless of visibility
+    // (digital padding the designer hard-coded). Spec §3.7 I-O7.
+    const firstChild = expanded[0] as DocumentNode & {
+      transform?: { m02?: number; m12?: number };
+    };
+    const startPrimary = isHorizontal
+      ? (firstChild.transform?.m02 ?? 0)
+      : (firstChild.transform?.m12 ?? 0);
+    let cursor = startPrimary;
+    const out = expanded.slice();
+    for (const v of visibleSized) {
+      const c = out[v.idx] as DocumentNode & {
+        transform?: { m00?: number; m01?: number; m02?: number; m10?: number; m11?: number; m12?: number };
+      };
+      const childPrimary = primaryAxis === 'x' ? v.w : v.h;
+      const newPrimary = f32(cursor);
+      const baseT = c.transform ?? { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 };
+      const newTransform = isHorizontal
+        ? { ...baseT, m02: newPrimary }
+        : { ...baseT, m12: newPrimary };
+      out[v.idx] = { ...c, transform: newTransform };
+      cursor += childPrimary + spacing;
+    }
+    return out;
+  }
+
   // Spec §3.6 (round 15 Phase B): overlap-group reflow.
   // Alignment-independent — fires whenever 2+ visible children share the
   // same master primary-axis position. The first child of an overlap
