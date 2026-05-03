@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  applyInstanceReflow,
   collectFillOverridesFromInstance,
   collectPropAssignmentsFromInstance,
   collectTextOverridesFromInstance,
@@ -625,3 +626,184 @@ describe('toClientChildForRender — component-property visibility binding (spec
     expect(childShown.visible).not.toBe(false);
   });
 });
+
+describe('applyInstanceReflow (spec web-instance-autolayout-reflow §2 / §3)', () => {
+  // Helper to fabricate a child DocumentNode-shaped object the way
+  // toClientChildForRender would produce. Tests only care about size +
+  // transform + visible — the rest of the DocumentNode shape is irrelevant.
+  function child(opts: {
+    sx: number; sy: number;
+    tx?: number; ty?: number;
+    visible?: boolean;
+    type?: string;
+  }): Record<string, unknown> {
+    return {
+      type: opts.type ?? 'TEXT',
+      size: { x: opts.sx, y: opts.sy },
+      transform: opts.tx !== undefined || opts.ty !== undefined
+        ? { m00: 1, m01: 0, m02: opts.tx ?? 0, m10: 0, m11: 1, m12: opts.ty ?? 0 }
+        : undefined,
+      ...(opts.visible === false ? { visible: false } : {}),
+    };
+  }
+
+  it('T-1: HORIZONTAL CENTER master with 1 visible TEXT (icon hidden) — text recenters in shrunk INSTANCE', () => {
+    // Master: 88×32 HORIZONTAL CENTER. Children: TEXT (size 40×13 at x=36)
+    // + INSTANCE icon (size 20×20 at x=12) — but icon is hidden by visibility.
+    // INSTANCE size override: 48×32. After reflow, visible TEXT should
+    // sit centered in 48 → tx = (48 - 40) / 2 = 4. Counter axis: y =
+    // (32 - 13) / 2 = 9.5.
+    const text = child({ sx: 40, sy: 13, tx: 36, ty: 9.5, visible: true });
+    const icon = child({ sx: 20, sy: 20, tx: 12, ty: 6, visible: false });
+    const masterData = {
+      stackMode: 'HORIZONTAL',
+      stackPrimaryAlignItems: 'CENTER',
+      stackCounterAlignItems: 'CENTER',
+      stackSpacing: 4,
+    };
+    const out = applyInstanceReflow([text, icon], masterData, { x: 88, y: 32 }, { x: 48, y: 32 });
+    const newText = out[0] as { transform: { m02: number; m12: number } };
+    expect(newText.transform.m02).toBeCloseTo(4);
+    expect(newText.transform.m12).toBeCloseTo(9.5);
+    // Icon (invisible) keeps master coords.
+    const newIcon = out[1] as { transform: { m02: number; m12: number } };
+    expect(newIcon.transform.m02).toBe(12);
+    expect(newIcon.transform.m12).toBe(6);
+  });
+
+  it('T-2: HORIZONTAL CENTER master with 2 visible children + INSTANCE size unchanged — no reflow', () => {
+    const a = child({ sx: 40, sy: 13, tx: 12, ty: 9.5, visible: true });
+    const b = child({ sx: 20, sy: 20, tx: 56, ty: 6, visible: true });
+    const masterData = { stackMode: 'HORIZONTAL', stackPrimaryAlignItems: 'CENTER', stackCounterAlignItems: 'CENTER', stackSpacing: 4 };
+    const out = applyInstanceReflow([a, b], masterData, { x: 88, y: 32 }, { x: 88, y: 32 });
+    expect((out[0] as { transform: { m02: number } }).transform.m02).toBe(12);
+    expect((out[1] as { transform: { m02: number } }).transform.m02).toBe(56);
+  });
+
+  it('T-3: VERTICAL CENTER master with 1 visible child — recenters on y axis when INSTANCE shrunk', () => {
+    const item = child({ sx: 40, sy: 12, tx: 0, ty: 6, visible: true });
+    const masterData = { stackMode: 'VERTICAL', stackPrimaryAlignItems: 'CENTER', stackCounterAlignItems: 'CENTER' };
+    const out = applyInstanceReflow([item], masterData, { x: 40, y: 24 }, { x: 40, y: 16 });
+    const newItem = out[0] as { transform: { m02: number; m12: number } };
+    // Primary axis (VERTICAL → y): single child centered → ty = (16-12)/2 = 2
+    expect(newItem.transform.m12).toBeCloseTo(2);
+    // Counter axis (x): width unchanged so x = (40-40)/2 = 0
+    expect(newItem.transform.m02).toBeCloseTo(0);
+  });
+
+  it('T-4: stackMode === NONE — no reflow', () => {
+    const c = child({ sx: 20, sy: 20, tx: 5, ty: 5, visible: true });
+    const masterData = { stackMode: 'NONE' };
+    const out = applyInstanceReflow([c], masterData, { x: 50, y: 50 }, { x: 30, y: 30 });
+    expect((out[0] as { transform: { m02: number } }).transform.m02).toBe(5);
+  });
+
+  it('T-5: stackPrimaryAlignItems === MIN — no reflow (v1 only handles CENTER)', () => {
+    const c = child({ sx: 20, sy: 20, tx: 5, ty: 5, visible: true });
+    const masterData = { stackMode: 'HORIZONTAL', stackPrimaryAlignItems: 'MIN', stackCounterAlignItems: 'CENTER' };
+    const out = applyInstanceReflow([c], masterData, { x: 50, y: 50 }, { x: 30, y: 30 });
+    expect((out[0] as { transform: { m02: number } }).transform.m02).toBe(5);
+  });
+
+  it('T-6: invisible children excluded from primary-sum + their transforms unchanged', () => {
+    const visible = child({ sx: 30, sy: 10, tx: 25, ty: 5, visible: true });
+    const hidden = child({ sx: 50, sy: 10, tx: 0, ty: 5, visible: false });
+    const masterData = { stackMode: 'HORIZONTAL', stackPrimaryAlignItems: 'CENTER', stackCounterAlignItems: 'CENTER' };
+    const out = applyInstanceReflow([visible, hidden], masterData, { x: 80, y: 20 }, { x: 50, y: 20 });
+    // Only visible's 30 width contributes → centered in 50 → tx = (50-30)/2 = 10
+    expect((out[0] as { transform: { m02: number } }).transform.m02).toBeCloseTo(10);
+    // Hidden child untouched.
+    expect((out[1] as { transform: { m02: number } }).transform.m02).toBe(0);
+  });
+
+  it('T-7: counter-only size change — counter recenters, primary keeps master values', () => {
+    // 2 visible children, INSTANCE primary axis unchanged but counter shrunk.
+    // Primary positions: same as master (since primary axis size unchanged).
+    // Counter (y) recenters per child.
+    const a = child({ sx: 20, sy: 20, tx: 12, ty: 6, visible: true });
+    const b = child({ sx: 20, sy: 10, tx: 36, ty: 11, visible: true });
+    const masterData = { stackMode: 'HORIZONTAL', stackPrimaryAlignItems: 'CENTER', stackCounterAlignItems: 'CENTER', stackSpacing: 4 };
+    const out = applyInstanceReflow([a, b], masterData, { x: 60, y: 32 }, { x: 60, y: 24 });
+    // Primary axis (x): size unchanged so center math gives same: total = 20+4+20 = 44, start = (60-44)/2 = 8 → a at 8, b at 32
+    expect((out[0] as { transform: { m02: number } }).transform.m02).toBeCloseTo(8);
+    expect((out[1] as { transform: { m02: number } }).transform.m02).toBeCloseTo(32);
+    // Counter (y): a centered = (24-20)/2 = 2, b centered = (24-10)/2 = 7
+    expect((out[0] as { transform: { m12: number } }).transform.m12).toBeCloseTo(2);
+    expect((out[1] as { transform: { m12: number } }).transform.m12).toBeCloseTo(7);
+  });
+
+  it('T-8: missing transform on a visible child — new transform is generated', () => {
+    const c = child({ sx: 20, sy: 20, visible: true });
+    delete (c as { transform?: unknown }).transform;
+    const masterData = { stackMode: 'HORIZONTAL', stackPrimaryAlignItems: 'CENTER', stackCounterAlignItems: 'CENTER' };
+    const out = applyInstanceReflow([c], masterData, { x: 40, y: 40 }, { x: 30, y: 30 });
+    const newC = out[0] as { transform: { m02: number; m12: number } };
+    expect(newC.transform).toBeDefined();
+    expect(newC.transform.m02).toBeCloseTo(5);
+    expect(newC.transform.m12).toBeCloseTo(5);
+  });
+
+  it('T-9 integration: alert-button-style INSTANCE — TEXT child centers in shrunk bbox via toClientNode', () => {
+    // Master: HORIZONTAL CENTER, 88×32, with TEXT "Button" + icon INSTANCE.
+    // Outer INSTANCE: size 48×32, prop assignment hides the icon, text override "삭제".
+    // Expected: resolved TEXT transform centers in 48×32 (not at master x=36).
+    const textMaster = makeNode('TEXT', 45, {
+      textData: { characters: 'Button' },
+      size: { x: 40, y: 13 },
+      transform: { m00: 1, m01: 0, m02: 36, m10: 0, m11: 1, m12: 9.5 },
+    });
+    const iconMaster = makeNode('VECTOR', 208, {
+      size: { x: 20, y: 20 },
+      transform: { m00: 1, m01: 0, m02: 12, m10: 0, m11: 1, m12: 6 },
+      visible: true,
+      componentPropRefs: [
+        { defID: { sessionID: 7, localID: 34 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    });
+    const buttonMaster = makeNode(
+      'SYMBOL',
+      44,
+      {
+        size: { x: 88, y: 32 },
+        stackMode: 'HORIZONTAL',
+        stackPrimaryAlignItems: 'CENTER',
+        stackCounterAlignItems: 'CENTER',
+        stackSpacing: 4,
+      },
+      [textMaster, iconMaster],
+    );
+
+    const instance = makeNode('INSTANCE', 340, {
+      size: { x: 48, y: 32 },
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 44 },
+        symbolOverrides: [
+          {
+            guidPath: { guids: [{ sessionID: 0, localID: 45 }] },
+            textData: { characters: '삭제' },
+          },
+        ],
+      },
+      componentPropAssignments: [
+        { defID: { sessionID: 7, localID: 34 }, value: { boolValue: false } },
+      ],
+    });
+
+    const symbolIndex = buildSymbolIndex([buttonMaster, instance]);
+    const out = toClientNode(instance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{
+      type: string;
+      visible?: boolean;
+      transform?: { m02: number; m12: number };
+    }>;
+    expect(renderChildren).toHaveLength(2);
+    const textChild = renderChildren.find((c) => c.type === 'TEXT')!;
+    const iconChild = renderChildren.find((c) => c.type === 'VECTOR')!;
+    // Icon hidden by prop binding (round-12 §3.4).
+    expect(iconChild.visible).toBe(false);
+    // Visible TEXT centered in 48×32: tx = (48-40)/2 = 4, ty = (32-13)/2 = 9.5
+    expect(textChild.transform!.m02).toBeCloseTo(4);
+    expect(textChild.transform!.m12).toBeCloseTo(9.5);
+  });
+});
+

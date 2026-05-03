@@ -87,7 +87,18 @@ export function toClientNode(
         const expanded = master.children.map((c) =>
           toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments),
         );
-        if (expanded.length > 0) out._renderChildren = expanded;
+        if (expanded.length > 0) {
+          // Spec web-instance-autolayout-reflow: when the INSTANCE size
+          // differs from master and master has HORIZONTAL/VERTICAL stack
+          // with CENTER alignment, re-position visible children so they
+          // sit centered in the INSTANCE's effective bbox. Without this,
+          // children stay at master coords and round-12's INSTANCE clip
+          // cuts them (alert/input-box action button text-clip).
+          const masterData = (master.data ?? {}) as Record<string, unknown>;
+          const masterSize = masterData.size as { x?: number; y?: number } | undefined;
+          const instSize = data.size as { x?: number; y?: number } | undefined;
+          out._renderChildren = applyInstanceReflow(expanded, masterData, masterSize, instSize);
+        }
       }
     }
   }
@@ -264,6 +275,100 @@ function visibleFromPropRefs(
     if (v === false) return false;
   }
   return undefined;
+}
+
+/**
+ * Re-position visible `_renderChildren` of an INSTANCE so they sit centered
+ * inside the INSTANCE's effective bbox, when the INSTANCE size differs
+ * from the master AND the master has HORIZONTAL/VERTICAL stack with
+ * CENTER primary + CENTER counter alignment. Mirrors what Figma does at
+ * render time when an instance overrides its size — children re-flow via
+ * auto-layout — without us having to simulate the full auto-layout system.
+ *
+ * Out of scope (returns the input array unchanged):
+ *   - Other primary alignments (MIN/MAX/SPACE_BETWEEN/SPACE_EVENLY)
+ *   - Other counter alignments (MIN/MAX/STRETCH)
+ *   - Padding handling (v1 ignores padding — for the metarich Button case
+ *     with R/B padding only, ignoring padding gives a closer visual match
+ *     than partial application).
+ *   - stackMode === NONE / GRID / undefined
+ *
+ * Spec: docs/specs/web-instance-autolayout-reflow.spec.md §2 / §3.
+ */
+export function applyInstanceReflow(
+  expanded: DocumentNode[],
+  masterData: Record<string, unknown>,
+  masterSize: { x?: number; y?: number } | undefined,
+  instSize: { x?: number; y?: number } | undefined,
+): DocumentNode[] {
+  const stackMode = masterData.stackMode as string | undefined;
+  if (stackMode !== 'HORIZONTAL' && stackMode !== 'VERTICAL') return expanded;
+  const primaryAlign = masterData.stackPrimaryAlignItems as string | undefined;
+  const counterAlign = masterData.stackCounterAlignItems as string | undefined;
+  if (primaryAlign !== 'CENTER' || counterAlign !== 'CENTER') return expanded;
+  if (!masterSize || !instSize) return expanded;
+  const sizesDiffer =
+    (masterSize.x ?? 0) !== (instSize.x ?? 0) || (masterSize.y ?? 0) !== (instSize.y ?? 0);
+  if (!sizesDiffer) return expanded;
+
+  const isHorizontal = stackMode === 'HORIZONTAL';
+  const primaryAxis: 'x' | 'y' = isHorizontal ? 'x' : 'y';
+  const counterAxis: 'x' | 'y' = isHorizontal ? 'y' : 'x';
+  const instPrimary = instSize[primaryAxis];
+  const instCounter = instSize[counterAxis];
+  if (typeof instPrimary !== 'number' || typeof instCounter !== 'number') return expanded;
+
+  const spacing = (masterData.stackSpacing as number | undefined) ?? 0;
+
+  // Effective visible children participate in the layout calculation.
+  // Invisible children stay at master coords (their transforms are not
+  // touched) — Canvas drops them anyway via `node.visible === false`.
+  type SizedChild = { idx: number; w: number; h: number };
+  const visibleSized: SizedChild[] = [];
+  for (let i = 0; i < expanded.length; i++) {
+    const c = expanded[i] as DocumentNode & {
+      visible?: boolean;
+      size?: { x?: number; y?: number };
+    };
+    if (c.visible === false) continue;
+    const sz = c.size;
+    if (!sz || typeof sz.x !== 'number' || typeof sz.y !== 'number') continue;
+    visibleSized.push({ idx: i, w: sz.x, h: sz.y });
+  }
+  if (visibleSized.length === 0) return expanded;
+
+  const totalPrimary = visibleSized.reduce(
+    (sum, c) => sum + (primaryAxis === 'x' ? c.w : c.h),
+    0,
+  ) + spacing * Math.max(0, visibleSized.length - 1);
+  let cursor = (instPrimary - totalPrimary) / 2;
+
+  // Float32 rounding to match the precision the rest of the pipeline uses
+  // when copying transforms (see src/pen-export.ts:f32 usage).
+  const f32 = Math.fround;
+
+  // Build a new array — don't mutate the input children. Visible ones get
+  // a fresh transform; invisible ones pass through.
+  const out = expanded.slice();
+  for (const v of visibleSized) {
+    const c = out[v.idx] as DocumentNode & {
+      transform?: {
+        m00?: number; m01?: number; m02?: number;
+        m10?: number; m11?: number; m12?: number;
+      };
+    };
+    const childPrimary = primaryAxis === 'x' ? v.w : v.h;
+    const childCounter = counterAxis === 'x' ? v.w : v.h;
+    const newPrimary = f32(cursor);
+    const newCounter = f32((instCounter - childCounter) / 2);
+    const baseT = c.transform ?? { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 };
+    const newTransform = isHorizontal
+      ? { ...baseT, m02: newPrimary, m12: newCounter }
+      : { ...baseT, m02: newCounter, m12: newPrimary };
+    out[v.idx] = { ...c, transform: newTransform };
+    cursor += childPrimary + spacing;
+  }
+  return out;
 }
 
 /**
