@@ -85,8 +85,9 @@ export function toClientNode(
         const visOverrides = collectVisibilityOverridesFromInstance(sd?.symbolOverrides);
         const propAssignments = collectPropAssignmentsFromInstance(data);
         const propAssignmentsByPath = collectPropAssignmentsAtPathFromInstance(sd?.symbolOverrides);
+        const swapTargetsByPath = collectSwapTargetsAtPathFromInstance(sd?.symbolOverrides);
         const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath),
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath),
         );
         if (expanded.length > 0) {
           // Spec web-instance-autolayout-reflow: when the INSTANCE size
@@ -249,6 +250,36 @@ export function collectPropAssignmentsFromInstance(
     m.set(`${d.sessionID}:${d.localID}`, v);
   }
   return m;
+}
+
+/**
+ * Pull path-keyed variant-swap targets out of an outer INSTANCE's
+ * `symbolOverrides[]`. Each entry that carries `overriddenSymbolID`
+ * contributes a `pathKey → swapTargetGuidStr` mapping. Used by
+ * `toClientChildForRender` to swap the master at expansion time.
+ *
+ * Why this exists — Figma's "swap component instance" mechanism. The
+ * metarich Dropdown rail's "직접 선택" option is implemented this way:
+ * the outer Dropdown swaps the 6th option-row's master from the
+ * default state to a "selected" variant whose tree carries different
+ * descendant GUIDs that other path-keyed overrides know about.
+ *
+ * Spec: docs/specs/web-instance-variant-swap.spec.md §3.1.
+ */
+export function collectSwapTargetsAtPathFromInstance(
+  overrides: Array<Record<string, unknown>> | undefined,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!Array.isArray(overrides)) return out;
+  for (const o of overrides) {
+    const sw = o.overriddenSymbolID as { sessionID?: number; localID?: number } | undefined;
+    if (!sw || typeof sw.sessionID !== 'number' || typeof sw.localID !== 'number') continue;
+    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+    const key = pathKeyFromGuids(guids);
+    if (key === null) continue;
+    out.set(key, `${sw.sessionID}:${sw.localID}`);
+  }
+  return out;
 }
 
 /**
@@ -537,6 +568,7 @@ export function toClientChildForRender(
   pathFromOuter: string[] = [],
   propAssignments: Map<string, boolean> = new Map(),
   propAssignmentsByPath: Map<string, Map<string, boolean>> = new Map(),
+  swapTargetsByPath: Map<string, string> = new Map(),
 ): DocumentNode {
   if (depth > 8) {
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
@@ -565,7 +597,7 @@ export function toClientChildForRender(
     name: n.name,
     _isInstanceChild: true,
     children: n.children.map((c) =>
-      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath, effectivePropAssignments, propAssignmentsByPath),
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath),
     ),
   };
   if (VECTOR_TYPES.has(n.type)) {
@@ -594,7 +626,17 @@ export function toClientChildForRender(
     } | undefined;
     const sid = sd?.symbolID;
     if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
-      const master = symbolIndex.get(`${sid.sessionID}:${sid.localID}`);
+      // Spec web-instance-variant-swap §3.2 I-P2: when an outer override
+      // path-keyed against THIS instance carries `overriddenSymbolID`,
+      // use that swapped master for expansion instead of the default
+      // `sd.symbolID`. The metarich Dropdown's "직접 선택" option flows
+      // through here.
+      const swapTargetKey = swapTargetsByPath.get(currentKey);
+      const masterKey = swapTargetKey ?? `${sid.sessionID}:${sid.localID}`;
+      const master = symbolIndex.get(masterKey)
+        // I-E1: corrupt swap target falls back to the default master.
+        ?? (swapTargetKey ? symbolIndex.get(`${sid.sessionID}:${sid.localID}`) : undefined);
+      const swapApplied = swapTargetKey !== undefined && master !== undefined && masterKey === swapTargetKey;
       if (master) {
         const innerText = collectTextOverridesFromInstance(sd?.symbolOverrides);
         const innerFill = collectFillOverridesFromInstance(sd?.symbolOverrides);
@@ -628,9 +670,33 @@ export function toClientChildForRender(
             mergedPropAssignsByPath.set(merged, innerVal);
           }
         }
+        // Spec web-instance-variant-swap §3.2 I-P4: same prefix-merge for
+        // inner-INSTANCE swap targets — its own symbolOverrides may
+        // specify swaps for grand-descendants.
+        const innerSwapTargets = collectSwapTargetsAtPathFromInstance(sd?.symbolOverrides);
+        const mergedSwapTargets = innerSwapTargets.size > 0
+          ? new Map(swapTargetsByPath)
+          : swapTargetsByPath;
+        if (innerSwapTargets.size > 0) {
+          const prefix = currentPath.join('/');
+          for (const [innerKey, innerVal] of innerSwapTargets) {
+            const merged = prefix.length > 0 ? `${prefix}/${innerKey}` : innerKey;
+            mergedSwapTargets.set(merged, innerVal);
+          }
+        }
         out._renderChildren = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath),
+          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets),
         );
+        // Spec web-instance-variant-swap §3.3 I-V1: when swap is applied
+        // and no explicit visibility override exists for this path, treat
+        // the swap as implying visible:true. This compensates for Figma's
+        // semantics where a swapped variant is meant to render even if
+        // the original instance was hidden by default. Explicit
+        // visOverride at this path (handled below in the visOv branch)
+        // still wins.
+        if (swapApplied) {
+          (out as { _swapApplied?: boolean })._swapApplied = true;
+        }
       }
     }
   }
@@ -664,6 +730,18 @@ export function toClientChildForRender(
     // arrow-hide assignment lives in the outer Dropdown's overrides.
     const propVis = visibleFromPropRefs(data, effectivePropAssignments);
     if (propVis === false) out.visible = false;
+    // Spec web-instance-variant-swap §3.3 I-V1: when variant swap was
+    // applied above and no explicit visibility override exists, treat
+    // the swap as implying visible:true even if the master data spread
+    // set out.visible = false. Drops the _swapApplied marker after use.
+    else if ((out as { _swapApplied?: boolean })._swapApplied === true && out.visible === false) {
+      out.visible = true;
+    }
+  }
+  // Strip the internal _swapApplied marker — it was only needed across
+  // the single function body for the implicit-visible decision above.
+  if ((out as { _swapApplied?: boolean })._swapApplied !== undefined) {
+    delete (out as { _swapApplied?: boolean })._swapApplied;
   }
   return out;
 }

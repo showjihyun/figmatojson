@@ -5,6 +5,7 @@ import {
   collectFillOverridesFromInstance,
   collectPropAssignmentsAtPathFromInstance,
   collectPropAssignmentsFromInstance,
+  collectSwapTargetsAtPathFromInstance,
   collectTextOverridesFromInstance,
   toClientChildForRender,
   toClientNode,
@@ -1032,6 +1033,224 @@ describe('toClientNode INSTANCE — applyInstanceReflow integration (round 14 §
     // Visible TEXT centered in 48×32: tx = (48-40)/2 = 4, ty = (32-13)/2 = 9.5
     expect(textChild.transform!.m02).toBeCloseTo(4);
     expect(textChild.transform!.m12).toBeCloseTo(9.5);
+  });
+});
+
+describe('collectSwapTargetsAtPathFromInstance (spec web-instance-variant-swap §3.1)', () => {
+  it('returns an empty map when symbolOverrides is undefined or empty', () => {
+    expect(collectSwapTargetsAtPathFromInstance(undefined).size).toBe(0);
+    expect(collectSwapTargetsAtPathFromInstance([]).size).toBe(0);
+  });
+
+  it('extracts overriddenSymbolID keyed by guidPath', () => {
+    const m = collectSwapTargetsAtPathFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 15, localID: 300 }] },
+        overriddenSymbolID: { sessionID: 15, localID: 287 },
+        componentPropAssignments: [],
+      },
+    ]);
+    expect(m.size).toBe(1);
+    expect(m.get('15:300')).toBe('15:287');
+  });
+
+  it('skips entries without overriddenSymbolID (text-only / vis-only / unrelated)', () => {
+    const m = collectSwapTargetsAtPathFromInstance([
+      { guidPath: { guids: [{ sessionID: 0, localID: 1 }] }, textData: { characters: 'x' } },
+      { guidPath: { guids: [{ sessionID: 0, localID: 2 }] }, visible: true },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('skips entries with corrupt overriddenSymbolID (missing sessionID/localID)', () => {
+    const m = collectSwapTargetsAtPathFromInstance([
+      { guidPath: { guids: [{ sessionID: 0, localID: 1 }] }, overriddenSymbolID: {} },
+      { guidPath: { guids: [{ sessionID: 0, localID: 2 }] }, overriddenSymbolID: { sessionID: 5 } },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('handles multi-step guidPath', () => {
+    const m = collectSwapTargetsAtPathFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 5 }, { sessionID: 0, localID: 9 }] },
+        overriddenSymbolID: { sessionID: 0, localID: 100 },
+      },
+    ]);
+    expect(m.get('0:5/0:9')).toBe('0:100');
+  });
+
+  it('lets a later entry win on duplicate path (spec §3.1 I-C3)', () => {
+    const m = collectSwapTargetsAtPathFromInstance([
+      { guidPath: { guids: [{ sessionID: 0, localID: 1 }] }, overriddenSymbolID: { sessionID: 0, localID: 100 } },
+      { guidPath: { guids: [{ sessionID: 0, localID: 1 }] }, overriddenSymbolID: { sessionID: 0, localID: 200 } },
+    ]);
+    expect(m.get('0:1')).toBe('0:200');
+  });
+});
+
+describe('toClientChildForRender — variant swap (spec web-instance-variant-swap §3.2)', () => {
+  it('uses the swap target master when outer override carries overriddenSymbolID for a path', () => {
+    // Default master (514) → swap to (287). Both are SYMBOLs with one
+    // distinct TEXT child (5 vs 8). Expected: resolved subtree contains
+    // the swap-target's TEXT (8), not the default master's (5).
+    const defaultText = makeNode('TEXT', 5, { textData: { characters: 'default' } });
+    const defaultMaster = makeNode('SYMBOL', 514, {}, [defaultText]);
+    const swapText = makeNode('TEXT', 8, { textData: { characters: 'swap-default' } });
+    const swapMaster = makeNode('SYMBOL', 287, {}, [swapText]);
+    const innerInstance = makeNode('INSTANCE', 300, {
+      symbolData: { symbolID: { sessionID: 0, localID: 514 }, symbolOverrides: [] },
+    });
+    const outerMaster = makeNode('SYMBOL', 532, {}, [innerInstance]);
+    const outerInstance = makeNode('INSTANCE', 279, {
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 532 },
+        symbolOverrides: [
+          {
+            guidPath: { guids: [{ sessionID: 0, localID: 300 }] },
+            overriddenSymbolID: { sessionID: 0, localID: 287 },
+          },
+        ],
+      },
+    });
+
+    const symbolIndex = buildSymbolIndex([defaultMaster, swapMaster, outerMaster, outerInstance]);
+    const out = toClientNode(outerInstance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{
+      type: string;
+      _renderChildren?: Array<{ type: string; textData?: { characters?: string } }>;
+    }>;
+    expect(renderChildren).toHaveLength(1);
+    const innerOut = renderChildren[0];
+    // Swap target's children render — we should see the swap target's TEXT.
+    const innerChildren = innerOut._renderChildren ?? [];
+    expect(innerChildren).toHaveLength(1);
+    expect(innerChildren[0].type).toBe('TEXT');
+    expect(innerChildren[0].textData?.characters).toBe('swap-default');
+  });
+
+  it('outer text override targets swap-target child by GUID — resolves through swap', () => {
+    // Same setup but outer also has a text override at multi-step path
+    // [innerInstance, swapTargetTextChild]. Should set _renderTextOverride.
+    const swapText = makeNode('TEXT', 288, { textData: { characters: 'placeholder' } });
+    const swapMaster = makeNode('SYMBOL', 287, {}, [swapText]);
+    const defaultMaster = makeNode('SYMBOL', 514, {}, []);
+    const innerInstance = makeNode('INSTANCE', 300, {
+      symbolData: { symbolID: { sessionID: 0, localID: 514 }, symbolOverrides: [] },
+    });
+    const outerMaster = makeNode('SYMBOL', 532, {}, [innerInstance]);
+    const outerInstance = makeNode('INSTANCE', 279, {
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 532 },
+        symbolOverrides: [
+          {
+            guidPath: { guids: [{ sessionID: 0, localID: 300 }] },
+            overriddenSymbolID: { sessionID: 0, localID: 287 },
+          },
+          {
+            guidPath: { guids: [{ sessionID: 0, localID: 300 }, { sessionID: 0, localID: 288 }] },
+            textData: { characters: '직접 선택' },
+          },
+        ],
+      },
+    });
+
+    const symbolIndex = buildSymbolIndex([defaultMaster, swapMaster, outerMaster, outerInstance]);
+    const out = toClientNode(outerInstance, [], symbolIndex);
+    const inner = (out._renderChildren as Array<{
+      _renderChildren?: Array<{ type: string; _renderTextOverride?: string }>;
+    }>)[0];
+    const innerText = inner._renderChildren?.[0];
+    expect(innerText?.type).toBe('TEXT');
+    expect(innerText?._renderTextOverride).toBe('직접 선택');
+  });
+
+  it('implicit visible:true when swap is applied to an INSTANCE whose master had visible:false', () => {
+    // INSTANCE has no own visible field, but master 514 has visible:false
+    // (data spread sets out.visible = false). Without swap, this stays
+    // false. With swap and no explicit visibility override, swap implies
+    // visible:true (spec §3.3 I-V1).
+    const defaultMaster = makeNode('SYMBOL', 514, { visible: false }, []);
+    const swapMaster = makeNode('SYMBOL', 287, { visible: true }, []);
+    const innerInstance = makeNode('INSTANCE', 300, {
+      visible: false, // mirrors metarich 15:300 explicitly hidden by default
+      symbolData: { symbolID: { sessionID: 0, localID: 514 }, symbolOverrides: [] },
+    });
+    const outerMaster = makeNode('SYMBOL', 532, {}, [innerInstance]);
+    const outerInstance = makeNode('INSTANCE', 279, {
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 532 },
+        symbolOverrides: [
+          {
+            guidPath: { guids: [{ sessionID: 0, localID: 300 }] },
+            overriddenSymbolID: { sessionID: 0, localID: 287 },
+          },
+        ],
+      },
+    });
+
+    const symbolIndex = buildSymbolIndex([defaultMaster, swapMaster, outerMaster, outerInstance]);
+    const out = toClientNode(outerInstance, [], symbolIndex);
+    const inner = (out._renderChildren as Array<{ visible?: boolean }>)[0];
+    expect(inner.visible).not.toBe(false);
+  });
+
+  it('explicit Symbol Visibility Override wins over implicit-visible-on-swap (spec §3.3 I-V1)', () => {
+    // Same setup as above but outer override ALSO specifies visible:false
+    // for the same path. Symbol Visibility Override should win — render
+    // node ends up visible:false despite swap being applied.
+    const defaultMaster = makeNode('SYMBOL', 514, { visible: false }, []);
+    const swapMaster = makeNode('SYMBOL', 287, { visible: true }, []);
+    const innerInstance = makeNode('INSTANCE', 300, {
+      visible: false,
+      symbolData: { symbolID: { sessionID: 0, localID: 514 }, symbolOverrides: [] },
+    });
+    const outerMaster = makeNode('SYMBOL', 532, {}, [innerInstance]);
+    const outerInstance = makeNode('INSTANCE', 279, {
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 532 },
+        symbolOverrides: [
+          {
+            guidPath: { guids: [{ sessionID: 0, localID: 300 }] },
+            overriddenSymbolID: { sessionID: 0, localID: 287 },
+            visible: false, // explicit override hides
+          },
+        ],
+      },
+    });
+
+    const symbolIndex = buildSymbolIndex([defaultMaster, swapMaster, outerMaster, outerInstance]);
+    const out = toClientNode(outerInstance, [], symbolIndex);
+    const inner = (out._renderChildren as Array<{ visible?: boolean }>)[0];
+    expect(inner.visible).toBe(false);
+  });
+
+  it('falls back to default master when swap target is not in symbolIndex (corrupt data, spec §4 I-E1)', () => {
+    const defaultText = makeNode('TEXT', 5, { textData: { characters: 'default' } });
+    const defaultMaster = makeNode('SYMBOL', 514, {}, [defaultText]);
+    // swap target 287 is NOT in the index.
+    const innerInstance = makeNode('INSTANCE', 300, {
+      symbolData: { symbolID: { sessionID: 0, localID: 514 }, symbolOverrides: [] },
+    });
+    const outerMaster = makeNode('SYMBOL', 532, {}, [innerInstance]);
+    const outerInstance = makeNode('INSTANCE', 279, {
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 532 },
+        symbolOverrides: [
+          {
+            guidPath: { guids: [{ sessionID: 0, localID: 300 }] },
+            overriddenSymbolID: { sessionID: 0, localID: 287 }, // not in index
+          },
+        ],
+      },
+    });
+
+    const symbolIndex = buildSymbolIndex([defaultMaster, outerMaster, outerInstance]);
+    const out = toClientNode(outerInstance, [], symbolIndex);
+    const inner = (out._renderChildren as Array<{
+      _renderChildren?: Array<{ type: string; textData?: { characters?: string } }>;
+    }>)[0];
+    expect(inner._renderChildren?.[0].textData?.characters).toBe('default');
   });
 });
 
