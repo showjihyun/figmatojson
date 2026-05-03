@@ -23,7 +23,7 @@ import {
 import { Stage, Layer, Rect, Text as KText, Group, Path, Image as KImage, Line } from 'react-konva';
 import type Konva from 'konva';
 import { cornerDrag, groupBbox, projectMembers, type Corner } from './multiResize';
-import { solidFillCss, solidStrokeCss } from '@core/domain/color';
+import { solidFillCss, strokeFromPaints } from '@core/domain/color';
 import { imageHashHex } from '@core/domain/image';
 import { guidStr } from '@core/domain/tree';
 import type { DocumentNode } from '@core/domain/entities/Document';
@@ -51,6 +51,7 @@ import { shadowFromEffects, innerShadowFromEffects } from './lib/shadow';
 import { paintLayers } from './lib/paintRender';
 import { InnerShadowOverlay } from './components/canvas/InnerShadowOverlay';
 import { konvaBlendMode } from './lib/blendMode';
+import { computeImageCrop } from './lib/imageScale';
 import { rotationDegrees } from './lib/transform';
 import { konvaLineCap, konvaLineJoin } from './lib/strokeCapJoin';
 import { firstStopRgba, gradientFromPaint, type KonvaGradient } from './lib/gradient';
@@ -140,17 +141,27 @@ function ImageFill({
   width,
   height,
   cornerRadius,
+  scaleMode,
   globalCompositeOperation,
 }: {
   src: string | null;
   width: number;
   height: number;
   cornerRadius: number | [number, number, number, number];
+  /** Figma image fit mode: FILL (default) / FIT / CROP / STRETCH / TILE.
+   *  Spec round8 §2. */
+  scaleMode?: string;
   globalCompositeOperation?: string;
 }) {
   const img = useImageElement(src);
   if (!img || width <= 0 || height <= 0) return null;
-  // Resolve uniform vs per-corner radius.
+  // Compute the source crop + dst rect based on the image's natural
+  // size and the requested scaleMode (round 8 §2). Konva.Image takes
+  // both `crop` (source) and x/y/width/height (dst) so all five
+  // object-fit modes reduce to "set the right combination of these
+  // five props". Image natural size comes from the loaded HTMLImage.
+  const fit = computeImageCrop(scaleMode, img.naturalWidth, img.naturalHeight, width, height);
+  // Resolve uniform vs per-corner radius for the clip path.
   const tl = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[0];
   const tr = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[1];
   const br = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[2];
@@ -162,6 +173,23 @@ function ImageFill({
   const cBR = Math.min(Math.max(0, br), halfW, halfH);
   const cBL = Math.min(Math.max(0, bl), halfW, halfH);
   const anyCorner = cTL > 0 || cTR > 0 || cBR > 0 || cBL > 0;
+  // We always wrap in a Group when there's a clip OR a non-stretch
+  // scale that can have dst != box (FIT / CROP letterbox). Lets the
+  // Konva.Image render exactly into its computed dst rect inside.
+  const needsClip = anyCorner || fit.dstX !== 0 || fit.dstY !== 0
+    || fit.dstW !== width || fit.dstH !== height;
+  const imageEl = (
+    <KImage
+      image={img}
+      x={fit.dstX}
+      y={fit.dstY}
+      width={fit.dstW}
+      height={fit.dstH}
+      crop={fit.crop as never}
+      globalCompositeOperation={globalCompositeOperation as never}
+      listening={false}
+    />
+  );
   if (anyCorner) {
     return (
       <Group
@@ -179,18 +207,28 @@ function ImageFill({
           ctx.closePath();
         }}
       >
-        <KImage image={img} x={0} y={0} width={width} height={height} globalCompositeOperation={globalCompositeOperation as never} listening={false} />
+        {imageEl}
       </Group>
     );
   }
-  return <KImage image={img} x={0} y={0} width={width} height={height} globalCompositeOperation={globalCompositeOperation as never} listening={false} />;
+  if (needsClip) {
+    // Even without rounded corners we may need a rect clip so a
+    // FILL-mode image doesn't draw outside the box (Konva.Image with
+    // a crop already handles cropping at the source side, but the
+    // dst rect is what the canvas paints — for STRETCH/FILL this is
+    // the box size, no clipping needed; for FIT/CROP we draw INSIDE
+    // the box, no overflow either. Unsetting needsClip here keeps
+    // the tree minimal).
+    return imageEl;
+  }
+  return imageEl;
 }
 
-// `guidStr`, `solidFillCss` (was `colorOf`), `solidStrokeCss` (was `strokeOf`)
+// `guidStr`, `solidFillCss` (was `colorOf`), `strokeFromPaints` (was `solidStrokeCss`/`strokeOf`)
 // live in `@core/domain/color.ts` and `@core/domain/tree.ts` now.
 // Local aliases preserve the old call sites' names without further churn.
 const colorOf = solidFillCss;
-const strokeOf = solidStrokeCss;
+const strokeOf = strokeFromPaints;
 
 const VECTOR_TYPES = new Set([
   'VECTOR',
@@ -562,6 +600,10 @@ function NodeShapeImpl({
         const gco = konvaBlendMode((layer.paint as { blendMode?: string }).blendMode);
 
         if (layer.render.kind === 'image') {
+          // Pull scaleMode off the paint so each IMAGE paint object-
+          // fits its own way (round 8 §2). Default = STRETCH for
+          // legacy compat; metarich's 86 image fills are all FILL.
+          const scaleMode = (layer.paint as { imageScaleMode?: string }).imageScaleMode;
           return (
             <ImageFill
               key={i}
@@ -569,6 +611,7 @@ function NodeShapeImpl({
               width={w}
               height={h}
               cornerRadius={cornerR}
+              scaleMode={scaleMode}
               globalCompositeOperation={gco as never}
             />
           );
