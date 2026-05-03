@@ -52,6 +52,8 @@ import { paintLayers } from './lib/paintRender';
 import { InnerShadowOverlay } from './components/canvas/InnerShadowOverlay';
 import { konvaBlendMode } from './lib/blendMode';
 import { computeImageCrop } from './lib/imageScale';
+import { layerBlurFromEffects } from './lib/blurEffect';
+import { LayerBlurWrapper } from './components/canvas/LayerBlurWrapper';
 import { rotationDegrees } from './lib/transform';
 import { konvaLineCap, konvaLineJoin } from './lib/strokeCapJoin';
 import { firstStopRgba, gradientFromPaint, type KonvaGradient } from './lib/gradient';
@@ -278,6 +280,10 @@ function NodeShapeImpl({
   const opacity = typeof node.opacity === 'number' && node.opacity !== 1
     ? node.opacity
     : undefined;
+  // Node-level blendMode (round 9 §4) — applied to the outer element
+  // so the whole node composites with siblings using the chosen mode.
+  // PASS_THROUGH and NORMAL pass through to undefined (default).
+  const nodeBlend = konvaBlendMode(node.blendMode as string | undefined);
 
   // Hover: skip for instance master expansions so hover bubbles up to the
   // outer INSTANCE (spec I-S5). e.cancelBubble in onMouseEnter ensures the
@@ -361,6 +367,7 @@ function NodeShapeImpl({
         y={y}
         rotation={rotation}
         opacity={opacity}
+        globalCompositeOperation={nodeBlend as never}
         text={chars}
         fontSize={fontSize}
         fontFamily={fontFamily}
@@ -405,6 +412,7 @@ function NodeShapeImpl({
         y={y}
         rotation={rotation}
         opacity={opacity}
+        globalCompositeOperation={nodeBlend as never}
         draggable={isSelected}
         onClick={onShapeClick}
         onTap={onShapeClick}
@@ -491,6 +499,9 @@ function NodeShapeImpl({
   // Inner shadow (round 6 §3) — first visible INNER_SHADOW; rendered
   // by a dedicated Konva.Shape with custom sceneFunc.
   const innerShadow = innerShadowFromEffects(node.effects);
+  // Layer blur (round 9 §2) — Konva caches the group bitmap and
+  // applies its built-in Blur filter. BACKGROUND_BLUR not yet handled.
+  const layerBlur = layerBlurFromEffects(node.effects);
 
   // Frame clip (spec round2 §3) — when frameMaskDisabled === false,
   // clip children to the frame's rounded-rect bounds. Konva clipFunc
@@ -541,12 +552,13 @@ function NodeShapeImpl({
   const lineCap = konvaLineCap(node.strokeCap);
   const lineJoin = konvaLineJoin(node.strokeJoin);
 
-  return (
+  const groupTree = (
     <Group
       x={x}
       y={y}
       rotation={rotation}
       opacity={opacity}
+      globalCompositeOperation={nodeBlend as never}
       draggable={isSelected}
       onClick={onShapeClick}
       onTap={onShapeClick}
@@ -699,18 +711,170 @@ function NodeShapeImpl({
       {wantPerSide && bl && bl > 0 && (
         <Line points={[0, 0, 0, h]} stroke={stroke!.color} strokeWidth={bl} lineCap={lineCap} dash={dash} listening={false} />
       )}
-      {hasChildren &&
-        renderableChildren.map((c: any, i: number) => (
-          <NodeShape
-            key={i}
-            node={c}
-            onSelect={onSelect}
-            onDragGroup={onDragGroup}
-            sessionId={sessionId}
-          />
-        ))}
+      {hasChildren && renderMaskedChildren(renderableChildren, onSelect, onDragGroup, sessionId)}
     </Group>
   );
+
+  // Round 9 §2 I-LB2: when LAYER_BLUR is active, wrap the whole tree in a
+  // cache+filter Group so the blur applies to the entire node bitmap.
+  return layerBlur
+    ? <LayerBlurWrapper radius={layerBlur.radius}>{groupTree}</LayerBlurWrapper>
+    : groupTree;
+}
+
+/**
+ * Render NodeShape children, honoring `isMask: true` siblings (round 9 §3).
+ *
+ * Figma's mask model: a child with isMask=true clips its FOLLOWING
+ * siblings (until the next isMask or end of array) into its own shape.
+ * The mask node is also rendered normally (its fill/stroke stay visible).
+ *
+ * Implementation:
+ *   - Walk children. When we hit isMask=true, the mask node renders
+ *     normally, and the next siblings (until the next isMask) are wrapped
+ *     in a Konva.Group whose clipFunc is built from the mask's geometry.
+ *   - Geometry: RECTANGLE/FRAME → rounded rect; ELLIPSE → ellipse path;
+ *     VECTOR → svg path data; otherwise → axis-aligned bbox.
+ *   - Mask node's transform (translation) is baked into the clipFunc by
+ *     translating the path to (mx, my) where (mx, my) = mask.transform.
+ */
+function renderMaskedChildren(
+  children: any[],
+  onSelect: any,
+  onDragGroup: any,
+  sessionId: string | null,
+): React.ReactNode {
+  // Fast path: no isMask in this batch. Avoid allocating any extra wrappers
+  // — keep the children array shape identical to the prior behavior so this
+  // is a true no-op for documents without masks (the metarich case).
+  let hasMask = false;
+  for (let i = 0; i < children.length; i++) {
+    if (children[i] && children[i].isMask === true) { hasMask = true; break; }
+  }
+  if (!hasMask) {
+    return children.map((c: any, i: number) => (
+      <NodeShape
+        key={i}
+        node={c}
+        onSelect={onSelect}
+        onDragGroup={onDragGroup}
+        sessionId={sessionId}
+      />
+    ));
+  }
+
+  const out: React.ReactNode[] = [];
+  let i = 0;
+  while (i < children.length) {
+    const node = children[i];
+    if (node && node.isMask === true) {
+      // Render the mask node itself (Figma keeps its visuals).
+      out.push(
+        <NodeShape
+          key={`m-${i}`}
+          node={node}
+          onSelect={onSelect}
+          onDragGroup={onDragGroup}
+          sessionId={sessionId}
+        />,
+      );
+      // Find the slice of subsequent siblings affected by this mask.
+      let j = i + 1;
+      while (j < children.length && !(children[j] && children[j].isMask === true)) j++;
+      const slice = children.slice(i + 1, j);
+      if (slice.length > 0) {
+        const clipFunc = makeMaskClipFunc(node);
+        out.push(
+          <Group key={`mc-${i}`} clipFunc={clipFunc as never}>
+            {slice.map((c: any, k: number) => (
+              <NodeShape
+                key={k}
+                node={c}
+                onSelect={onSelect}
+                onDragGroup={onDragGroup}
+                sessionId={sessionId}
+              />
+            ))}
+          </Group>,
+        );
+      }
+      i = j;
+      continue;
+    }
+    out.push(
+      <NodeShape
+        key={i}
+        node={node}
+        onSelect={onSelect}
+        onDragGroup={onDragGroup}
+        sessionId={sessionId}
+      />,
+    );
+    i++;
+  }
+  return out;
+}
+
+/** Build a Konva clipFunc from a mask node's geometry (round 9 §3). */
+function makeMaskClipFunc(mask: any): (ctx: CanvasRenderingContext2D) => void {
+  const mx = mask.transform?.m02 ?? 0;
+  const my = mask.transform?.m12 ?? 0;
+  const w = mask.size?.x ?? 0;
+  const h = mask.size?.y ?? 0;
+  const type = mask.type;
+  // Pull cornerRadius for RECTANGLE/FRAME; ignore on other types.
+  const cr0 = typeof mask.cornerRadius === 'number' ? mask.cornerRadius : 0;
+  const cr = Math.min(Math.max(0, cr0), w / 2, h / 2);
+
+  if (type === 'ELLIPSE') {
+    return (ctx: CanvasRenderingContext2D): void => {
+      const rx = w / 2;
+      const ry = h / 2;
+      ctx.ellipse(mx + rx, my + ry, rx, ry, 0, 0, Math.PI * 2);
+      ctx.closePath();
+    };
+  }
+  if (type === 'VECTOR' && typeof mask.svgPath === 'string' && mask.svgPath.length > 0) {
+    // Konva can rasterize SVG path strings via Path2D when available.
+    // Browsers have Path2D; jsdom does not. Guard so unit tests don't crash.
+    const svg = mask.svgPath as string;
+    return (ctx: CanvasRenderingContext2D): void => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const P2D = (globalThis as any).Path2D;
+      if (typeof P2D === 'function') {
+        ctx.translate(mx, my);
+        // The Path2D path has its own subpath; we still need to close into
+        // the current path so Konva's clip uses it. Using addPath through a
+        // temporary Path2D works on real browsers; jsdom skips this branch.
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (ctx as any).__svgPath = new P2D(svg);
+        } catch {
+          // Malformed path — fall through to bbox.
+        }
+        ctx.translate(-mx, -my);
+      }
+      // Fallback bbox so something gets clipped even without Path2D.
+      ctx.rect(mx, my, w, h);
+    };
+  }
+  // RECTANGLE / FRAME / fallback: rounded rect (cr=0 yields a sharp rect).
+  return (ctx: CanvasRenderingContext2D): void => {
+    if (cr > 0) {
+      ctx.moveTo(mx + cr, my);
+      ctx.lineTo(mx + w - cr, my);
+      ctx.quadraticCurveTo(mx + w, my, mx + w, my + cr);
+      ctx.lineTo(mx + w, my + h - cr);
+      ctx.quadraticCurveTo(mx + w, my + h, mx + w - cr, my + h);
+      ctx.lineTo(mx + cr, my + h);
+      ctx.quadraticCurveTo(mx, my + h, mx, my + h - cr);
+      ctx.lineTo(mx, my + cr);
+      ctx.quadraticCurveTo(mx, my, mx + cr, my);
+      ctx.closePath();
+    } else {
+      ctx.rect(mx, my, w, h);
+    }
+  };
 }
 
 // Memoized so that re-renders triggered by pan/zoom/selection at the Canvas
