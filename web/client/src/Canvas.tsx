@@ -50,6 +50,7 @@ import { applyStrokeAlign } from './lib/strokeAlign';
 import { shadowFromEffects, innerShadowFromEffects } from './lib/shadow';
 import { paintLayers } from './lib/paintRender';
 import { InnerShadowOverlay } from './components/canvas/InnerShadowOverlay';
+import { konvaBlendMode } from './lib/blendMode';
 import { rotationDegrees } from './lib/transform';
 import { konvaLineCap, konvaLineJoin } from './lib/strokeCapJoin';
 import { firstStopRgba, gradientFromPaint, type KonvaGradient } from './lib/gradient';
@@ -139,11 +140,13 @@ function ImageFill({
   width,
   height,
   cornerRadius,
+  globalCompositeOperation,
 }: {
   src: string | null;
   width: number;
   height: number;
   cornerRadius: number | [number, number, number, number];
+  globalCompositeOperation?: string;
 }) {
   const img = useImageElement(src);
   if (!img || width <= 0 || height <= 0) return null;
@@ -176,11 +179,11 @@ function ImageFill({
           ctx.closePath();
         }}
       >
-        <KImage image={img} x={0} y={0} width={width} height={height} listening={false} />
+        <KImage image={img} x={0} y={0} width={width} height={height} globalCompositeOperation={globalCompositeOperation as never} listening={false} />
       </Group>
     );
   }
-  return <KImage image={img} x={0} y={0} width={width} height={height} listening={false} />;
+  return <KImage image={img} x={0} y={0} width={width} height={height} globalCompositeOperation={globalCompositeOperation as never} listening={false} />;
 }
 
 // `guidStr`, `solidFillCss` (was `colorOf`), `solidStrokeCss` (was `strokeOf`)
@@ -554,6 +557,9 @@ function NodeShapeImpl({
           shadowColor: shadow.shadowColor,
           shadowOpacity: shadow.shadowOpacity,
         } : undefined;
+        // Per-paint blendMode (round 7 §3) — undefined for NORMAL /
+        // missing; mapped CSS composite name for everything else.
+        const gco = konvaBlendMode((layer.paint as { blendMode?: string }).blendMode);
 
         if (layer.render.kind === 'image') {
           return (
@@ -563,6 +569,7 @@ function NodeShapeImpl({
               width={w}
               height={h}
               cornerRadius={cornerR}
+              globalCompositeOperation={gco as never}
             />
           );
         }
@@ -576,6 +583,7 @@ function NodeShapeImpl({
               height={h}
               fill={layer.render.fill}
               cornerRadius={cornerR}
+              globalCompositeOperation={gco as never}
               {...(shadowProps ?? {})}
               listening
             />
@@ -599,6 +607,7 @@ function NodeShapeImpl({
             fillRadialGradientEndRadius={g.kind === 'radial' ? g.fillRadialGradientEndRadius : undefined}
             fillRadialGradientColorStops={g.kind === 'radial' ? g.fillRadialGradientColorStops : undefined}
             cornerRadius={cornerR}
+            globalCompositeOperation={gco as never}
             {...(shadowProps ?? {})}
             listening
           />
@@ -673,20 +682,31 @@ function colorOfWithDefault(node: any, fallback: string): string {
 }
 
 /** Compute the absolute bounds of the selected node by walking the tree.
- *  Returns null if not found. Accumulates parent transforms. */
+ *  Returns null if not found. Accumulates parent translations.
+ *
+ *  v1: only the LEAF node's rotation is included in `rotation`. Nested
+ *  ancestor rotation is uncommon and accumulating it correctly would
+ *  also require rotating the (x, y) translation along the chain — out
+ *  of scope. Spec round7 §2.2 I-OB5. */
 function findAbsBounds(
   root: any,
   guid: string,
   parentX = 0,
   parentY = 0,
-): { x: number; y: number; w: number; h: number } | null {
+): { x: number; y: number; w: number; h: number; rotation: number } | null {
   if (!root || typeof root !== 'object') return null;
   const tx = root.transform?.m02 ?? 0;
   const ty = root.transform?.m12 ?? 0;
   const ax = parentX + tx;
   const ay = parentY + ty;
   if (root.guid && `${root.guid.sessionID}:${root.guid.localID}` === guid) {
-    return { x: ax, y: ay, w: root.size?.x ?? 0, h: root.size?.y ?? 0 };
+    return {
+      x: ax,
+      y: ay,
+      w: root.size?.x ?? 0,
+      h: root.size?.y ?? 0,
+      rotation: rotationDegrees(root.transform) ?? 0,
+    };
   }
   if (Array.isArray(root.children)) {
     for (const c of root.children) {
@@ -697,14 +717,24 @@ function findAbsBounds(
   return null;
 }
 
-/** Figma-style selection overlay with draggable corner handles for resize. */
+/**
+ * Figma-style selection overlay with draggable corner handles for resize.
+ *
+ * Coords are local to a Konva.Group positioned at (bounds.x, bounds.y)
+ * and rotated by `bounds.rotation`. Inner shapes draw at (0..w, 0..h)
+ * so the rotation propagates automatically. Spec round7 §2.
+ *
+ * Resize handles only render when rotation === 0 — corner-drag math
+ * for rotated nodes needs an extra coord transform that's deferred to
+ * a later round (I-OB7).
+ */
 function SelectionOverlay({
   bounds,
   scale,
   onResize,
   guid,
 }: {
-  bounds: { x: number; y: number; w: number; h: number };
+  bounds: { x: number; y: number; w: number; h: number; rotation: number };
   scale: number;
   onResize?: (guid: string, x: number, y: number, w: number, h: number) => void;
   guid: string | null;
@@ -714,37 +744,41 @@ function SelectionOverlay({
   const BADGE_FONT = 11 / scale;
   const BADGE_PAD_X = 6 / scale;
   const BADGE_PAD_Y = 3 / scale;
-  // Local resize preview: while dragging, render bounds from this state for fluid feedback.
-  const [drag, setDrag] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
-  const live = drag ?? bounds;
-  const sizeLabel = `${Math.round(live.w)} × ${Math.round(live.h)}`;
+  // Local resize preview — w/h relative to (0,0). Used only on
+  // unrotated nodes (resize disabled for rotated; see I-OB7).
+  const [drag, setDrag] = useState<{ w: number; h: number } | null>(null);
+  const liveW = drag?.w ?? bounds.w;
+  const liveH = drag?.h ?? bounds.h;
+  const isRotated = bounds.rotation !== 0;
+  const sizeLabel = `${Math.round(liveW)} × ${Math.round(liveH)}`;
   const labelW = sizeLabel.length * BADGE_FONT * 0.55 + BADGE_PAD_X * 2;
   const labelH = BADGE_FONT + BADGE_PAD_Y * 2;
 
+  // Corners in local coords (0..w, 0..h). Flags name which edge each
+  // axis pulls from (BR drag → r/b, TL drag → x/y, ...).
   const corners: Array<{
     cx: number; cy: number;
-    /** axis flags: which edge each axis pulls from */
     ax: 'x' | 'r'; ay: 'y' | 'b';
   }> = [
-    { cx: live.x, cy: live.y, ax: 'x', ay: 'y' },                        // top-left
-    { cx: live.x + live.w, cy: live.y, ax: 'r', ay: 'y' },               // top-right
-    { cx: live.x, cy: live.y + live.h, ax: 'x', ay: 'b' },               // bottom-left
-    { cx: live.x + live.w, cy: live.y + live.h, ax: 'r', ay: 'b' },      // bottom-right
+    { cx: 0,      cy: 0,      ax: 'x', ay: 'y' },
+    { cx: liveW,  cy: 0,      ax: 'r', ay: 'y' },
+    { cx: 0,      cy: liveH,  ax: 'x', ay: 'b' },
+    { cx: liveW,  cy: liveH,  ax: 'r', ay: 'b' },
   ];
 
   return (
-    <Group>
+    <Group x={bounds.x} y={bounds.y} rotation={bounds.rotation}>
       <Rect
-        x={live.x}
-        y={live.y}
-        width={live.w}
-        height={live.h}
+        x={0}
+        y={0}
+        width={liveW}
+        height={liveH}
         stroke="#0a84ff"
         strokeWidth={STROKE}
         fill="transparent"
         listening={false}
       />
-      {corners.map((c, i) => (
+      {!isRotated && corners.map((c, i) => (
         <Rect
           key={i}
           x={c.cx - HANDLE / 2}
@@ -756,28 +790,42 @@ function SelectionOverlay({
           strokeWidth={STROKE}
           draggable={!!onResize}
           onDragMove={(e) => {
-            // Compute new bounds from the dragged corner position.
+            // Local-coord drag — Konva returns the corner's position in
+            // its parent (this rotation group) frame, which is exactly
+            // local-to-bounds since rotation=0 here.
             const nx = e.target.x() + HANDLE / 2;
             const ny = e.target.y() + HANDLE / 2;
-            let x = bounds.x, y = bounds.y, w = bounds.w, h = bounds.h;
-            if (c.ax === 'x') { w = bounds.x + bounds.w - nx; x = nx; }
-            else { w = nx - bounds.x; }
-            if (c.ay === 'y') { h = bounds.y + bounds.h - ny; y = ny; }
-            else { h = ny - bounds.y; }
-            // Clamp minimums
-            if (w < 1) { w = 1; if (c.ax === 'x') x = bounds.x + bounds.w - 1; }
-            if (h < 1) { h = 1; if (c.ay === 'y') y = bounds.y + bounds.h - 1; }
-            setDrag({ x, y, w, h });
+            let w = liveW, h = liveH;
+            if (c.ax === 'x') { w = liveW - nx; }
+            else              { w = nx; }
+            if (c.ay === 'y') { h = liveH - ny; }
+            else              { h = ny; }
+            if (w < 1) w = 1;
+            if (h < 1) h = 1;
+            setDrag({ w, h });
           }}
           onDragEnd={() => {
-            if (drag && guid && onResize) onResize(guid, drag.x, drag.y, drag.w, drag.h);
+            if (drag && guid && onResize) {
+              // Translate local resize back to absolute coords for the
+              // call. With rotation=0 this is a straight passthrough;
+              // for axis-aligned TL drag the bounds.x also shifts but
+              // we keep it simple — the existing v1 behavior of "TL
+              // drag pivots BR" is approximated by deriving x/y from
+              // bounds + (corner direction × delta).
+              const dx = drag.w - bounds.w;
+              const dy = drag.h - bounds.h;
+              let nx = bounds.x, ny = bounds.y;
+              if (c.ax === 'x') nx = bounds.x - dx; // left edge moved
+              if (c.ay === 'y') ny = bounds.y - dy; // top edge moved
+              onResize(guid, nx, ny, drag.w, drag.h);
+            }
             setDrag(null);
           }}
         />
       ))}
       <Group
-        x={live.x + live.w / 2 - labelW / 2}
-        y={live.y + live.h + 6 / scale}
+        x={liveW / 2 - labelW / 2}
+        y={liveH + 6 / scale}
         listening={false}
       >
         <Rect width={labelW} height={labelH} fill="#0a84ff" cornerRadius={3 / scale} />
@@ -978,7 +1026,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
 
   // Compute selection bounds for every selected node (absolute coords).
   const selectionBoundsList = useMemo(() => {
-    const out: Array<{ guid: string; bounds: { x: number; y: number; w: number; h: number } }> = [];
+    const out: Array<{ guid: string; bounds: { x: number; y: number; w: number; h: number; rotation: number } }> = [];
     for (const g of selectedGuids) {
       const b = findAbsBounds(page, g);
       if (b) out.push({ guid: g, bounds: b });
@@ -996,17 +1044,30 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
     guid: string;
     info: HoverInfo;
     designBbox: { x: number; y: number; width: number; height: number };
+    /** Leaf node rotation (degrees). 0 for unrotated nodes. Round 7 §2. */
+    rotation: number;
   } | null>(null);
 
   const hoverApi = useMemo<HoverApi>(() => ({
     enter(e, node) {
       const stage = e.target.getStage();
       if (!stage) return;
-      // {relativeTo: stage} → bbox in stage's local (design) coords;
-      // independent of stage's own scale/translate.
-      const rect = e.target.getClientRect({ relativeTo: stage });
       const g = guidStr(node.guid);
       if (!g) return;
+      // For rotated nodes `e.target.getClientRect({relativeTo: stage})`
+      // returns the post-rotation AABB which doesn't help us draw the
+      // OBB outline. Use the node's pre-rotation bbox = (transform.m02,
+      // m12, size.x, size.y) and apply rotation around (m02, m12) on
+      // the overlay's outer Group instead.
+      const rotation = rotationDegrees(node.transform) ?? 0;
+      const rect = rotation !== 0
+        ? {
+            x: node.transform?.m02 ?? 0,
+            y: node.transform?.m12 ?? 0,
+            width: node.size?.x ?? 0,
+            height: node.size?.y ?? 0,
+          }
+        : e.target.getClientRect({ relativeTo: stage });
       // Variant container detection — covers both newer COMPONENT_SET and
       // legacy FRAME-with-variant-named-SYMBOL-children shapes (spec
       // I-T5.1). 0 ⇒ no variants segment in the tooltip.
@@ -1022,6 +1083,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
           variantCount,
         },
         designBbox: rect,
+        rotation,
       });
     },
     leave(guid) {
@@ -1154,6 +1216,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
                   width: hover.designBbox.width,
                   height: hover.designBbox.height,
                 }}
+                rotation={hover.rotation}
                 name={hover.info.name ?? ''}
                 scale={scale}
               />
@@ -1221,7 +1284,7 @@ function MultiSelectionOverlay({
   scale,
   onResizeMany,
 }: {
-  members: Array<{ guid: string; bounds: { x: number; y: number; w: number; h: number } }>;
+  members: Array<{ guid: string; bounds: { x: number; y: number; w: number; h: number; rotation: number } }>;
   scale: number;
   onResizeMany?: (updates: Array<{ guid: string; x: number; y: number; w: number; h: number }>) => void;
 }) {

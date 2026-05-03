@@ -23,14 +23,16 @@ interface DesignBbox {
 }
 
 interface HoverOverlayProps {
-  /** stage-local design coords (NOT viewport pixels). */
+  /** stage-local design coords (NOT viewport pixels). x/y is the rotation pivot. */
   bbox: DesignBbox;
   name: string;
   /** Stage scale — keeps stroke / pill at constant pixel size on screen. */
   scale: number;
+  /** Rotation in degrees applied around (bbox.x, bbox.y). Defaults to 0. */
+  rotation?: number;
 }
 
-export function HoverOverlay({ bbox, name, scale }: HoverOverlayProps) {
+export function HoverOverlay({ bbox, name, scale, rotation = 0 }: HoverOverlayProps) {
   // All overlay decoration is divided by scale so it stays 1px / 11px
   // regardless of zoom — same pattern as SelectionOverlay.
   const STROKE = 1 / scale;
@@ -45,18 +47,21 @@ export function HoverOverlay({ bbox, name, scale }: HoverOverlayProps) {
   const labelW = display.length * PILL_FONT * 0.6 + PILL_PAD_X * 2;
   const labelH = PILL_FONT + PILL_PAD_Y * 2;
 
-  // Place the pill above the bbox by default; if that pushes it above
-  // y=0 of the design space (i.e. the node is at the canvas top), drop
-  // it INSIDE the bbox just below the top edge.
+  // Outer Group sits at the bbox origin (rotation pivot) and is rotated
+  // so children draw in local coords (0..w × 0..h). The pill is placed
+  // above by default; for nodes near the canvas top the pill flips
+  // INSIDE so it doesn't render off-screen. Note the "above the
+  // canvas" check uses bbox.y in design space — for rotated nodes the
+  // visual top can differ; this v1 keeps the same heuristic.
   const placeAbove = bbox.y - labelH - PILL_GAP >= 0;
-  const pillY = placeAbove ? bbox.y - labelH - PILL_GAP : bbox.y;
+  const pillY = placeAbove ? -labelH - PILL_GAP : 0;
 
   return (
-    <Group listening={false}>
-      {/* Border around the bbox. */}
+    <Group x={bbox.x} y={bbox.y} rotation={rotation} listening={false}>
+      {/* Border around the bbox (local 0..w × 0..h). */}
       <Rect
-        x={bbox.x}
-        y={bbox.y}
+        x={0}
+        y={0}
         width={bbox.width}
         height={bbox.height}
         stroke={ACCENT}
@@ -64,7 +69,7 @@ export function HoverOverlay({ bbox, name, scale }: HoverOverlayProps) {
         listening={false}
       />
       {/* Name pill. */}
-      <Group x={bbox.x} y={pillY} listening={false}>
+      <Group x={0} y={pillY} listening={false}>
         <Rect
           x={0}
           y={0}
