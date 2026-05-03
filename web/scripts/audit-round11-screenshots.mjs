@@ -43,6 +43,14 @@ async function main() {
   await page.locator('input[type="file"][accept=".fig"]').setInputFiles(FIG_PATH);
   await page.waitForSelector('canvas', { timeout: 90_000 });
   await page.waitForTimeout(3500);
+  // Block until web fonts (Pretendard, Inter — see index.html) are loaded
+  // and force a re-render so KText measurement uses the real glyph widths.
+  // Without this, the first frame uses system fallback fonts whose
+  // glyphs are wider than Figma's source design, and KText width=N props
+  // clip the last character ("Button" → "Butto"). Spec:
+  // docs/specs/web-canvas-text-frame-fidelity.spec.md §2.1 I-3a.
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForTimeout(500);
 
   // Make sure the Pages section is open. The collapse toggle is the page's
   // "Pages" heading button; click it if the list isn't visible.
