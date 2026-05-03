@@ -17,6 +17,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { decodeCommandsBlob, parseVectorNetworkBlob, vectorNetworkToPath } from './vector.js';
 import { buildMasterIndex } from './masterIndex.js';
+import { isHiddenByPropBinding } from './effectiveVisibility.js';
 import type { DecodedFig } from './decoder.js';
 import type { BuildTreeResult, ContainerResult, TreeNode } from './types.js';
 
@@ -1025,23 +1026,8 @@ function applyDerivedSymbolData(
  * - propRefs[].defID가 assignments에 있고 그 boolValue=false → 자식 hidden.
  * - boolValue=true이면 표시 (강제 visible — Figma의 boolean prop 의미).
  */
-function isHiddenByPropAssignment(
-  data: Record<string, unknown>,
-  assignments: Map<string, boolean>,
-): boolean {
-  const refs = data.componentPropRefs as
-    | Array<{ defID?: { sessionID?: number; localID?: number }; componentPropNodeField?: string }>
-    | undefined;
-  if (!Array.isArray(refs)) return false;
-  for (const r of refs) {
-    if (r.componentPropNodeField !== 'VISIBLE') continue;
-    const d = r.defID;
-    if (!d || typeof d.sessionID !== 'number' || typeof d.localID !== 'number') continue;
-    const v = assignments.get(`${d.sessionID}:${d.localID}`);
-    if (v === false) return true;
-  }
-  return false;
-}
+// Property Visibility Toggle composition은 round 18 (cluster A 추출 step 2)
+// 부터 src/effectiveVisibility.ts:isHiddenByPropBinding 으로 통합.
 
 function convertNode(
   n: TreeNode,
@@ -1193,7 +1179,7 @@ function convertNode(
   const data = n.data as Record<string, unknown>;
   // effective visibility: 직접 visible:false 또는 propAssignments(VISIBLE)에 의한 토글
   const directVisible = data.visible !== false;
-  const hiddenByProp = !!propAssignments && isHiddenByPropAssignment(data, propAssignments);
+  const hiddenByProp = !!propAssignments && isHiddenByPropBinding(data, propAssignments);
   const effectiveVisible = directVisible && !hiddenByProp;
 
   const out: PenNode = {
@@ -1244,7 +1230,7 @@ function convertNode(
     for (const c of n.children) {
       const cd = c.data as Record<string, unknown>;
       const visible = cd.visible !== false;
-      const hiddenByProp = !!propAssignments && isHiddenByPropAssignment(cd, propAssignments);
+      const hiddenByProp = !!propAssignments && isHiddenByPropBinding(cd, propAssignments);
       // (c) 자식이 INSTANCE 면 자기 propAssignments + master propRefs 도 확인
       let hiddenBySelfProp = false;
       if (c.type === 'INSTANCE') {
@@ -1254,7 +1240,7 @@ function convertNode(
           const sid = sd?.symbolID;
           if (sid && typeof sid.sessionID === 'number' && typeof sid.localID === 'number') {
             const master = symbolIndex.get(`${sid.sessionID}:${sid.localID}`);
-            if (master && isHiddenByPropAssignment(master.data as Record<string, unknown>, selfAssignments)) {
+            if (master && isHiddenByPropBinding(master.data as Record<string, unknown>, selfAssignments)) {
               hiddenBySelfProp = true;
             }
           }

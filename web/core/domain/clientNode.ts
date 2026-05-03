@@ -11,6 +11,7 @@
 
 import { parseVectorNetworkBlob, vectorNetworkToPath } from '../../../src/vector.js';
 import { buildMasterIndex } from '../../../src/masterIndex.js';
+import { isHiddenByPropBinding } from '../../../src/effectiveVisibility.js';
 import type { TreeNode } from '../../../src/types.js';
 import type {
   ComponentTextRef,
@@ -340,23 +341,15 @@ export function collectPropAssignmentsAtPathFromInstance(
  * Spec: §3.4 I-P8 — explicit symbolOverrides[].visible wins over this; the
  * caller checks visOv first and only consults this when visOv is absent.
  */
+// Round 18 (cluster A 추출 step 2): Property Visibility Toggle 의 실제 결정은
+// src/effectiveVisibility.ts:isHiddenByPropBinding 으로 통합. 본 wrapper 는
+// 기존 caller (line ~758) 가 기대하는 tri-state 형태 (`false` = hidden by
+// prop / `undefined` = no opinion) 로 변환만 한다.
 function visibleFromPropRefs(
   data: Record<string, unknown>,
   propAssignments: Map<string, boolean>,
 ): boolean | undefined {
-  if (propAssignments.size === 0) return undefined;
-  const refs = data.componentPropRefs as
-    | Array<{ defID?: { sessionID?: number; localID?: number }; componentPropNodeField?: string }>
-    | undefined;
-  if (!Array.isArray(refs)) return undefined;
-  for (const r of refs) {
-    if (r.componentPropNodeField !== 'VISIBLE') continue;
-    const d = r.defID;
-    if (!d || typeof d.sessionID !== 'number' || typeof d.localID !== 'number') continue;
-    const v = propAssignments.get(`${d.sessionID}:${d.localID}`);
-    if (v === false) return false;
-  }
-  return undefined;
+  return isHiddenByPropBinding(data, propAssignments) ? false : undefined;
 }
 
 /**
