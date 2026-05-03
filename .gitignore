@@ -41,6 +41,11 @@ Thumbs.db
 *.swp
 *.swo
 
+# Local env / secrets
+.env
+.env.local
+*.env.local
+
 # Logs / ad-hoc
 logs/
 *.log
