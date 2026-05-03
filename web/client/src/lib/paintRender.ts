@@ -28,7 +28,12 @@ interface FigmaPaint {
   visible?: boolean;
   opacity?: number;
   color?: FigmaColor;
-  // gradient fields handled inside gradientFromPaint
+  blendMode?: string;
+  // Gradient-specific fields are read inside gradientFromPaint /
+  // firstStopRgba, but we keep the index-signature so callers can
+  // pass full paint objects without TS narrowing them to a stricter
+  // shape than the underlying data.
+  [key: string]: unknown;
 }
 
 export interface PaintRenderSolid {

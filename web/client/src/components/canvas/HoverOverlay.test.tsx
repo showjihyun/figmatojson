@@ -7,7 +7,13 @@ import { render } from '@testing-library/react';
 // every prop on data-* so assertions stay simple.
 vi.mock('react-konva', () => ({
   Group: ({ children, ...rest }: { children?: React.ReactNode } & Record<string, unknown>) => (
-    <div data-konva="group" data-listening={String(rest.listening)} data-x={rest.x as number} data-y={rest.y as number}>
+    <div
+      data-konva="group"
+      data-listening={String(rest.listening)}
+      data-x={rest.x as number}
+      data-y={rest.y as number}
+      data-rotation={rest.rotation as number | undefined}
+    >
       {children}
     </div>
   ),
@@ -39,21 +45,24 @@ import { HoverOverlay } from './HoverOverlay';
 const BBOX = { x: 100, y: 200, width: 240, height: 56 };
 
 describe('<HoverOverlay>', () => {
-  it('renders a stroke-only Rect at the bbox + a name pill at top-left', () => {
+  it('renders a stroke-only Rect (local coords) inside an outer Group at the bbox', () => {
     const { container } = render(<HoverOverlay bbox={BBOX} name="Header" scale={1} />);
+    const groups = container.querySelectorAll('[data-konva="group"]');
+    // Outer Group sits at the bbox origin (rotation pivot — round 7 §2).
+    const outer = groups[0]!;
+    expect(Number(outer.getAttribute('data-x'))).toBe(100);
+    expect(Number(outer.getAttribute('data-y'))).toBe(200);
+    // Border rect inside the rotated outer Group draws in local
+    // coords (0..w × 0..h).
     const rects = container.querySelectorAll('[data-konva="rect"]');
-    expect(rects.length).toBe(2); // border rect + pill background
-
-    // Border rect occupies the whole bbox.
+    expect(rects.length).toBe(2); // border + pill bg
     const border = rects[0]!;
-    expect(Number(border.getAttribute('data-x'))).toBe(100);
-    expect(Number(border.getAttribute('data-y'))).toBe(200);
+    expect(Number(border.getAttribute('data-x'))).toBe(0);
+    expect(Number(border.getAttribute('data-y'))).toBe(0);
     expect(Number(border.getAttribute('data-w'))).toBe(240);
     expect(Number(border.getAttribute('data-h'))).toBe(56);
     expect(border.getAttribute('data-stroke')).toBe('#0a84ff');
-    // 1px stroke at scale 1.
     expect(Number(border.getAttribute('data-stroke-width'))).toBe(1);
-    // No fill — must be transparent / undefined.
     const fill = border.getAttribute('data-fill');
     expect(fill === '' || fill === null).toBe(true);
 
@@ -65,6 +74,18 @@ describe('<HoverOverlay>', () => {
     const text = container.querySelector('[data-konva="text"]')!;
     expect(text.getAttribute('data-text')).toBe('Header');
     expect(text.getAttribute('data-fill')).toBe('#ffffff');
+  });
+
+  it('applies rotation to the outer Group when provided (round 7 §2)', () => {
+    const { container } = render(<HoverOverlay bbox={BBOX} rotation={45} name="x" scale={1} />);
+    const outer = container.querySelector('[data-konva="group"]')!;
+    expect(Number(outer.getAttribute('data-rotation'))).toBe(45);
+  });
+
+  it('outer rotation defaults to 0 when prop is omitted', () => {
+    const { container } = render(<HoverOverlay bbox={BBOX} name="x" scale={1} />);
+    const outer = container.querySelector('[data-konva="group"]')!;
+    expect(Number(outer.getAttribute('data-rotation'))).toBe(0);
   });
 
   it('uses "<unnamed>" when name is empty', () => {
@@ -83,23 +104,23 @@ describe('<HoverOverlay>', () => {
     expect(Number(text.getAttribute('data-font-size'))).toBe(5.5);
   });
 
-  it('places the pill ABOVE the bbox when there is room', () => {
+  it('places the pill ABOVE the bbox when there is room (negative local y)', () => {
     const { container } = render(<HoverOverlay bbox={BBOX} name="abc" scale={1} />);
-    // Two Group elements: outer wrapper, then inner pill positioner.
+    // Two Group elements: outer rotation wrapper, then inner pill
+    // positioner. After round 7, the inner pill uses LOCAL coords
+    // (relative to the outer Group), so "above" = negative y.
     const groups = container.querySelectorAll('[data-konva="group"]');
     expect(groups.length).toBeGreaterThanOrEqual(2);
     const pillGroup = groups[1]!;
-    // pillY should be < bbox.y (i.e., above) when bbox.y is large enough.
-    expect(Number(pillGroup.getAttribute('data-y'))).toBeLessThan(BBOX.y);
+    expect(Number(pillGroup.getAttribute('data-y'))).toBeLessThan(0);
   });
 
-  it('drops the pill INSIDE when the bbox is at the canvas top edge', () => {
-    // bbox.y = 0 → no headroom; pill should land AT bbox.y, not negative.
+  it('drops the pill INSIDE when the bbox is at the canvas top edge (local y = 0)', () => {
     const top = { x: 0, y: 0, width: 100, height: 50 };
     const { container } = render(<HoverOverlay bbox={top} name="x" scale={1} />);
     const groups = container.querySelectorAll('[data-konva="group"]');
     const pillGroup = groups[1]!;
-    expect(Number(pillGroup.getAttribute('data-y'))).toBeGreaterThanOrEqual(0);
+    expect(Number(pillGroup.getAttribute('data-y'))).toBe(0);
   });
 
   it('overlay group is non-listening so it does not block NodeShape mouse events', () => {
