@@ -37,7 +37,9 @@ async function main() {
   const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
   const page = await context.newPage();
   page.on('pageerror', (e) => console.error('[pageerror]', e.message));
-  await page.goto('http://localhost:5273/');
+  // ?audit=1 hides the ZoomBadge + round-10 variant labels so our PNGs
+  // match Figma's clean API export (no UI chrome, no editor-only affordances).
+  await page.goto('http://localhost:5273/?audit=1');
   await page.locator('input[type="file"][accept=".fig"]').setInputFiles(FIG_PATH);
   await page.waitForSelector('canvas', { timeout: 90_000 });
   await page.waitForTimeout(3500);
@@ -59,8 +61,26 @@ async function main() {
     return { x: r.x, y: r.y, w: r.width, h: r.height };
   });
   if (!canvasBox) throw new Error('canvas element not found');
-  const clip = { x: canvasBox.x, y: canvasBox.y, width: canvasBox.w, height: canvasBox.h };
   console.log('[canvas]', canvasBox);
+
+  // Fit a fig-page bbox into the viewport, then return a screenshot clip
+  // whose dims match the on-screen rect of that bbox. `__canvasFitBox`
+  // returns the post-fit screen rect; we offset by canvasBox to convert
+  // canvas-local coords to page-absolute coords (what page.screenshot wants).
+  const fitAndClip = async (box, padPx) => {
+    const screenRect = await page.evaluate(
+      ({ x, y, w, h, p }) => window.__canvasFitBox?.({ x, y, w, h }, p) ?? null,
+      { x: box.x, y: box.y, w: box.w, h: box.h, p: padPx },
+    );
+    if (!screenRect) throw new Error('__canvasFitBox not exposed on window');
+    await page.waitForTimeout(450);
+    return {
+      x: Math.round(canvasBox.x + screenRect.x),
+      y: Math.round(canvasBox.y + screenRect.y),
+      width: Math.round(screenRect.w),
+      height: Math.round(screenRect.h),
+    };
+  };
 
   for (const p of pages) {
     console.log(`\n=== page[${p.index}] ${p.name} (${p.slug}) — ${p.children.length} captures ===`);
@@ -74,10 +94,8 @@ async function main() {
     if (p.pageBox) {
       const ovDir = resolve(OUT_ROOT, p.slug, '_overview');
       mkdirSync(ovDir, { recursive: true });
-      await page.evaluate(({ x, y, w, h }) => {
-        if (typeof window.__canvasFitBox === 'function') window.__canvasFitBox({ x, y, w, h }, 24);
-      }, p.pageBox);
-      await page.waitForTimeout(600);
+      const clip = await fitAndClip(p.pageBox, 24);
+      await page.waitForTimeout(150);
       await page.screenshot({ path: resolve(ovDir, 'ours.png'), clip });
       console.log(`  [shot] _overview`);
     }
@@ -85,10 +103,7 @@ async function main() {
     for (const c of p.children) {
       const dir = resolve(OUT_ROOT, p.slug, c.slug);
       mkdirSync(dir, { recursive: true });
-      await page.evaluate(({ x, y, w, h }) => {
-        if (typeof window.__canvasFitBox === 'function') window.__canvasFitBox({ x, y, w, h }, 32);
-      }, { x: c.x, y: c.y, w: c.w, h: c.h });
-      await page.waitForTimeout(450);
+      const clip = await fitAndClip({ x: c.x, y: c.y, w: c.w, h: c.h }, 32);
       await page.screenshot({ path: resolve(dir, 'ours.png'), clip });
       console.log(`  [shot] ${c.slug}`);
     }

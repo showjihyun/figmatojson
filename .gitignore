@@ -53,3 +53,6 @@ logs/
 
 # Local scratch / audit / debug scripts (regenerable, not part of project state)
 _tmp_*
+
+# Audit-round11 LLM-context tiles (regenerable via crop-audit-tiles.mjs)
+docs/audit-round11/**/_tiles/
