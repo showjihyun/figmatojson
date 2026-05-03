@@ -2,15 +2,18 @@ import { describe, expect, it } from 'vitest';
 
 import {
   applyInstanceReflow,
+  toClientChildForRender,
+  toClientNode,
+  buildSymbolIndex,
+} from './clientNode.js';
+// Round 18 step 4: collectors live in src/instanceOverrides — import direct.
+import {
   collectFillOverridesFromInstance,
   collectPropAssignmentsAtPathFromInstance,
   collectPropAssignmentsFromInstance,
   collectSwapTargetsAtPathFromInstance,
   collectTextOverridesFromInstance,
-  toClientChildForRender,
-  toClientNode,
-  buildSymbolIndex,
-} from './clientNode.js';
+} from '../../../src/instanceOverrides.js';
 import type { TreeNode } from '../../../src/types.js';
 
 /**
