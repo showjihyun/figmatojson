@@ -76,6 +76,7 @@ Figma 가 만든 .fig 안의 INSTANCE 에는 종종 `symbolData.symbolOverrides[
 - I-P8 데이터 spread 직후 (기존 `visOv` 적용 직전, line 311-319) `data.componentPropRefs` 검사: `componentPropNodeField === "VISIBLE"` 인 ref 가 있고 그 `defID` 가 `propAssignments` 에서 `false` 로 resolve 되면 `out.visible = false`. 명시 visibility override (`visOv`) 가 더 우선 — prop-binding 은 default 만 결정.
 - I-P9 **Nested INSTANCE merge**: 내부 INSTANCE 가 자기 own `componentPropAssignments` 를 가지면, 그 assignments 는 그 INSTANCE 의 expansion 안에서만 유효 — outer 의 propAssignments 에 inner 의 entry 를 *덮어쓰기* 한 새 map 으로 inner expansion 진입. (text/fill override 와 달리 prop assignments 는 path-keyed 가 아니라 *defID-keyed* 이므로 prefix 가 필요 없다 — outer 와 inner 가 같은 defID 를 정의하면 inner 가 그 INSTANCE scope 안에서 우선.)
 - I-P10 **Master immutability 유지**: prop-binding 적용은 `_renderChildren` 의 per-instance 복제본에만 일어남. master 트리 자체의 `componentPropRefs` 데이터는 변경되지 않는다 — 다른 INSTANCE 가 같은 master 를 다른 assignments 로 expand 할 수 있어야 함.
+- I-P11 **(round 15) Outer symbolOverrides 의 componentPropAssignments**: outer INSTANCE 의 `symbolOverrides[]` 에는 entry 별로 `componentPropAssignments` 가 들어있을 수 있다 (메타리치 Dropdown 의 "금월"/"전월" 옵션 케이스). 이 assignments 는 **해당 entry 의 guidPath 가 가리키는 INSTANCE 자손** 에게만 유효 — outer 자체에 적용되지 않음. 처리: `collectPropAssignmentsAtPathFromInstance(symbolOverrides)` 가 `Map<pathKey, Map<defID, boolean>>` 를 반환. `toClientChildForRender` 가 `currentKey` 와 매칭되는 entry 를 찾으면 그 assignments 를 propAssignments map 에 *덮어쓰기 merge* 하여 그 자손 expansion 진입. 일반 inner-INSTANCE merge (I-P9) 와 같은 룰.
 
 #### 비고
 
