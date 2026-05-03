@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { shadowFromEffects } from './shadow';
+import { innerShadowFromEffects, shadowFromEffects } from './shadow';
 
 describe('shadowFromEffects', () => {
   it('returns null for missing / empty / non-array effects', () => {
@@ -89,5 +89,58 @@ describe('shadowFromEffects', () => {
     ]);
     expect(out!.shadowOffsetX).toBe(2);
     expect(out!.shadowOpacity).toBe(0.25);
+  });
+});
+
+describe('innerShadowFromEffects', () => {
+  it('returns null when no INNER_SHADOW is present', () => {
+    expect(innerShadowFromEffects(undefined)).toBeNull();
+    expect(innerShadowFromEffects([])).toBeNull();
+    expect(innerShadowFromEffects([{ type: 'DROP_SHADOW', visible: true }])).toBeNull();
+  });
+
+  it('maps the first visible INNER_SHADOW to canvas-ready shadow params', () => {
+    const out = innerShadowFromEffects([
+      {
+        type: 'INNER_SHADOW',
+        visible: true,
+        offset: { x: 2, y: 3 },
+        radius: 4,
+        color: { r: 0, g: 0, b: 0, a: 0.5 },
+        blendMode: 'NORMAL',
+      },
+    ]);
+    expect(out).toEqual({
+      offsetX: 2,
+      offsetY: 3,
+      blur: 4,
+      // Inner shadow uses the raw rgba string — alpha baked in (no
+      // shadowOpacity slot in the canvas API path).
+      color: 'rgba(0,0,0,0.500)',
+    });
+  });
+
+  it('skips INNER_SHADOW with non-NORMAL blendMode', () => {
+    expect(
+      innerShadowFromEffects([
+        {
+          type: 'INNER_SHADOW',
+          visible: true,
+          offset: { x: 1, y: 1 },
+          radius: 2,
+          color: { r: 1, g: 0, b: 0, a: 1 },
+          blendMode: 'MULTIPLY',
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it('skips hidden INNER_SHADOWs and walks past DROP_SHADOWs to find one', () => {
+    const out = innerShadowFromEffects([
+      { type: 'DROP_SHADOW', visible: true, offset: { x: 99, y: 99 }, radius: 99 },
+      { type: 'INNER_SHADOW', visible: false, offset: { x: 1, y: 1 }, radius: 1 },
+      { type: 'INNER_SHADOW', visible: true, offset: { x: 5, y: 5 }, radius: 5, color: { r: 1, g: 1, b: 1, a: 1 } },
+    ]);
+    expect(out!.offsetX).toBe(5);
   });
 });
