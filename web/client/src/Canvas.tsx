@@ -47,7 +47,9 @@ import {
   konvaVerticalAlign,
 } from './lib/textStyle';
 import { applyStrokeAlign } from './lib/strokeAlign';
-import { shadowFromEffects } from './lib/shadow';
+import { shadowFromEffects, innerShadowFromEffects } from './lib/shadow';
+import { paintLayers } from './lib/paintRender';
+import { InnerShadowOverlay } from './components/canvas/InnerShadowOverlay';
 import { rotationDegrees } from './lib/transform';
 import { konvaLineCap, konvaLineJoin } from './lib/strokeCapJoin';
 import { firstStopRgba, gradientFromPaint, type KonvaGradient } from './lib/gradient';
@@ -390,26 +392,14 @@ function NodeShapeImpl({
     );
   }
 
-  // Resolve the rect's fill — last visible non-IMAGE paint wins (Figma
-  // stacks paints bottom-up, so [N-1] is the user-visible top). For
-  // SOLID we get a CSS color string; for LINEAR/RADIAL gradient we get
-  // Konva fill props; angular/diamond falls back to first-stop color.
-  // Spec web-render-fidelity-round4.spec.md §3.
-  const topPaint = pickTopPaint(node.fillPaints as Array<{ type?: string; visible?: boolean }> | undefined);
-  let fillColor: string = 'transparent';
-  let gradient: KonvaGradient | null = null;
-  if (topPaint) {
-    const t = (topPaint as { type?: string }).type;
-    if (t === 'SOLID') {
-      fillColor = colorOf(node);
-    } else if (t === 'GRADIENT_LINEAR' || t === 'GRADIENT_RADIAL') {
-      gradient = gradientFromPaint(topPaint as Parameters<typeof gradientFromPaint>[0], w, h);
-      if (!gradient) fillColor = firstStopRgba(topPaint as Parameters<typeof firstStopRgba>[0]) ?? 'transparent';
-    } else if (t === 'GRADIENT_ANGULAR' || t === 'GRADIENT_DIAMOND') {
-      // Konva doesn't render these — fall back to the first stop color.
-      fillColor = firstStopRgba(topPaint as Parameters<typeof firstStopRgba>[0]) ?? 'transparent';
-    }
-  }
+  // Multi-paint stacking (round 6 §2). fillPaints[0] is bottom-most;
+  // every visible paint becomes its own Konva element. SOLID and
+  // gradient paints render as Rects; IMAGE renders as ImageFill.
+  const layers = paintLayers(
+    node.fillPaints as Array<{ type?: string; visible?: boolean }> | undefined,
+    w,
+    h,
+  );
   // Per-stroke dash array (Figma stores [dash, gap, ...]); pass through
   // to Konva's `dash` prop on stroke-bearing elements only.
   const dash = Array.isArray(node.dashPattern) && node.dashPattern.length > 0
@@ -455,8 +445,11 @@ function NodeShapeImpl({
     : { x: 0, y: 0, w, h, cornerRadius: cornerR };
 
   // Drop shadow (spec round2 §4) — first visible DROP_SHADOW from
-  // effects[]. Multiple shadows / inner shadow / blur fall through to v2.
+  // effects[]. Multiple shadows / blur fall through to v2.
   const shadow = shadowFromEffects(node.effects);
+  // Inner shadow (round 6 §3) — first visible INNER_SHADOW; rendered
+  // by a dedicated Konva.Shape with custom sceneFunc.
+  const innerShadow = innerShadowFromEffects(node.effects);
 
   // Frame clip (spec round2 §3) — when frameMaskDisabled === false,
   // clip children to the frame's rounded-rect bounds. Konva clipFunc
@@ -522,33 +515,126 @@ function NodeShapeImpl({
       onMouseLeave={onMouseLeave}
       clipFunc={clipFunc}
     >
-      <Rect
-        x={rectDims.x}
-        y={rectDims.y}
-        width={rectDims.w}
-        height={rectDims.h}
-        fill={gradient ? undefined : fillColor}
-        fillLinearGradientStartPoint={gradient?.kind === 'linear' ? gradient.fillLinearGradientStartPoint : undefined}
-        fillLinearGradientEndPoint={gradient?.kind === 'linear' ? gradient.fillLinearGradientEndPoint : undefined}
-        fillLinearGradientColorStops={gradient?.kind === 'linear' ? gradient.fillLinearGradientColorStops : undefined}
-        fillRadialGradientStartPoint={gradient?.kind === 'radial' ? gradient.fillRadialGradientStartPoint : undefined}
-        fillRadialGradientEndPoint={gradient?.kind === 'radial' ? gradient.fillRadialGradientEndPoint : undefined}
-        fillRadialGradientStartRadius={gradient?.kind === 'radial' ? gradient.fillRadialGradientStartRadius : undefined}
-        fillRadialGradientEndRadius={gradient?.kind === 'radial' ? gradient.fillRadialGradientEndRadius : undefined}
-        fillRadialGradientColorStops={gradient?.kind === 'radial' ? gradient.fillRadialGradientColorStops : undefined}
-        stroke={wantPerSide ? undefined : stroke?.color}
-        strokeWidth={wantPerSide ? undefined : stroke?.width}
-        dash={wantPerSide ? undefined : dash}
-        lineJoin={lineJoin}
-        cornerRadius={rectDims.cornerRadius}
-        shadowEnabled={shadow != null}
-        shadowOffsetX={shadow?.shadowOffsetX}
-        shadowOffsetY={shadow?.shadowOffsetY}
-        shadowBlur={shadow?.shadowBlur}
-        shadowColor={shadow?.shadowColor}
-        shadowOpacity={shadow?.shadowOpacity}
-        listening
-      />
+      {/* Multi-paint background stack (round 6 §2). One Konva element
+          per visible paint, in z-order — fillPaints[0] is bottom. The
+          bottom paint carries the drop shadow so the silhouette casts
+          correctly. The stroke is rendered as a separate Rect ABOVE
+          all fills with strokeAlign-adjusted dims. */}
+      {layers.length === 0 && (shadow != null || (!wantPerSide && stroke != null)) && (
+        // No fill paints, but we still want to anchor drop shadow / stroke.
+        <Rect
+          x={rectDims.x}
+          y={rectDims.y}
+          width={rectDims.w}
+          height={rectDims.h}
+          fill={undefined}
+          stroke={wantPerSide ? undefined : stroke?.color}
+          strokeWidth={wantPerSide ? undefined : stroke?.width}
+          dash={wantPerSide ? undefined : dash}
+          lineJoin={lineJoin}
+          cornerRadius={rectDims.cornerRadius}
+          shadowEnabled={shadow != null}
+          shadowOffsetX={shadow?.shadowOffsetX}
+          shadowOffsetY={shadow?.shadowOffsetY}
+          shadowBlur={shadow?.shadowBlur}
+          shadowColor={shadow?.shadowColor}
+          shadowOpacity={shadow?.shadowOpacity}
+          listening
+        />
+      )}
+      {layers.map((layer, i) => {
+        // Drop shadow rides on the BOTTOM paint (i === 0); pass empty
+        // shadow props to the rest so their silhouettes don't double-
+        // shadow the same node (round 6 I-MP4).
+        const shadowProps = i === 0 && shadow ? {
+          shadowEnabled: true,
+          shadowOffsetX: shadow.shadowOffsetX,
+          shadowOffsetY: shadow.shadowOffsetY,
+          shadowBlur: shadow.shadowBlur,
+          shadowColor: shadow.shadowColor,
+          shadowOpacity: shadow.shadowOpacity,
+        } : undefined;
+
+        if (layer.render.kind === 'image') {
+          return (
+            <ImageFill
+              key={i}
+              src={imgSrc}
+              width={w}
+              height={h}
+              cornerRadius={cornerR}
+            />
+          );
+        }
+        if (layer.render.kind === 'solid') {
+          return (
+            <Rect
+              key={i}
+              x={0}
+              y={0}
+              width={w}
+              height={h}
+              fill={layer.render.fill}
+              cornerRadius={cornerR}
+              {...(shadowProps ?? {})}
+              listening
+            />
+          );
+        }
+        // gradient (linear / radial)
+        const g = layer.render;
+        return (
+          <Rect
+            key={i}
+            x={0}
+            y={0}
+            width={w}
+            height={h}
+            fillLinearGradientStartPoint={g.kind === 'linear' ? g.fillLinearGradientStartPoint : undefined}
+            fillLinearGradientEndPoint={g.kind === 'linear' ? g.fillLinearGradientEndPoint : undefined}
+            fillLinearGradientColorStops={g.kind === 'linear' ? g.fillLinearGradientColorStops : undefined}
+            fillRadialGradientStartPoint={g.kind === 'radial' ? g.fillRadialGradientStartPoint : undefined}
+            fillRadialGradientEndPoint={g.kind === 'radial' ? g.fillRadialGradientEndPoint : undefined}
+            fillRadialGradientStartRadius={g.kind === 'radial' ? g.fillRadialGradientStartRadius : undefined}
+            fillRadialGradientEndRadius={g.kind === 'radial' ? g.fillRadialGradientEndRadius : undefined}
+            fillRadialGradientColorStops={g.kind === 'radial' ? g.fillRadialGradientColorStops : undefined}
+            cornerRadius={cornerR}
+            {...(shadowProps ?? {})}
+            listening
+          />
+        );
+      })}
+      {/* Inner shadow (round 6 §3) — drawn after fills, before stroke,
+          using a custom sceneFunc that emulates inner-shadow via clip
+          + even-odd outer-with-hole fill. */}
+      {innerShadow && (
+        <InnerShadowOverlay
+          width={w}
+          height={h}
+          corners={{ tl: cTL, tr: cTR, br: cBR, bl: cBL }}
+          offsetX={innerShadow.offsetX}
+          offsetY={innerShadow.offsetY}
+          blur={innerShadow.blur}
+          color={innerShadow.color}
+        />
+      )}
+      {/* Stroke as a separate Rect ABOVE the paint stack. Fill is
+          undefined so the layered paints below stay visible. */}
+      {layers.length > 0 && !wantPerSide && stroke && (
+        <Rect
+          x={rectDims.x}
+          y={rectDims.y}
+          width={rectDims.w}
+          height={rectDims.h}
+          fill={undefined}
+          stroke={stroke.color}
+          strokeWidth={stroke.width}
+          dash={dash}
+          lineJoin={lineJoin}
+          cornerRadius={rectDims.cornerRadius}
+          listening={false}
+        />
+      )}
       {wantPerSide && bt && bt > 0 && (
         <Line points={[0, 0, w, 0]} stroke={stroke!.color} strokeWidth={bt} lineCap={lineCap} dash={dash} listening={false} />
       )}
@@ -560,9 +646,6 @@ function NodeShapeImpl({
       )}
       {wantPerSide && bl && bl > 0 && (
         <Line points={[0, 0, 0, h]} stroke={stroke!.color} strokeWidth={bl} lineCap={lineCap} dash={dash} listening={false} />
-      )}
-      {imgSrc && (
-        <ImageFill src={imgSrc} width={w} height={h} cornerRadius={cornerR} />
       )}
       {hasChildren &&
         renderableChildren.map((c: any, i: number) => (

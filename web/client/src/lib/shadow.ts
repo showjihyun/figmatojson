@@ -65,3 +65,43 @@ export function shadowFromEffects(
   }
   return null;
 }
+
+export interface InnerShadow {
+  offsetX: number;
+  offsetY: number;
+  blur: number;
+  /** Pre-built rgba string with alpha already baked in (for ctx.shadowColor). */
+  color: string;
+}
+
+/**
+ * Pick the first visible INNER_SHADOW with NORMAL blendMode. Returns
+ * null when none qualify (Konva can't render multiple inner shadows
+ * per shape, and non-NORMAL blend would render incorrectly).
+ *
+ * Spec: docs/specs/web-render-fidelity-round6.spec.md §3
+ */
+export function innerShadowFromEffects(
+  effects: FigmaEffect[] | undefined,
+): InnerShadow | null {
+  if (!Array.isArray(effects) || effects.length === 0) return null;
+  for (const e of effects) {
+    if (e?.type !== 'INNER_SHADOW') continue;
+    if (e.visible === false) continue;
+    if (e.blendMode && e.blendMode !== 'NORMAL') continue;
+    const c = e.color ?? {};
+    const r = Math.round((c.r ?? 0) * 255);
+    const g = Math.round((c.g ?? 0) * 255);
+    const b = Math.round((c.b ?? 0) * 255);
+    const a = c.a ?? 1;
+    return {
+      offsetX: e.offset?.x ?? 0,
+      offsetY: e.offset?.y ?? 0,
+      blur: e.radius ?? 0,
+      // Inner-shadow uses raw canvas shadowColor — alpha must be in
+      // the rgba string (no separate shadowOpacity for ctx-level draw).
+      color: `rgba(${r},${g},${b},${a.toFixed(3)})`,
+    };
+  }
+  return null;
+}
