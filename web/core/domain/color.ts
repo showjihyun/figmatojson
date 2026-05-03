@@ -85,3 +85,42 @@ export function solidStrokeCss(
   const op = typeof first.opacity === 'number' ? first.opacity : 1;
   return { color: rgbaToCss(first.color, op), width: w };
 }
+
+/**
+ * First visible stroke paint resolved to `{ color, width }`, including
+ * gradient → first-stop fallback (Konva can't render gradient strokes
+ * natively, but a single representative color preserves the design's
+ * dominant tone). Spec round8 §3.
+ *
+ * Returns null when no usable paint exists (all hidden, IMAGE only).
+ */
+export function strokeFromPaints(
+  node: { strokeWeight?: unknown; strokePaints?: unknown },
+): { color: string; width: number } | null {
+  const w = node?.strokeWeight;
+  if (typeof w !== 'number' || w <= 0) return null;
+  const strokes = node?.strokePaints;
+  if (!Array.isArray(strokes)) return null;
+  for (const p of strokes as Array<{
+    type?: string;
+    visible?: boolean;
+    color?: Rgba01;
+    opacity?: number;
+    stops?: Array<{ color?: Rgba01; position?: number }>;
+  }>) {
+    if (!p || p.visible === false) continue;
+    const op = typeof p.opacity === 'number' ? p.opacity : 1;
+    if (p.type === 'SOLID' && p.color) {
+      return { color: rgbaToCss(p.color, op), width: w };
+    }
+    if (p.type && p.type.startsWith('GRADIENT_') && Array.isArray(p.stops) && p.stops.length > 0) {
+      const c = p.stops[0]?.color;
+      if (!c) continue;
+      // Use the first stop's color as a fallback. Approximate but
+      // never pixel-perfect for true gradient strokes.
+      return { color: rgbaToCss(c, op), width: w };
+    }
+    // IMAGE / unknown — skip.
+  }
+  return null;
+}
