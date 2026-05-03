@@ -637,6 +637,32 @@ export function toClientChildForRender(
         // I-E1: corrupt swap target falls back to the default master.
         ?? (swapTargetKey ? symbolIndex.get(`${sid.sessionID}:${sid.localID}`) : undefined);
       const swapApplied = swapTargetKey !== undefined && master !== undefined && masterKey === swapTargetKey;
+      // Spec web-instance-variant-swap §3.3 (round 17 extension): when
+      // swap is applied, the rendered INSTANCE node inherits the swap
+      // target's visual properties (fillPaints, cornerRadius, strokes,
+      // etc.) — Figma's semantic is "use this variant's appearance".
+      // Without this, e.g. metarich's "직접 선택" row renders the WHITE
+      // text with no blue background → visually invisible. The
+      // instance's own data fields (transform, etc.) still win on top
+      // for non-visual concerns. Mirrors pen-export.ts:1146-1158.
+      if (swapApplied && master) {
+        const swapTargetData = (master.data ?? {}) as Record<string, unknown>;
+        for (const k of Object.keys(swapTargetData)) {
+          // Skip fields the instance is meant to own / fields that don't
+          // make sense to inherit (children — we expand them separately
+          // via _renderChildren below; symbolData — instance-specific).
+          if (k === 'guid' || k === 'type' || k === 'name') continue;
+          if (k === 'children' || k === 'symbolData') continue;
+          if (k === 'transform') continue;            // instance position wins
+          if (k === 'parentIndex' || k === 'phase') continue;
+          // Only inherit when the instance doesn't already provide the
+          // field (instance own value wins on collision). Falls back to
+          // swap target for missing visual fields like fillPaints.
+          if (data[k] === undefined) {
+            (data as Record<string, unknown>)[k] = swapTargetData[k];
+          }
+        }
+      }
       if (master) {
         const innerText = collectTextOverridesFromInstance(sd?.symbolOverrides);
         const innerFill = collectFillOverridesFromInstance(sd?.symbolOverrides);

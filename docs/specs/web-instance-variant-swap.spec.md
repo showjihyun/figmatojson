@@ -52,6 +52,16 @@ Figma 의 "swap component instance" 메커니즘. 외곽 INSTANCE 의 `symbolOve
 - I-V1 swap 이 적용된 INSTANCE 는 **implicit visible:true** 로 취급 — 즉 INSTANCE 자체의 master 데이터가 `visible: false` 라도, swap 이 active 하면 visible 로 렌더. **단**, explicit `visibilityOverrides` (Symbol Visibility Override) 가 다른 값을 명시하면 그 값이 우선 (round-12 §3.4 I-P8 의 우선순위 일관). 메타리치 Dropdown 의 "직접 선택" 케이스: 15:300 master 데이터가 `visible: false`, outer 가 explicit `visible` override 를 두지 않음, swap 적용 → implicit visible:true → render.
 - I-V2 swap 이 *없는* INSTANCE 는 본 spec 영향 없음 — 기존 visibility 룰 그대로.
 
+### 3.4 Visual property inheritance from swap target (round 17)
+
+Figma 의 swap semantic 은 "use this variant's appearance" — 단순히 children 만 교체하는 게 아니라 **swap target 의 시각 속성을 INSTANCE 자체에 적용**. 메타리치 "직접 선택" 케이스: 기본 master 11:514 는 fillPaints 없음, swap target 15:287 은 fillPaints `{r:0.097, g:0.441, b:0.957}` (BLUE) + cornerRadius 12 + 흰 텍스트. swap 후 INSTANCE 가 swap target 의 fillPaints 를 inherit 하지 않으면 흰 텍스트가 흰 컨테이너 위에 그려져 시각적으로 사라짐.
+
+- I-V3 swap 이 적용되면 swap target 의 `data` 필드를 instance `data` 에 머지 (read 전, data spread 직전). 머지 룰: **instance own field wins** — 이미 instance.data 에 값이 있으면 유지; 없을 때만 swap target 값 채움.
+- I-V4 머지에서 제외하는 필드: `guid`, `type`, `name` (identity), `children`, `symbolData` (instance-specific), `transform` (instance position), `parentIndex`, `phase` (tree-structure). 그 외는 inherit 후보.
+- I-V5 visual fields (fillPaints, strokePaints, cornerRadius, rectangle*CornerRadius, opacity 등) 가 inherit 되어 시각적 outcome 이 swap target 의 것과 일치.
+
+`pen-export.ts:1146-1158` 의 `merged` 객체 생성 로직과 동등한 효과 — 거기서는 `{ ...masterData, ...rootOverrideFields, ... }` 로 master 값이 base, override 가 상위. 본 spec 의 I-V3 는 같은 방향: swap target 이 base, instance own 이 상위.
+
 ### 3.4 Master immutability
 
 - I-M1 swap target master 의 데이터 자체는 건드리지 않음 — round-12 spec §3.3 의 master immutability 와 동일 룰. swap 결과는 per-instance `_renderChildren` 복제본에만 적용.
@@ -79,14 +89,8 @@ Figma 의 "swap component instance" 메커니즘. 외곽 INSTANCE 의 `symbolOve
 - **Swap target 의 visibility 가 false** — swap target master 자체의 `visible: false` 케이스. v1 은 swap target 이 visible: true 라고 가정 (메타리치 케이스 충족).
 - **Swap target 의 master tree 가 변경된 후 다른 outer override 처리** — v1 은 swap target 의 children 에 outer 의 *나머지* overrides 적용. 만약 다른 path-keyed override 가 default master 의 children 을 target 으로 작성되어 있으면 그 override 는 (다른 GUID 트리이므로) 매칭 안 됨 — 무효. 메타리치는 outer override 가 swap target 의 GUID 를 알고 있어 자동 매칭.
 
-## 7. Known caveat — datepicker rail 6번째 행 visual
+## 7. Round 17 visual fix history (resolved)
 
-본 spec 구현 후 메타리치 datepicker rail 의 6번째 옵션 ("직접 선택") 은 **데이터 레이어에서는 정상 표시** — `_renderChildren` 에 `id: 15:300, visible: true, transform.m12: 209` 로 등록, `_renderChildren[].._renderChildren` 에 swap target 의 TEXT (15:288) 가 `_renderTextOverride: "직접 선택"` 으로 등록 (Konva tree dump 로 확인). 그러나 audit 스크린샷에는 5 행만 보임.
+Round 16 초안 commit 직후 데이터 layer 는 정상 작동했지만 audit 스크린샷에 6번째 행이 보이지 않았다. 원인 가설은 audit harness bbox 미스매치였으나, Konva tree dump 로 직접 확인하니 "직접 선택" TEXT 가 `fill: rgba(255,255,255,1)` (white) + 배경 Rect 부재로 흰 컨테이너 위 흰 텍스트 = 시각적으로 사라진 상태였다. Audit harness 와 무관한 bug.
 
-차이 원인은 본 spec 영역 *밖* — 데이터/오버라이드 파이프라인은 정확히 작동. 잔여 visual gap 의 가능성:
-
-- audit harness 의 `__canvasFitBox` 가 12:749 의 *master.size* (1008×316) 만 고려하고 children 이 그 bbox 밖으로 rendered 되는 케이스에서 짧은 클립.
-- 부모 FRAME (12:749 또는 12:750) 의 frameMaskDisabled clip 이 master.size 기준으로 커서 6번째 행을 자름.
-- Figma API export 의 bbox 와 우리 fig-page 의 bbox 가 *원래부터* 다름 (Figma 가 children 의 바운딩 박스로 export 영역 결정, 우리는 master.size 보고).
-
-별 라운드에서 audit harness 의 fit/clip 로직 또는 master-size-vs-rendered-bounds 디스크리펀시 분석이 필요. 본 spec 의 variant swap 구현 자체는 완성.
+진짜 원인: swap 이 적용되면 swap target master 의 fillPaints (blue background) 를 INSTANCE 에 inherit 해야 하는데, round-16 코드는 children 만 교체하고 visual 속성은 inherit 안 함. round 17 가 §3.4 I-V3~V5 로 visual 속성 inheritance 추가. fix 후 6번째 행이 figma 와 동일하게 BLUE 배경 + WHITE 텍스트로 정상 표시됨.
