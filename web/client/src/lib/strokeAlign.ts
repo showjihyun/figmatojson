@@ -13,15 +13,32 @@
  * pass-through identity.
  */
 
+/**
+ * Konva.Rect cornerRadius can be either a single number (uniform) or a
+ * 4-tuple [tl, tr, br, bl] (asymmetric). Spec round 5 §2 added the
+ * array path; this module's strokeAlign offset has to handle both.
+ */
+export type CornerRadius = number | [number, number, number, number];
+
 export interface RectDims {
   x: number;
   y: number;
   w: number;
   h: number;
-  cornerRadius: number;
+  cornerRadius: CornerRadius;
 }
 
 export type StrokeAlign = 'INSIDE' | 'OUTSIDE' | 'CENTER' | undefined;
+
+function offsetCornerRadius(r: CornerRadius, delta: number): CornerRadius {
+  if (typeof r === 'number') return Math.max(0, r + delta);
+  return [
+    Math.max(0, r[0] + delta),
+    Math.max(0, r[1] + delta),
+    Math.max(0, r[2] + delta),
+    Math.max(0, r[3] + delta),
+  ];
+}
 
 /**
  * Apply strokeAlign by adjusting rect geometry. `strokeWeight` is the
@@ -49,7 +66,7 @@ export function applyStrokeAlign(
       y: dims.y + half,
       w: newW,
       h: newH,
-      cornerRadius: Math.max(0, dims.cornerRadius - half),
+      cornerRadius: offsetCornerRadius(dims.cornerRadius, -half),
     };
   }
   // OUTSIDE
@@ -58,6 +75,6 @@ export function applyStrokeAlign(
     y: dims.y - half,
     w: dims.w + strokeWeight,
     h: dims.h + strokeWeight,
-    cornerRadius: dims.cornerRadius + half,
+    cornerRadius: offsetCornerRadius(dims.cornerRadius, half),
   };
 }

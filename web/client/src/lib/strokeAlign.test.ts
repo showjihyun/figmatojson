@@ -58,4 +58,20 @@ describe('applyStrokeAlign', () => {
   it('OUTSIDE: cornerRadius grows by half stroke (spec I-SA7)', () => {
     expect(applyStrokeAlign(D, 4, 'OUTSIDE').cornerRadius).toBe(10); // 8 + 2
   });
+
+  // Round 5: cornerRadius can also be a [tl, tr, br, bl] tuple (asymmetric).
+  it('INSIDE: per-corner array shrinks every corner by half stroke', () => {
+    const asym: RectDims = { x: 0, y: 0, w: 100, h: 60, cornerRadius: [12, 0, 12, 0] };
+    expect(applyStrokeAlign(asym, 4, 'INSIDE').cornerRadius).toEqual([10, 0, 10, 0]);
+  });
+
+  it('OUTSIDE: per-corner array grows every corner by half stroke', () => {
+    const asym: RectDims = { x: 0, y: 0, w: 100, h: 60, cornerRadius: [12, 0, 12, 0] };
+    expect(applyStrokeAlign(asym, 4, 'OUTSIDE').cornerRadius).toEqual([14, 2, 14, 2]);
+  });
+
+  it('INSIDE: per-corner array clamps any negative result to 0', () => {
+    const asym: RectDims = { x: 0, y: 0, w: 100, h: 60, cornerRadius: [4, 0, 0, 1] };
+    expect(applyStrokeAlign(asym, 8, 'INSIDE').cornerRadius).toEqual([0, 0, 0, 0]);
+  });
 });

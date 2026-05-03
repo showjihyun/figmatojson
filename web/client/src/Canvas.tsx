@@ -52,6 +52,8 @@ import { rotationDegrees } from './lib/transform';
 import { konvaLineCap, konvaLineJoin } from './lib/strokeCapJoin';
 import { firstStopRgba, gradientFromPaint, type KonvaGradient } from './lib/gradient';
 import { pickTopPaint } from './lib/paint';
+import { cornerRadiusForKonva } from './lib/cornerRadii';
+import { applyTextCase, konvaTextDecoration } from './lib/textTransform';
 
 // ─── Drag-snapshot plumbing ──────────────────────────────────────────────
 //
@@ -139,25 +141,36 @@ function ImageFill({
   src: string | null;
   width: number;
   height: number;
-  cornerRadius: number;
+  cornerRadius: number | [number, number, number, number];
 }) {
   const img = useImageElement(src);
   if (!img || width <= 0 || height <= 0) return null;
-  if (cornerRadius > 0) {
-    const r = Math.min(cornerRadius, width / 2, height / 2);
+  // Resolve uniform vs per-corner radius.
+  const tl = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[0];
+  const tr = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[1];
+  const br = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[2];
+  const bl = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[3];
+  const halfW = width / 2;
+  const halfH = height / 2;
+  const cTL = Math.min(Math.max(0, tl), halfW, halfH);
+  const cTR = Math.min(Math.max(0, tr), halfW, halfH);
+  const cBR = Math.min(Math.max(0, br), halfW, halfH);
+  const cBL = Math.min(Math.max(0, bl), halfW, halfH);
+  const anyCorner = cTL > 0 || cTR > 0 || cBR > 0 || cBL > 0;
+  if (anyCorner) {
     return (
       <Group
         clipFunc={(ctx) => {
           ctx.beginPath();
-          ctx.moveTo(r, 0);
-          ctx.lineTo(width - r, 0);
-          ctx.arcTo(width, 0, width, r, r);
-          ctx.lineTo(width, height - r);
-          ctx.arcTo(width, height, width - r, height, r);
-          ctx.lineTo(r, height);
-          ctx.arcTo(0, height, 0, height - r, r);
-          ctx.lineTo(0, r);
-          ctx.arcTo(0, 0, r, 0, r);
+          ctx.moveTo(cTL, 0);
+          ctx.lineTo(width - cTR, 0);
+          ctx.arcTo(width, 0, width, cTR, cTR);
+          ctx.lineTo(width, height - cBR);
+          ctx.arcTo(width, height, width - cBR, height, cBR);
+          ctx.lineTo(cBL, height);
+          ctx.arcTo(0, height, 0, height - cBL, cBL);
+          ctx.lineTo(0, cTL);
+          ctx.arcTo(0, 0, cTL, 0, cTL);
           ctx.closePath();
         }}
       >
@@ -208,7 +221,10 @@ function NodeShapeImpl({
   const w = node.size?.x ?? 0;
   const h = node.size?.y ?? 0;
   const stroke = strokeOf(node);
-  const cornerR = node.cornerRadius ?? 0;
+  // Resolve per-corner radii (spec round5 §2). When all four corners
+  // share the same value, returns a number → number; asymmetric
+  // returns a [tl, tr, br, bl] tuple Konva.Rect accepts directly.
+  const cornerR = cornerRadiusForKonva(node, node.cornerRadius ?? 0);
 
   // Universal Figma props (round 3):
   //   - rotation: pure-rotation matrices → degrees; skew falls through to
@@ -270,7 +286,12 @@ function NodeShapeImpl({
 
   if (node.type === 'TEXT') {
     // Render-time text override (per-instance) wins over master textData.
-    const chars = (node._renderTextOverride as string | undefined) ?? node.textData?.characters ?? '';
+    const rawChars = (node._renderTextOverride as string | undefined) ?? node.textData?.characters ?? '';
+    // textCase applies AFTER the override (spec round5 §6 Resolved
+    // questions): instance override sets the literal string, then the
+    // render-time case transform shapes it for display.
+    const chars = applyTextCase(rawChars, node.textCase);
+    const textDecoration = konvaTextDecoration(node.textDecoration);
     const fontSize = node.fontSize ?? 12;
     const fontFamily = node.fontName?.family ?? 'Inter';
     const fillColor = (() => {
@@ -301,6 +322,7 @@ function NodeShapeImpl({
         fontSize={fontSize}
         fontFamily={fontFamily}
         fontStyle={fontStyle}
+        textDecoration={textDecoration}
         letterSpacing={letterSpacing}
         lineHeight={lineHeight}
         verticalAlign={verticalAlign}
@@ -445,19 +467,35 @@ function NodeShapeImpl({
   // Konva-internal type isn't easily reachable, so we type the param as
   // the structural subset we actually call.
   type PathCtx = Pick<CanvasRenderingContext2D, 'moveTo' | 'lineTo' | 'quadraticCurveTo' | 'rect' | 'closePath'>;
+  // Per-corner radii are accepted now (round5) — pull out the four
+  // values regardless of cornerR being number or [tl, tr, br, bl]
+  // tuple. Each side capped at half of the rect's relevant dimension
+  // so we never produce overlapping arcs. Variable names use `c` prefix
+  // to avoid collision with the border{T,R,B,L}Weight scalars above.
+  const cTL0 = typeof cornerR === 'number' ? cornerR : cornerR[0];
+  const cTR0 = typeof cornerR === 'number' ? cornerR : cornerR[1];
+  const cBR0 = typeof cornerR === 'number' ? cornerR : cornerR[2];
+  const cBL0 = typeof cornerR === 'number' ? cornerR : cornerR[3];
+  const halfW = w / 2;
+  const halfH = h / 2;
+  const cTL = Math.min(Math.max(0, cTL0), halfW, halfH);
+  const cTR = Math.min(Math.max(0, cTR0), halfW, halfH);
+  const cBR = Math.min(Math.max(0, cBR0), halfW, halfH);
+  const cBL = Math.min(Math.max(0, cBL0), halfW, halfH);
+  const anyCorner = cTL > 0 || cTR > 0 || cBR > 0 || cBL > 0;
+
   const clipFunc = wantClip
     ? ((ctx: PathCtx): void => {
-        if (cornerR > 0) {
-          const r = Math.min(cornerR, w / 2, h / 2);
-          ctx.moveTo(r, 0);
-          ctx.lineTo(w - r, 0);
-          ctx.quadraticCurveTo(w, 0, w, r);
-          ctx.lineTo(w, h - r);
-          ctx.quadraticCurveTo(w, h, w - r, h);
-          ctx.lineTo(r, h);
-          ctx.quadraticCurveTo(0, h, 0, h - r);
-          ctx.lineTo(0, r);
-          ctx.quadraticCurveTo(0, 0, r, 0);
+        if (anyCorner) {
+          ctx.moveTo(cTL, 0);
+          ctx.lineTo(w - cTR, 0);
+          ctx.quadraticCurveTo(w, 0, w, cTR);
+          ctx.lineTo(w, h - cBR);
+          ctx.quadraticCurveTo(w, h, w - cBR, h);
+          ctx.lineTo(cBL, h);
+          ctx.quadraticCurveTo(0, h, 0, h - cBL);
+          ctx.lineTo(0, cTL);
+          ctx.quadraticCurveTo(0, 0, cTL, 0);
           ctx.closePath();
         } else {
           ctx.rect(0, 0, w, h);
