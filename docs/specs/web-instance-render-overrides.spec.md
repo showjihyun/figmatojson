@@ -54,6 +54,35 @@ Figma 가 만든 .fig 안의 INSTANCE 에는 종종 `symbolData.symbolOverrides[
 - I-M1 master 노드 자체 (`toClientNode` 가 visit 하는 SYMBOL/COMPONENT) 의 `fillPaints` 는 변경되지 않는다 — instance-별 override 는 `_renderChildren` 의 per-instance 복제본에만 적용.
 - I-M2 같은 master 를 참조하는 다른 INSTANCE 는 자기 고유의 fillOverrides 를 들고 들어와 자기 `_renderChildren` 만 변형 — instance 간 cross-talk 없음.
 
+### 3.4 Component-property visibility binding (v3, round-12)
+
+배경 — `메타리치 화면 UI Design.fig` 의 alert / input-box / datepicker rail / dropdown 4 컴포넌트 모두 INSTANCE 안의 `u:arrow-right` 아이콘이 화면에 leak 한다 (figma는 hidden). 원인 조사 (round 11 audit) 결과 이 visibility는 `symbolOverrides[].visible` 가 아니라 **Component Properties 바인딩**으로 제어된다:
+
+- 외곽 INSTANCE 에 `componentPropAssignments: [{ defID, value?: { boolValue }, varValue?: { value: { boolValue } } }]`
+- 내부 master 자손 노드에 `componentPropRefs: [{ defID, componentPropNodeField: "VISIBLE" }]`
+- 매칭되는 `defID` 의 `boolValue === false` → 자손 노드 `visible: false`
+
+`pen-export.ts:920-1048` 가 이미 이 로직을 구현 (`buildPropAssignmentMap` + `isHiddenByPropAssignment`). 본 spec v3 는 동일 로직을 `web/core/domain/clientNode.ts` 로 포팅한다.
+
+#### Collection
+
+- I-C6 `collectPropAssignmentsFromInstance(instData)` 는 INSTANCE 의 `instData.componentPropAssignments[]` 를 읽어 `Map<defIdKey, boolean>` 반환. 키 형식은 `${sessionID}:${localID}`. 값은 `value.boolValue` 우선, 없으면 `varValue.value.boolValue` (variant default 경유 케이스). 둘 다 boolean 이 아니면 entry skip.
+- I-C7 `componentPropAssignments` 가 array 가 아니거나 비어있으면 빈 Map 반환 (corrupt 데이터 silently skip).
+
+#### Propagation
+
+- I-P6 `toClientNode` 의 INSTANCE 분기 (line 69-92) 가 `collectPropAssignmentsFromInstance(data)` 도 호출. 결과 map 을 `toClientChildForRender` 에 새 인자 `propAssignments` 로 전달.
+- I-P7 `toClientChildForRender` 시그니처에 `propAssignments: Map<string, boolean>` 추가. 자식 재귀에 그대로 forwarding.
+- I-P8 데이터 spread 직후 (기존 `visOv` 적용 직전, line 311-319) `data.componentPropRefs` 검사: `componentPropNodeField === "VISIBLE"` 인 ref 가 있고 그 `defID` 가 `propAssignments` 에서 `false` 로 resolve 되면 `out.visible = false`. 명시 visibility override (`visOv`) 가 더 우선 — prop-binding 은 default 만 결정.
+- I-P9 **Nested INSTANCE merge**: 내부 INSTANCE 가 자기 own `componentPropAssignments` 를 가지면, 그 assignments 는 그 INSTANCE 의 expansion 안에서만 유효 — outer 의 propAssignments 에 inner 의 entry 를 *덮어쓰기* 한 새 map 으로 inner expansion 진입. (text/fill override 와 달리 prop assignments 는 path-keyed 가 아니라 *defID-keyed* 이므로 prefix 가 필요 없다 — outer 와 inner 가 같은 defID 를 정의하면 inner 가 그 INSTANCE scope 안에서 우선.)
+- I-P10 **Master immutability 유지**: prop-binding 적용은 `_renderChildren` 의 per-instance 복제본에만 일어남. master 트리 자체의 `componentPropRefs` 데이터는 변경되지 않는다 — 다른 INSTANCE 가 같은 master 를 다른 assignments 로 expand 할 수 있어야 함.
+
+#### 비고
+
+- prop-binding 의 `componentPropNodeField` 는 `VISIBLE` 외에 `TEXT`, `INSTANCE_SWAP` 도 존재 (Figma 의 4 종 boolean/text/instance-swap/variant property). 본 spec v3 는 `VISIBLE` 만 처리. 나머지는 별도 라운드.
+- 외곽 INSTANCE 에 prop assignment 가 있는데 master 안에 매칭되는 `componentPropRefs` 가 없는 경우 → no-op (silently)
+- prop ref 의 `defID` 가 outer assignments 에 없는 경우 → master 의 default visibility 가 유지 (`out.visible` 변경 없음). Figma 의 의미는 "property unbound = use master default".
+
 ## 4. Render-side behavior
 
 `Canvas.tsx:244-265` 의 VECTOR 분기 (`Konva.Path`) 와 `Canvas.tsx:281-316` 의 일반 노드 분기 (`Konva.Rect` + 자식 재귀) 는 변경 없음 — 그냥 `node.fillPaints` 를 읽는다. 본 spec 의 작업은 전부 *데이터* 변환 단계 (clientNode.ts) 에서 끝난다.
@@ -69,7 +98,9 @@ Figma 가 만든 .fig 안의 INSTANCE 에는 종종 `symbolData.symbolOverrides[
 - **stroke / effects / opacity / blend mode override** — 같은 패턴으로 `collectStrokeOverridesFromInstance` 등 추가 필요. fillPaints 가 가장 흔한 케이스라 우선 처리. 다음 라운드에서 확장.
 - **colorVar / variable alias 해석** — override 가 가진 `colorVar.value.alias.guid` 는 Figma 변수 참조. 우리 코드는 literal `color` 값만 읽고 변수 해석은 하지 않는다 (.fig 가 항상 literal 도 함께 저장하므로 시각적 손실 없음).
 - ~~**다단 nested INSTANCE override** — guidPath.length > 1. v1 무시 (I-C4).~~ **(v2 부터 지원 — I-P5 참조)**
+- ~~**Component property visibility binding** — `componentPropAssignments` ↔ `componentPropRefs[VISIBLE]`. v1/v2 무시.~~ **(v3 round-12 부터 지원 — §3.4 참조)**
 - **Variant swap** — `symbolOverrides[]` 안에 `symbolID` 가 들어있는 entry 는 그 INSTANCE 의 master 를 다른 master 로 교체하는 의미 (Figma 의 "swap component"). 메타리치 Dropdown 의 6번째 option 은 `state=selected` variant 로 swap 되고 그 variant 의 TEXT 가 "직접 선택" 으로 override 됨. 본 spec 의 path-keyed override 만으로는 이 케이스를 처리 못 함 — variant swap 은 별도 spec 으로 다룬다 (한 라운드 뒤). 현재 동작: master 의 원본 자손이 그대로 렌더되고 swap target 의 자손에 붙은 override 는 적용되지 않는다.
+- **Component property TEXT / INSTANCE_SWAP binding** — `componentPropNodeField` 가 `VISIBLE` 이외인 케이스. v3 미구현. 다음 라운드.
 - **mutation tool (chat/HTTP)** — 색 override 를 새로 *쓰는* 도구는 별도 spec (`web-chat-leaf-tools.spec.md` 의 set_fill_color 도 master 만 변경, instance override 작성은 미구현).
 - **rendering 측 동적 caching invalidation** — fillOverrides 적용은 toClientNode 빌드 타임에 한 번. 사용자가 색 override 를 mutation 으로 바꾸려면 documentJson 재빌드 필요 (현재 structural ops 가 그렇게 동작 — `web-undo-redo.spec.md §4.2`).
 
