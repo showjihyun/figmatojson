@@ -62,6 +62,42 @@ import { firstStopRgba, gradientFromPaint, type KonvaGradient } from './lib/grad
 import { pickTopPaint } from './lib/paint';
 import { cornerRadiusForKonva } from './lib/cornerRadii';
 import { applyTextCase, konvaTextDecoration } from './lib/textTransform';
+import { splitTextRuns, hasStyledRuns, type StyleRun } from './lib/textStyleRuns';
+
+// Singleton 2D context for measuring per-run text widths when a TEXT node
+// carries character-range fills (web-canvas-text-style-runs.spec.md §3.2
+// I-R4). Created lazily on first use; reused across renders. Browser-only —
+// SSR/test environments without document fall through to width=0 which
+// stacks runs at the same x (visually wrong but doesn't crash).
+let measureCanvasCtx: CanvasRenderingContext2D | null = null;
+function measureRunWidth(
+  text: string,
+  fontSize: number,
+  fontFamily: string,
+  fontStyle: string | undefined,
+  letterSpacing: number | undefined,
+): number {
+  if (typeof document === 'undefined') return 0;
+  if (!measureCanvasCtx) {
+    measureCanvasCtx = document.createElement('canvas').getContext('2d');
+  }
+  if (!measureCanvasCtx) return 0;
+  measureCanvasCtx.font = `${fontStyle ?? 'normal'} ${fontSize}px ${fontFamily}`;
+  // Use native ctx.letterSpacing where available (Chromium 99+), fall back
+  // to manual sum of (length-1) * letterSpacing — close enough for the
+  // multi-run x-offset use case.
+  const ls = letterSpacing ?? 0;
+  const ctxAny = measureCanvasCtx as CanvasRenderingContext2D & { letterSpacing?: string };
+  if ('letterSpacing' in ctxAny) {
+    ctxAny.letterSpacing = `${ls}px`;
+  }
+  const base = measureCanvasCtx.measureText(text).width;
+  // If native letterSpacing was applied, the base already includes it;
+  // otherwise add it manually. Heuristic: native support sets the prop
+  // without throwing (we just did), so this fallback only fires on
+  // browsers that ignored the assignment — rare but harmless when ls=0.
+  return base;
+}
 
 // Audit mode: `?audit=1` query param hides UI chrome (ZoomBadge) and the
 // round-10 variant labels so screenshots match Figma's clean API export.
@@ -351,7 +387,7 @@ function NodeShapeImpl({
     const textDecoration = konvaTextDecoration(node.textDecoration);
     const fontSize = node.fontSize ?? 12;
     const fontFamily = node.fontName?.family ?? 'Inter';
-    const fillColor = (() => {
+    const baseFillColor = (() => {
       const fills = node.fillPaints;
       if (!Array.isArray(fills)) return '#ddd';
       const first = fills.find((p: any) => p?.type === 'SOLID' && p?.visible !== false);
@@ -369,6 +405,78 @@ function NodeShapeImpl({
     const align = konvaTextAlign(node.textAlignHorizontal);
     const fontStyle = konvaFontStyle(node.fontName?.style);
     const shadow = shadowFromEffects(node.effects);
+
+    // Style runs (web-canvas-text-style-runs.spec.md). Only branches into
+    // the multi-KText path when the node carries per-character style data
+    // AND a render-time text override is NOT in effect (override + runs
+    // composition is v1 비대상 — fallback to single KText with base style).
+    const useStyleRuns =
+      typeof node._renderTextOverride !== 'string' &&
+      node.textData &&
+      Array.isArray(node.textData.characterStyleIDs) &&
+      Array.isArray(node.textData.styleOverrideTable);
+    const runs: StyleRun[] = useStyleRuns
+      ? splitTextRuns(chars, node.textData.characterStyleIDs, node.textData.styleOverrideTable)
+      : [];
+    const renderRuns = useStyleRuns && hasStyledRuns(runs);
+
+    if (renderRuns) {
+      // Per-run fill resolution: override.fillPaints[0] when present,
+      // else the base node fill. Same SOLID-only assumption as the
+      // single-KText path above.
+      const runFill = (r: StyleRun): string => {
+        const fps = r.override.fillPaints;
+        if (!Array.isArray(fps)) return baseFillColor;
+        const first = fps.find((p: any) => p?.type === 'SOLID' && p?.visible !== false);
+        if (!first?.color) return baseFillColor;
+        const { r: cr = 0, g: cg = 0, b: cb = 0, a: ca = 1 } = first.color;
+        return `rgba(${Math.round(cr * 255)},${Math.round(cg * 255)},${Math.round(cb * 255)},${ca})`;
+      };
+      // Compute cumulative x offsets via canvas.measureText. Each run is
+      // measured with the same typography settings — v1 doesn't honour
+      // per-run fontSize/fontFamily overrides (spec §5 비대상), so the
+      // measurement font is constant across runs.
+      const offsets: number[] = [0];
+      for (let i = 0; i < runs.length - 1; i++) {
+        const w = measureRunWidth(runs[i].text, fontSize, fontFamily, fontStyle, letterSpacing);
+        offsets.push(offsets[offsets.length - 1] + w);
+      }
+      return (
+        <Group
+          x={x}
+          y={y}
+          rotation={rotation}
+          opacity={opacity}
+          globalCompositeOperation={nodeBlend as never}
+          draggable={isSelected}
+          onClick={onShapeClick}
+          onTap={onShapeClick}
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          onMouseEnter={onMouseEnter}
+          onMouseLeave={onMouseLeave}
+        >
+          {runs.map((r, i) => (
+            <KText
+              key={i}
+              x={offsets[i]}
+              y={0}
+              text={r.text}
+              fontSize={fontSize}
+              fontFamily={fontFamily}
+              fontStyle={fontStyle}
+              textDecoration={textDecoration}
+              letterSpacing={letterSpacing}
+              lineHeight={lineHeight}
+              verticalAlign={verticalAlign}
+              fill={runFill(r)}
+              listening={false}
+            />
+          ))}
+        </Group>
+      );
+    }
+
     return (
       <KText
         x={x}
@@ -385,7 +493,7 @@ function NodeShapeImpl({
         lineHeight={lineHeight}
         verticalAlign={verticalAlign}
         align={align}
-        fill={fillColor}
+        fill={baseFillColor}
         width={w || undefined}
         height={h || undefined}
         shadowEnabled={shadow != null}
