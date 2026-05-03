@@ -153,6 +153,7 @@ describe('toClientChildForRender — fillPaints override', () => {
       new Map(),
       new Map(),
       fillOverrides,
+      new Map(),
       0,
     );
 
@@ -172,6 +173,7 @@ describe('toClientChildForRender — fillPaints override', () => {
       new Map(),
       new Map(),
       new Map(), // empty fillOverrides
+      new Map(),
       0,
     );
     expect((out.fillPaints as Array<{ color: { r: number } }>)[0].color.r).toBe(0.5);
@@ -191,10 +193,34 @@ describe('toClientChildForRender — fillPaints override', () => {
       new Map(),
       // The full path from outer master root is "0:100/0:50" — not just "0:50".
       new Map([['0:100/0:50', overrideFills]]),
+      new Map(),
       0,
     );
     const child = (out.children as Array<{ fillPaints?: unknown }>)[0];
     expect(child.fillPaints).toBe(overrideFills);
+  });
+
+  it('per-instance visibility override hides matching descendants without touching the master', () => {
+    // Common Figma pattern: a Button instance hides the trailing chevron
+    // icon for the "확인" variant while other instances keep it visible.
+    const icon = makeNode('VECTOR', 50, {
+      fillPaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }],
+    });
+    const wrapper = makeNode('FRAME', 100, {}, [icon]);
+
+    const out = toClientChildForRender(
+      wrapper,
+      [],
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map([['0:100/0:50', false]]), // hide the icon at this path
+      0,
+    );
+    const child = (out.children as Array<{ visible?: boolean }>)[0];
+    expect(child.visible).toBe(false);
+    // Master node's own data is unchanged.
+    expect(icon.data.visible).toBeUndefined();
   });
 
   it('disambiguates two visits to the same target via different paths (the metarich Dropdown bug)', () => {
@@ -223,8 +249,8 @@ describe('toClientChildForRender — fillPaints override', () => {
       ['0:2/0:50', bFill],
     ]);
 
-    const outA = toClientChildForRender(frameA, [], new Map(), new Map(), overrides, 0);
-    const outB = toClientChildForRender(frameB, [], new Map(), new Map(), overrides, 0);
+    const outA = toClientChildForRender(frameA, [], new Map(), new Map(), overrides, new Map(), 0);
+    const outB = toClientChildForRender(frameB, [], new Map(), new Map(), overrides, new Map(), 0);
     expect((outA.children as Array<{ fillPaints?: unknown }>)[0].fillPaints).toBe(aFill);
     expect((outB.children as Array<{ fillPaints?: unknown }>)[0].fillPaints).toBe(bFill);
   });
@@ -255,6 +281,7 @@ describe('toClientChildForRender — fillPaints override', () => {
       symbolIndex,
       new Map(),
       outerFillOverrides,
+      new Map(),
       0,
     );
     // The nested instance expanded with its OWN (empty) fill overrides, so
