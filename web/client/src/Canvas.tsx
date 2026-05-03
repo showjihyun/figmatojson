@@ -1223,6 +1223,30 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
     setPageId(page.id);
   }, [page, size.width, size.height, pageId]);
 
+  // Debug hook for visual audits (Playwright / DevTools). Exposes the
+  // current view state and lets a tester focus a specific axis-aligned
+  // box (in fig-page absolute coords) into the viewport. NOT used by app
+  // code; safe to remove if it ever shows up in a profile.
+  useEffect(() => {
+    interface CanvasDebug {
+      __canvasView: { scale: number; offset: { x: number; y: number } };
+      __canvasFitBox?: (b: { x: number; y: number; w: number; h: number }, padPx?: number) => void;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as unknown as CanvasDebug & Record<string, any>;
+    w.__canvasView = { scale, offset };
+    w.__canvasFitBox = (b, padPx = 24): void => {
+      const sx = (size.width - padPx * 2) / Math.max(1, b.w);
+      const sy = (size.height - padPx * 2) / Math.max(1, b.h);
+      const s = Math.min(sx, sy, 8);
+      setScale(s);
+      setOffset({
+        x: -b.x * s + (size.width - b.w * s) / 2,
+        y: -b.y * s + (size.height - b.h * s) / 2,
+      });
+    };
+  }, [scale, offset, size.width, size.height]);
+
   // External-store mirror of `selectedGuids`. Created once; .set()'d on every
   // change. NodeShapes subscribe via `useIsSelected` so only the changed
   // guids re-render — the other 35K nodes skip reconciliation entirely.
