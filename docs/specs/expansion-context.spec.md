@@ -2,7 +2,8 @@
 
 | 항목 | 값 |
 |---|---|
-| 상태 | Draft (round 13) |
+| 상태 | Draft — awaiting trigger (활성 버그 없음, round-13 scope 에서 제외) |
+| Trigger | (a) 두 번째 design system audit 에서 또 한 번 "CLI 는 알지만 web 은 모르는" drift 가 발견되거나, (b) prop-binding 외 새 Override 메커니즘 (variant swap, layout override 등) 을 실제 구현할 때. 그 PR 의 첫 단계가 본 spec 의 추출. |
 | 구현 | `src/expansion.ts` (entry), `src/masterIndex.ts` (private), `src/effectiveVisibility.ts` (private) |
 | 테스트 | `src/expansion.test.ts` (vitest, hand-built TreeNode fixtures — 기존 `web/core/domain/clientNode.test.ts` 의 override-pipeline 테스트들이 이쪽으로 reshape) |
 | 형제 | `web-instance-render-overrides.spec.md` (round 12 v3 — prop-binding); `CONTEXT.md` "Expansion", "Expansion Context", "Master Index" |
