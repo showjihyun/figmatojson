@@ -22,7 +22,7 @@ describe('gradientFromPaint — LINEAR', () => {
       50,
     );
     expect(out).not.toBeNull();
-    if (out!.kind !== 'linear') throw new Error('expected linear');
+    if (out === null || out.kind !== 'linear') throw new Error('expected linear');
     expect(out.fillLinearGradientStartPoint).toEqual({ x: 0, y: 25 });
     expect(out.fillLinearGradientEndPoint).toEqual({ x: 100, y: 25 });
     // Stops emitted as flat array [pos, css, pos, css].
