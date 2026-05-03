@@ -337,7 +337,7 @@ export function App() {
       </header>
 
       <main className="flex min-h-0 flex-1">
-        <aside className="flex w-80 min-h-0 flex-col border-r border-border">
+        <aside className="flex w-60 min-h-0 flex-col border-r border-border">
           <LeftSidebar
             doc={doc}
             pages={pages}
@@ -385,7 +385,7 @@ export function App() {
             </div>
           )}
         </div>
-        <aside className="flex w-[360px] min-h-0 flex-col border-l border-border bg-card">
+        <aside className="flex w-60 min-h-0 flex-col border-l border-border bg-card">
           {session && currentPage ? (
             <Inspector
               page={currentPage}

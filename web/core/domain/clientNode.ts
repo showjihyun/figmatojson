@@ -82,8 +82,9 @@ export function toClientNode(
 
         const textOverrides = collectTextOverridesFromInstance(sd?.symbolOverrides);
         const fillOverrides = collectFillOverridesFromInstance(sd?.symbolOverrides);
+        const visOverrides = collectVisibilityOverridesFromInstance(sd?.symbolOverrides);
         const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, 0),
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0),
         );
         if (expanded.length > 0) out._renderChildren = expanded;
       }
@@ -173,6 +174,30 @@ export function collectFillOverridesFromInstance(
 }
 
 /**
+ * Pull per-instance visibility overrides out of symbolOverrides[]. Each
+ * matching entry sets `visible: boolean` on the descendant identified
+ * by guidPath. Same path-keyed model as text / fill overrides.
+ *
+ * Common Figma pattern: an instance hides a child layer (e.g., a chevron
+ * icon inside a Button "확인" variant) without affecting other instances
+ * of the same master.
+ */
+export function collectVisibilityOverridesFromInstance(
+  overrides: Array<Record<string, unknown>> | undefined,
+): Map<string, boolean> {
+  const m = new Map<string, boolean>();
+  if (!Array.isArray(overrides)) return m;
+  for (const o of overrides) {
+    if (typeof o.visible !== 'boolean') continue;
+    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+    const key = pathKeyFromGuids(guids);
+    if (key === null) continue;
+    m.set(key, o.visible);
+  }
+  return m;
+}
+
+/**
  * Merge a nested INSTANCE's own override map into the outer overrides,
  * prefixing each inner key with the outer path so it matches against the
  * deeper visit path. The outer overrides remain in place (their full paths
@@ -212,6 +237,7 @@ export function toClientChildForRender(
   symbolIndex: Map<string, TreeNode>,
   textOverrides: Map<string, string>,
   fillOverrides: Map<string, unknown[]>,
+  visibilityOverrides: Map<string, boolean>,
   depth: number,
   pathFromOuter: string[] = [],
 ): DocumentNode {
@@ -231,7 +257,7 @@ export function toClientChildForRender(
     name: n.name,
     _isInstanceChild: true,
     children: n.children.map((c) =>
-      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, depth + 1, currentPath),
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath),
     ),
   };
   if (VECTOR_TYPES.has(n.type)) {
@@ -264,10 +290,12 @@ export function toClientChildForRender(
       if (master) {
         const innerText = collectTextOverridesFromInstance(sd?.symbolOverrides);
         const innerFill = collectFillOverridesFromInstance(sd?.symbolOverrides);
+        const innerVis = collectVisibilityOverridesFromInstance(sd?.symbolOverrides);
         const mergedText = mergeOverridesForNested(textOverrides, innerText, currentPath);
         const mergedFill = mergeOverridesForNested(fillOverrides, innerFill, currentPath);
+        const mergedVis = mergeOverridesForNested(visibilityOverrides, innerVis, currentPath);
         out._renderChildren = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, depth + 1, currentPath),
+          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath),
         );
       }
     }
@@ -284,6 +312,11 @@ export function toClientChildForRender(
   // Apply fillPaints override AFTER the data spread so it wins. Spec §3.2 I-P3.
   const fillOv = fillOverrides.get(currentKey);
   if (fillOv) out.fillPaints = fillOv;
+  // Apply per-instance visibility override (spec round 4 extension). The
+  // 397 metarich entries that hide e.g. an arrow icon inside a Button
+  // variant flow through here.
+  const visOv = visibilityOverrides.get(currentKey);
+  if (visOv !== undefined) out.visible = visOv;
   return out;
 }
 
