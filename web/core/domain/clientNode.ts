@@ -114,7 +114,13 @@ export function toClientNode(
           // cuts them (alert/input-box action button text-clip).
           const masterData = (master.data ?? {}) as Record<string, unknown>;
           const masterSize = masterData.size as { x?: number; y?: number } | undefined;
-          const instSize = data.size as { x?: number; y?: number } | undefined;
+          const origInstSize = data.size as { x?: number; y?: number } | undefined;
+          // Round 20: AUTO-grow primarySizing — see detectAutoGrownSize.
+          const grownSize = detectAutoGrownSize(sd?.symbolOverrides, sid, masterData, origInstSize);
+          if (grownSize) {
+            (out as { _autoGrownSize?: { x?: number; y?: number } })._autoGrownSize = grownSize;
+          }
+          const instSize = grownSize ?? origInstSize;
           out._renderChildren = applyInstanceReflow(expanded, masterData, masterSize, instSize);
         }
       }
@@ -129,6 +135,14 @@ export function toClientNode(
     if (k === 'fillGeometry' || k === 'strokeGeometry') continue;
     if (k === 'vectorData') continue;
     out[k] = v;
+  }
+  // Round 20: apply the auto-grown size computed above (overrides the
+  // literal `data.size` that the spread just copied). This ensures the
+  // Canvas + INSTANCE auto-clip use the grown bbox.
+  const autoGrown = (out as { _autoGrownSize?: { x?: number; y?: number } })._autoGrownSize;
+  if (autoGrown) {
+    out.size = autoGrown;
+    delete (out as { _autoGrownSize?: { x?: number; y?: number } })._autoGrownSize;
   }
   return out;
 }
@@ -154,6 +168,54 @@ function visibleFromPropRefs(
   propAssignments: Map<string, boolean>,
 ): boolean | undefined {
   return isHiddenByPropBinding(data, propAssignments) ? false : undefined;
+}
+
+/**
+ * Round 20: detect when an INSTANCE's size is a `RESIZE_TO_FIT*` hint
+ * (Figma's "auto-grow to content") and return a grown size if so.
+ *
+ * Figma's stackPrimarySizing override at the master root path tells the
+ * renderer the INSTANCE should auto-grow on the primary axis to fit its
+ * children. The literal `instance.size` is just a designer hint /
+ * minimum. Without this fix, long text overrides (e.g. dashboard
+ * "Excel 다운로드" button sized 44 wide but content needs ~130) clip.
+ *
+ * v1: we don't have text-measurement infra on the data side, so when
+ * AUTO-grow is detected and the override size is smaller than master,
+ * fall back to the master's primary-axis size. Inexact (figma may
+ * render even wider for very long overrides) but eliminates the
+ * visible leading-clip in the common case.
+ */
+function detectAutoGrownSize(
+  symbolOverrides: Array<Record<string, unknown>> | undefined,
+  sid: { sessionID: number; localID: number },
+  masterData: Record<string, unknown>,
+  instSize: { x?: number; y?: number } | undefined,
+): { x?: number; y?: number } | undefined {
+  if (!Array.isArray(symbolOverrides) || !instSize) return undefined;
+  const masterSize = masterData.size as { x?: number; y?: number } | undefined;
+  if (!masterSize) return undefined;
+  // Find root override entry (path is single-step, matching the master).
+  const rootOverride = symbolOverrides.find((o) => {
+    const g = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+    return Array.isArray(g) && g.length === 1
+      && g[0]?.sessionID === sid.sessionID
+      && g[0]?.localID === sid.localID;
+  });
+  const primarySizing = rootOverride?.stackPrimarySizing as string | undefined;
+  if (typeof primarySizing !== 'string' || !primarySizing.startsWith('RESIZE_TO_FIT')) {
+    return undefined;
+  }
+  const stackMode = masterData.stackMode as string | undefined;
+  const isHor = stackMode === 'HORIZONTAL';
+  const primaryAxis: 'x' | 'y' = isHor ? 'x' : 'y';
+  const instPrim = instSize[primaryAxis];
+  const masterPrim = masterSize[primaryAxis];
+  if (typeof instPrim !== 'number' || typeof masterPrim !== 'number') return undefined;
+  if (instPrim >= masterPrim) return undefined; // Already big enough.
+  return isHor
+    ? { ...instSize, x: masterPrim }
+    : { ...instSize, y: masterPrim };
 }
 
 /**
@@ -523,9 +585,23 @@ export function toClientChildForRender(
             mergedSwapTargets.set(merged, innerVal);
           }
         }
-        out._renderChildren = master.children.map((c) =>
+        const nestedExpanded = master.children.map((c) =>
           toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets),
         );
+        // Round 20: AUTO-grow primarySizing also fires for nested INSTANCEs
+        // (the dashboard "Excel 다운로드" button is a nested INSTANCE inside
+        // the dashboard FRAME). Detect on this nested instance's own
+        // symbolOverrides + apply via _autoGrownSize marker.
+        const nestedMasterData = (master.data ?? {}) as Record<string, unknown>;
+        const nestedMasterSize = nestedMasterData.size as { x?: number; y?: number } | undefined;
+        const nestedOrigInstSize = data.size as { x?: number; y?: number } | undefined;
+        const nestedGrownSize = detectAutoGrownSize(sd?.symbolOverrides, sid, nestedMasterData, nestedOrigInstSize);
+        if (nestedGrownSize) {
+          (out as { _autoGrownSize?: { x?: number; y?: number } })._autoGrownSize = nestedGrownSize;
+        }
+        const nestedInstSize = nestedGrownSize ?? nestedOrigInstSize;
+        // Apply auto-layout reflow to the nested INSTANCE expansion too.
+        out._renderChildren = applyInstanceReflow(nestedExpanded, nestedMasterData, nestedMasterSize, nestedInstSize);
         // Spec web-instance-variant-swap §3.3 I-V1: when swap is applied
         // and no explicit visibility override exists for this path, treat
         // the swap as implying visible:true. This compensates for Figma's
