@@ -63,6 +63,12 @@ import { pickTopPaint } from './lib/paint';
 import { cornerRadiusForKonva } from './lib/cornerRadii';
 import { applyTextCase, konvaTextDecoration } from './lib/textTransform';
 
+// Audit mode: `?audit=1` query param hides UI chrome (ZoomBadge) and the
+// round-10 variant labels so screenshots match Figma's clean API export.
+const isAuditMode = (): boolean =>
+  typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).get('audit') === '1';
+
 // ─── Drag-snapshot plumbing ──────────────────────────────────────────────
 //
 // On dragStart we walk the tree once to capture every selected node's
@@ -508,7 +514,17 @@ function NodeShapeImpl({
   // Frame clip (spec round2 §3) — when frameMaskDisabled === false,
   // clip children to the frame's rounded-rect bounds. Konva clipFunc
   // receives a 2D context; we draw the path the renderer should clip to.
-  const wantClip = node.frameMaskDisabled === false;
+  //
+  // Round 12 (web-canvas-instance-clip.spec.md): also auto-clip INSTANCE
+  // groups whose master expansion produced _renderChildren — Figma's
+  // default is to clip instance content to its bbox, and skipping this
+  // lets master-tree TEXT/icon nodes leak outside size-overridden
+  // instances (the `Defa진행상태` table mojibake).
+  const wantClipForInstance =
+    node.type === 'INSTANCE' &&
+    node.frameMaskDisabled !== true &&
+    Array.isArray(node._renderChildren) && node._renderChildren.length > 0;
+  const wantClip = node.frameMaskDisabled === false || wantClipForInstance;
   // Konva passes a SceneContext (its proxy around the native canvas
   // context). The path-building methods we use exist on both but the
   // Konva-internal type isn't easily reachable, so we type the param as
@@ -906,6 +922,7 @@ function isVariantContainer(node: any): boolean {
  * shaped (no `=`), are skipped — they get no label.
  */
 function renderVariantLabels(children: any[]): React.ReactNode {
+  if (isAuditMode()) return null;
   const labels: React.ReactNode[] = [];
   for (let i = 0; i < children.length; i++) {
     const c = children[i];
@@ -1230,12 +1247,15 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
   useEffect(() => {
     interface CanvasDebug {
       __canvasView: { scale: number; offset: { x: number; y: number } };
-      __canvasFitBox?: (b: { x: number; y: number; w: number; h: number }, padPx?: number) => void;
+      __canvasFitBox?: (
+        b: { x: number; y: number; w: number; h: number },
+        padPx?: number,
+      ) => { x: number; y: number; w: number; h: number };
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const w = window as unknown as CanvasDebug & Record<string, any>;
     w.__canvasView = { scale, offset };
-    w.__canvasFitBox = (b, padPx = 24): void => {
+    w.__canvasFitBox = (b, padPx = 24) => {
       const sx = (size.width - padPx * 2) / Math.max(1, b.w);
       const sy = (size.height - padPx * 2) / Math.max(1, b.h);
       const s = Math.min(sx, sy, 8);
@@ -1244,6 +1264,12 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
         x: -b.x * s + (size.width - b.w * s) / 2,
         y: -b.y * s + (size.height - b.h * s) / 2,
       });
+      return {
+        x: (size.width - b.w * s) / 2,
+        y: (size.height - b.h * s) / 2,
+        w: b.w * s,
+        h: b.h * s,
+      };
     };
   }, [scale, offset, size.width, size.height]);
 
@@ -1501,7 +1527,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
           </Layer>
         )}
       </Stage>
-      <ZoomBadge scale={scale} />
+      {!isAuditMode() && <ZoomBadge scale={scale} />}
       {spaceHeld && (
         <div
           style={{

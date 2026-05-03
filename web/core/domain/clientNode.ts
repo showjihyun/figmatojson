@@ -83,8 +83,9 @@ export function toClientNode(
         const textOverrides = collectTextOverridesFromInstance(sd?.symbolOverrides);
         const fillOverrides = collectFillOverridesFromInstance(sd?.symbolOverrides);
         const visOverrides = collectVisibilityOverridesFromInstance(sd?.symbolOverrides);
+        const propAssignments = collectPropAssignmentsFromInstance(data);
         const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0),
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments),
         );
         if (expanded.length > 0) out._renderChildren = expanded;
       }
@@ -198,6 +199,74 @@ export function collectVisibilityOverridesFromInstance(
 }
 
 /**
+ * Pull boolean component-property assignments off an INSTANCE node's `data`.
+ * Returns Map<defIdKey, boolean> keyed by `${sessionID}:${localID}` of the
+ * property's defID. Used by `toClientChildForRender` to resolve descendants
+ * whose `componentPropRefs` carry `componentPropNodeField: "VISIBLE"`.
+ *
+ * Why this exists — Figma's standard way to bind a layer's visibility to a
+ * boolean component property. The 메타리치 alert dialog hides its action
+ * buttons' arrow icon via this mechanism, NOT via `symbolOverrides[].visible`.
+ * Without this, the icon leaks through every Button instance.
+ *
+ * Spec: docs/specs/web-instance-render-overrides.spec.md §3.4 I-C6/I-C7.
+ */
+export function collectPropAssignmentsFromInstance(
+  instData: Record<string, unknown> | undefined,
+): Map<string, boolean> {
+  const m = new Map<string, boolean>();
+  const cpa = instData?.componentPropAssignments as
+    | Array<{
+        defID?: { sessionID?: number; localID?: number };
+        value?: { boolValue?: boolean };
+        varValue?: { value?: { boolValue?: boolean } };
+      }>
+    | undefined;
+  if (!Array.isArray(cpa)) return m;
+  for (const a of cpa) {
+    const d = a.defID;
+    if (!d || typeof d.sessionID !== 'number' || typeof d.localID !== 'number') continue;
+    // Direct value first (explicit on this INSTANCE), fall back to varValue
+    // (variant default propagated through the property chain). Either may
+    // be the source of truth depending on whether the designer overrode
+    // the prop on this specific instance.
+    const directV = a.value?.boolValue;
+    const varV = a.varValue?.value?.boolValue;
+    const v = typeof directV === 'boolean' ? directV : (typeof varV === 'boolean' ? varV : undefined);
+    if (typeof v !== 'boolean') continue;
+    m.set(`${d.sessionID}:${d.localID}`, v);
+  }
+  return m;
+}
+
+/**
+ * Test a node's `componentPropRefs` against a propAssignments map. Returns
+ * `false` if any VISIBLE-field ref resolves to a `false` assignment, else
+ * `undefined` (meaning "no opinion — leave existing visibility as-is").
+ *
+ * Spec: §3.4 I-P8 — explicit symbolOverrides[].visible wins over this; the
+ * caller checks visOv first and only consults this when visOv is absent.
+ */
+function visibleFromPropRefs(
+  data: Record<string, unknown>,
+  propAssignments: Map<string, boolean>,
+): boolean | undefined {
+  if (propAssignments.size === 0) return undefined;
+  const refs = data.componentPropRefs as
+    | Array<{ defID?: { sessionID?: number; localID?: number }; componentPropNodeField?: string }>
+    | undefined;
+  if (!Array.isArray(refs)) return undefined;
+  for (const r of refs) {
+    if (r.componentPropNodeField !== 'VISIBLE') continue;
+    const d = r.defID;
+    if (!d || typeof d.sessionID !== 'number' || typeof d.localID !== 'number') continue;
+    const v = propAssignments.get(`${d.sessionID}:${d.localID}`);
+    if (v === false) return false;
+  }
+  return undefined;
+}
+
+/**
  * Merge a nested INSTANCE's own override map into the outer overrides,
  * prefixing each inner key with the outer path so it matches against the
  * deeper visit path. The outer overrides remain in place (their full paths
@@ -240,6 +309,7 @@ export function toClientChildForRender(
   visibilityOverrides: Map<string, boolean>,
   depth: number,
   pathFromOuter: string[] = [],
+  propAssignments: Map<string, boolean> = new Map(),
 ): DocumentNode {
   if (depth > 8) {
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
@@ -257,7 +327,7 @@ export function toClientChildForRender(
     name: n.name,
     _isInstanceChild: true,
     children: n.children.map((c) =>
-      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath),
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath, propAssignments),
     ),
   };
   if (VECTOR_TYPES.has(n.type)) {
@@ -294,8 +364,15 @@ export function toClientChildForRender(
         const mergedText = mergeOverridesForNested(textOverrides, innerText, currentPath);
         const mergedFill = mergeOverridesForNested(fillOverrides, innerFill, currentPath);
         const mergedVis = mergeOverridesForNested(visibilityOverrides, innerVis, currentPath);
+        // Spec §3.4 I-P9: prop assignments are defID-keyed, not path-keyed,
+        // so the merge is a flat overwrite of the outer map (inner wins
+        // within this INSTANCE's expansion).
+        const innerPropAssignments = collectPropAssignmentsFromInstance(data);
+        const mergedPropAssignments = innerPropAssignments.size > 0
+          ? new Map([...propAssignments, ...innerPropAssignments])
+          : propAssignments;
         out._renderChildren = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath),
+          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments),
         );
       }
     }
@@ -316,7 +393,17 @@ export function toClientChildForRender(
   // 397 metarich entries that hide e.g. an arrow icon inside a Button
   // variant flow through here.
   const visOv = visibilityOverrides.get(currentKey);
-  if (visOv !== undefined) out.visible = visOv;
+  if (visOv !== undefined) {
+    out.visible = visOv;
+  } else {
+    // Spec §3.4 I-P8: explicit override wins; only consult prop-binding
+    // when no explicit visibility override is set for this path. Round 12
+    // adds this branch to cover Figma's component-property visibility
+    // mechanism — used by alret / input-box / datepicker rail / dropdown
+    // to hide the trailing arrow icon inside Button variants.
+    const propVis = visibleFromPropRefs(data, propAssignments);
+    if (propVis === false) out.visible = false;
+  }
   return out;
 }
 

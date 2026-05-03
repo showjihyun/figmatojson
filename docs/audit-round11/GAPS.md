@@ -7,8 +7,14 @@ This file lists gaps found by visually diffing each component on the
 - Pass 1 done — gaps inferred from `ours.png` inspection alone, plus
   cross-check with the overview Figma screenshot the user shared
   (`docs/스크린샷 2026-05-03 155402.png`).
-- Items marked `[needs figma]` are uncertain; please drop a
-  `figma.png` into the matching folder for confirmation.
+- **Pass 2 done** — every entry below has a paired `figma.png` next to
+  `ours.png` and was diffed visually using
+  `node web/scripts/crop-audit-tiles.mjs <slug>` (tiles in `_tiles/`,
+  gitignored). One harness fix landed during Pass 2: the audit
+  capture now hides the ZoomBadge + variant labels (`?audit=1`) and
+  uses node bbox cropping, so `ours.png` matches Figma's API export.
+- See **Pass 2 confirmed** section at the bottom for the canonical
+  set of gaps and which Pass 1 items were upheld / refuted.
 - The audit folder is keyed by the slugs in `INVENTORY.md`. Re-run
   `node web/scripts/audit-round11-screenshots.mjs` any time the
   renderer changes to refresh `ours.png` for every component.
@@ -143,44 +149,103 @@ No visible issues — 4 fading rounded squares render correctly.
 
 ---
 
-## Backlog (ranked)
+## Pass 2 confirmed (2026-05-03)
 
-### High priority — universal-primitive bugs that recur across components
+Every component in `design-setting/` now has a paired `figma.png` and
+was diffed at full resolution using `_tiles/`. Findings below are the
+ground truth — Pass 1's "[needs figma]" qualifiers are removed.
 
-| # | title | components affected | bucket |
+### Confirmed gaps
+
+| # | title | components affected | severity | bucket | notes |
+|---|---|---|---|---|---|
+| **1** | **`u:arrow-right` instance-visibility leaks** — arrow icon shows where Figma renders it hidden. Confirmed in: every input-box confirm button, every datepicker rail row, every dropdown row, AND **both alert dialog buttons** (where it's worse — alert button text gets pushed off the button so only "삭" of "삭제" is visible). | input-box-9_42, alret-64_376, datepicker-12_749, 1fromto-12_750 (rail), dropdown-11_532 | high | universal-primitive | **Root cause (round-12 investigation):** the icon visibility is NOT controlled by `symbolOverrides[].visible`; it is controlled by Figma's **Component Properties** (`componentPropAssignments` on the outer INSTANCE → `componentPropRefs` with `componentPropNodeField:"VISIBLE"` on the inner icon). Our web renderer has no handling for this mechanism. Pen-export already handles it correctly — `src/pen-export.ts:921-1041` (`buildPropAssignmentMap` + effective-visibility at `:1198`). **Fix point:** `web/core/domain/clientNode.ts` — port the prop-assignment / prop-ref resolution into `toClientNode` + `toClientChildForRender`. One change closes all 4 components. |
+| **2** | **Calendar-rail text overrides fall through** — `오늘 / 최근 1주일 / 최근 30일 / 금월 / 전월 / 직접 선택` (6 items) renders as `오늘 / 최근 / 최근 / 꼼월` (4 items). The data layer is fine (e2e test `instance-fill-override.spec.ts:125` shows 5 of 6 `_renderTextOverride` values are present). The visual gap is downstream — likely overlapping with #3's auto-clip issue (rail rows narrow, "최근 1주일" clips to "최근"; bottom 2 rows hidden because rail container is sized too small). | datepicker-12_749, 1fromto-12_750 | high | universal-primitive | **To re-investigate after #3 fix lands** — once INSTANCE auto-clip works, rail rows may shrink properly and "최근 1주일" should render full. If it doesn't, a separate fix for rail-row width or for variant-swap of "직접 선택" is needed. |
+| **3** | **`Default` placeholder bleeds into next column** — header "진행상태" looks like `Defa진행상태`. Not a text concatenation — the "Default" string is the variant-name TEXT child of a MultiCheck checkbox INSTANCE master (`SYMBOL 11:577`, 77×24, with TEXT "Default" at (32,5)). The table-cell INSTANCEs override size to 24×24 but don't hide the label, and INSTANCEs aren't auto-clipped to their bbox — so "Default" bleeds 32 px to the right into the next column, where the column-bg paints over its tail leaving "Defa" visible. | table-16_729, tbody-16_763, table_nodata-64_397 | high | universal-primitive | **Root cause (round-12 investigation):** missing INSTANCE auto-clip. Figma clips instance content to the instance's bbox by default; we don't. **Fix point:** `web/client/src/Canvas.tsx` ~line 517 — extend `wantClip` (currently `node.frameMaskDisabled === false`) to also fire for INSTANCE-rooted Groups whose `_renderChildren` are present. |
+| **4** | **"Button" variant text clips to "Butto"** — affects MOST variants in the button page, not just S-size. Likely font-metric mismatch (real font vs Konva fallback) making glyphs wider than the Figma frame, so the last char overflows the clip rect. Also: Disabled outline/solid variants have text + icon nearly invisible (opacity applied at wrong layer). | button-5_9 | high | universal-primitive | Two sub-bugs in same component — text clipping + disabled-state opacity. **Fix point (tentative):** `web/client/src/Canvas.tsx` text rendering + opacity layer ordering. Investigation deferred to round 13 unless cheap. |
+| **5** | **Per-character-range text fills not applied** *(NEW Pass 2 finding)* — In input-box state-text rows, Figma renders `설명문구` (gray) / `오류문구` (red) / `성공문구` (green) using character-range fills inside one text node. Ours renders all three in the same gray. | input-box-9_42 | high | universal-primitive | Requires `styleOverrideTable` + `characterStyleIDs` propagation + multi-range KText splitting. **Fix point (tentative):** `web/client/src/Canvas.tsx` text node. Larger surface — defer to round 13. |
+
+### Refuted
+
+| Pass 1 claim | Pass 2 verdict |
+|---|---|
+| datepicker right calendar's first-row light-blue tint | **Normal range-highlight** — figma shows the same light-blue band on Jan 1–7 + 8 + 10 because that's the from-to date range selected in the demo. Not a bug. |
+| outline button stroke "slightly bluer than gray" | **Inconclusive** — at Pass 2 zoom levels the strokes match. No action. |
+| dropdown shows 3 entries vs Figma's 4 (Default/Hover/Select/Disable) | **Source-data difference** — figma.png also shows the 4-entry popup; the gap is real but it turned out to be the SAME `u:arrow-right` leak (#1) plus the popup is rendered with the right number of rows. No separate bug. |
+
+### Components verified clean (figma == ours, no fidelity gap)
+
+`pagenation-131_362`, `sidemenu-23_1635`, `sidemenu-28_168`, `color-2_8`,
+`date-11_606`, `1-12_748`, `type-11_150`, `statetext_area-11_217`,
+`option-11_515`, `option-26_243`, `radio-11_540`, `multicheck-11_576`,
+`table-16_728`, `tbody-16_521`, `labe-145_674`, `loader-133_422`,
+`toast-popup-53_346`, `typography-3_118`.
+
+---
+
+## Backlog (ranked, Pass 2 final)
+
+### High priority — universal-primitive bugs
+
+The 5 confirmed gaps cluster into 4 groups by shared root cause. Round-12
+investigation flipped two of these from "deep override-pipeline bug" to
+"single missing feature":
+
+| group | gaps | shared root cause | est. fix surface |
 |---|---|---|---|
-| 1 | **Instance visibility overrides leak at depth ≥ 3** — `u:arrow-right` is left visible inside Input Box and Alert action buttons; should be hidden by the source instance's per-path override. | input-box, alert, possibly toast-popup buttons | universal-primitive |
-| 2 | **Calendar-rail text overrides fall through for some path slices** — `최근 1주일 / 1개월` etc. become duplicated `최근 / 최근 / 쥼월`. | datepicker (and likely any deeper INSTANCE-of-INSTANCE) | universal-primitive |
-| 3 | **Text override append vs replace** — `Defa이람상태` table-cell text suggests overrides concatenate when both old and new are present. | table-a (and likely table-b) | universal-primitive |
-| 4 | **Variant text width clipping** — "Button" text in S-size variants cuts to "Butto". | button | universal-primitive |
+| **A. Component-property visibility binding** | #1 (arrow leak), partial #2 (rail labels) | `componentPropAssignments` (outer INSTANCE) ↔ `componentPropRefs[VISIBLE]` (inner master node) is the actual mechanism Figma uses to hide variant icons; our `web/core/domain/clientNode.ts` only reads `symbolOverrides[].visible` and ignores prop-bindings entirely. Pen-export already implements this at `src/pen-export.ts:921-1041` — port required. | `web/core/domain/clientNode.ts` (one file). Add `collectPropAssignmentsFromInstance`, thread map through `toClientChildForRender` recursion (mirror existing visibility-override threading), resolve `componentPropRefs[VISIBLE]` against propagated map. |
+| **B. INSTANCE auto-clip to bbox** | #3 (`Defa진행상태` bleed), partial #2 (datepicker rail container) | Figma clips INSTANCE content to the instance's bbox by default; our `Canvas.tsx` only clips when `frameMaskDisabled === false` is explicit (FRAME-only). When an INSTANCE has a size override smaller than its master, orphan TEXT/icon children bleed visually outside the bbox. | `web/client/src/Canvas.tsx` (one file). Extend `wantClip` (~line 517) to also fire for INSTANCE Groups with `_renderChildren`. |
+| **C. Variant text clip + disabled opacity** | #4 (Button → Butto, disabled state) | `web/client/src/Canvas.tsx` text + opacity layer issues — separate from the override-pipeline bugs. | Defer to round 13 — investigation needed. |
+| **D. Character-range text fills** | #5 (state-text colors) | `web/client/src/Canvas.tsx` text rendering ignores per-range `fills` in style runs. Requires `styleOverrideTable` propagation + KText splitting. | Defer to round 13 — larger surface. |
 
-### Medium priority — style details that would improve fidelity
+### Medium / low priority — style details
 
-| # | title | components affected | bucket |
-|---|---|---|---|
-| 5 | Right calendar first-row light-blue tint — verify against Figma whether this is intentional range-highlight or stray multi-paint. | datepicker | style-detail |
-| 6 | Outline button stroke hue — verify it's neutral gray, not slightly blue. | button | style-detail |
-
-### Low / nice-to-have
-
-| # | title | components affected | bucket |
-|---|---|---|---|
-| 7 | Breadcrumb current-page bolder/darker. | breadscrum | style-detail |
-| 8 | Table header row bolder than body. | table-a, table-b | style-detail |
+No medium- or low-priority `style-detail` items survived Pass 2. The
+two we suspected (calendar tint, outline stroke hue) were both
+refuted. The breadcrumb / table-header items from Pass 1 referenced
+components on other pages and weren't part of this pass.
 
 ---
 
 ## Recommended round 12 scope
 
-Pick the four `High priority` items — they share two underlying bugs:
+Ship groups **A + B** in round 12. Defer C + D to round 13.
 
-- **#1 + #2**: both are about instance-override path resolution at depth ≥ 3.
-  One fix in `web/core/domain/clientNode.ts` (depth-aware path keys for both
-  visibility AND text overrides) likely resolves both, plus latent dupes
-  elsewhere.
-- **#3**: text-override append-vs-replace — small targeted fix.
-- **#4**: variant text clip — separate fix.
+Two PRs, both small surface:
 
-A single round 12 spec covering "instance override correctness at depth
-≥ 3 + text-override replace semantics + variant text clip" is a good
-shippable unit. Style-detail items can wait for round 13.
+- **PR 1 — Component-property visibility binding** (group A)
+  - Spec: extend `docs/specs/web-instance-render-overrides.spec.md`
+    with §3.4 "I-P6 component-property-driven visibility" — the
+    binding mechanism, the prop-assignment-map propagation rule, and
+    the inner-instance merge behavior.
+  - Test fixtures (vitest, `clientNode.test.ts`): unit for
+    `collectPropAssignmentsFromInstance` + integration that takes
+    a hand-built TreeNode mirroring an alert-button (outer INSTANCE
+    with `componentPropAssignments[boolValue:false]` + master with
+    inner icon carrying `componentPropRefs[VISIBLE]`) and asserts the
+    expanded `_renderChildren` icon has `visible:false`.
+  - Implementation: `web/core/domain/clientNode.ts` only.
+  - Visual gates: `alret-64_376`, `input-box-9_42`,
+    `datepicker-12_749` rail, `dropdown-11_532` — all 4 Pass 2 tiles
+    should match figma after this PR.
+
+- **PR 2 — INSTANCE auto-clip to bbox** (group B)
+  - Spec: new `docs/specs/web-canvas-instance-clip.spec.md` —
+    "INSTANCEs whose `_renderChildren` are present clip to the
+    instance's effective bbox, matching Figma's default." Define
+    edge cases (legitimate overflow via `clipsContent:false` if the
+    field exists; nested INSTANCEs).
+  - Test fixtures (Playwright, e2e): a small `.fig` with one
+    INSTANCE that has a size-shrunk override + an orphan TEXT —
+    assert the rendered Konva canvas does not paint the orphan text
+    outside the bbox. Or unit-level: hand-built KText render check
+    via Konva's `getClientRect`.
+  - Implementation: `web/client/src/Canvas.tsx` only.
+  - Visual gates: `table-16_729`, `tbody-16_763`,
+    `table_nodata-64_397` — `Defa…` prefix gone after this PR.
+
+PR 1 should land first — it removes the loudest visual leak (4 of
+5 confirmed bugs touch arrow visibility). PR 2 addresses the
+remaining table mojibake. After both, re-run
+`node web/scripts/audit-round11-screenshots.mjs` and re-tile to
+confirm — anything still off is a new round-13 item.

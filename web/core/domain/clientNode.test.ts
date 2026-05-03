@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   collectFillOverridesFromInstance,
+  collectPropAssignmentsFromInstance,
   collectTextOverridesFromInstance,
   toClientChildForRender,
   toClientNode,
@@ -397,5 +398,230 @@ describe('toClientNode — INSTANCE expansion picks up fill overrides end-to-end
     }>)[0];
     expect(text.type).toBe('TEXT');
     expect(text._renderTextOverride).toBe('override-text');
+  });
+});
+
+describe('collectPropAssignmentsFromInstance (spec §3.4 I-C6/I-C7)', () => {
+  it('returns an empty map when componentPropAssignments is undefined or non-array', () => {
+    expect(collectPropAssignmentsFromInstance({}).size).toBe(0);
+    expect(collectPropAssignmentsFromInstance({ componentPropAssignments: null }).size).toBe(0);
+    expect(collectPropAssignmentsFromInstance({ componentPropAssignments: [] }).size).toBe(0);
+  });
+
+  it('reads boolValue from value.boolValue (direct binding)', () => {
+    const m = collectPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        { defID: { sessionID: 7, localID: 34 }, value: { boolValue: false } },
+      ],
+    });
+    expect(m.size).toBe(1);
+    expect(m.get('7:34')).toBe(false);
+  });
+
+  it('reads boolValue from varValue.value.boolValue (variant default binding)', () => {
+    const m = collectPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        { defID: { sessionID: 7, localID: 36 }, varValue: { value: { boolValue: true } } },
+      ],
+    });
+    expect(m.get('7:36')).toBe(true);
+  });
+
+  it('prefers value.boolValue over varValue when both are present', () => {
+    const m = collectPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        {
+          defID: { sessionID: 0, localID: 1 },
+          value: { boolValue: false },
+          varValue: { value: { boolValue: true } },
+        },
+      ],
+    });
+    expect(m.get('0:1')).toBe(false);
+  });
+
+  it('skips entries with no boolean (string-prop assignments, missing fields)', () => {
+    const m = collectPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        { defID: { sessionID: 0, localID: 1 }, value: {} }, // no boolValue
+        { defID: { sessionID: 0, localID: 2 }, value: { textValue: 'foo' } }, // wrong type
+        { defID: { sessionID: 0, localID: 3 } }, // no value at all
+      ],
+    });
+    expect(m.size).toBe(0);
+  });
+
+  it('skips entries with corrupt defID (missing sessionID/localID)', () => {
+    const m = collectPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        { defID: {}, value: { boolValue: false } },
+        { value: { boolValue: false } }, // no defID at all
+      ],
+    });
+    expect(m.size).toBe(0);
+  });
+});
+
+describe('toClientChildForRender — component-property visibility binding (spec §3.4 I-P6/I-P7/I-P8)', () => {
+  it('hides a master descendant whose componentPropRefs[VISIBLE] resolves to false', () => {
+    // The alret-64_376 / input-box-9_42 case: an icon in the button master
+    // carries componentPropRefs targeting a defID; the outer instance's
+    // assignments map that defID to false → icon should hide.
+    const icon = makeNode('VECTOR', 208, {
+      fillPaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }],
+      visible: true,
+      componentPropRefs: [
+        { defID: { sessionID: 7, localID: 34 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    });
+    const wrapper = makeNode('FRAME', 100, {}, [icon]);
+
+    const propAssignments = new Map<string, boolean>([['7:34', false]]);
+    const out = toClientChildForRender(
+      wrapper,
+      [],
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      0,
+      [],
+      propAssignments,
+    );
+
+    const child = (out.children as Array<{ visible?: boolean }>)[0];
+    expect(child.visible).toBe(false);
+    // Master node's own data is unchanged — another instance with a TRUE
+    // assignment must still see the icon.
+    expect(icon.data.visible).toBe(true);
+  });
+
+  it('keeps a descendant visible when prop assignment resolves to true', () => {
+    const icon = makeNode('VECTOR', 208, {
+      visible: true,
+      componentPropRefs: [
+        { defID: { sessionID: 7, localID: 34 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    });
+    const wrapper = makeNode('FRAME', 100, {}, [icon]);
+
+    const propAssignments = new Map<string, boolean>([['7:34', true]]);
+    const out = toClientChildForRender(
+      wrapper,
+      [],
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      0,
+      [],
+      propAssignments,
+    );
+    const child = (out.children as Array<{ visible?: boolean }>)[0];
+    // Either explicitly true or untouched — both render as visible. The
+    // important assertion is "not false".
+    expect(child.visible).not.toBe(false);
+  });
+
+  it('ignores componentPropRefs whose componentPropNodeField is not VISIBLE (e.g. TEXT/INSTANCE_SWAP)', () => {
+    const node = makeNode('TEXT', 50, {
+      componentPropRefs: [
+        { defID: { sessionID: 7, localID: 34 }, componentPropNodeField: 'TEXT' },
+      ],
+    });
+    const wrapper = makeNode('FRAME', 100, {}, [node]);
+
+    const propAssignments = new Map<string, boolean>([['7:34', false]]);
+    const out = toClientChildForRender(
+      wrapper, [], new Map(), new Map(), new Map(), new Map(), 0, [], propAssignments,
+    );
+    const child = (out.children as Array<{ visible?: boolean }>)[0];
+    // Spec v3 only handles VISIBLE — other fields are punted (§3.4 비고).
+    expect(child.visible).not.toBe(false);
+  });
+
+  it('explicit symbolOverrides[].visible wins over prop-binding default', () => {
+    // I-P8: explicit visibility override is more authoritative than the
+    // prop-binding default. If symbolOverrides says visible=true at this
+    // path, the prop-binding's false should be ignored.
+    const icon = makeNode('VECTOR', 50, {
+      componentPropRefs: [
+        { defID: { sessionID: 0, localID: 1 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    });
+    const wrapper = makeNode('FRAME', 100, {}, [icon]);
+
+    const propAssignments = new Map<string, boolean>([['0:1', false]]);
+    const visibilityOverrides = new Map<string, boolean>([['0:100/0:50', true]]);
+    const out = toClientChildForRender(
+      wrapper, [], new Map(), new Map(), new Map(), visibilityOverrides, 0, [], propAssignments,
+    );
+    const child = (out.children as Array<{ visible?: boolean }>)[0];
+    expect(child.visible).toBe(true);
+  });
+
+  it('toClientNode threads prop assignments end-to-end (alret-64_376 fixture)', () => {
+    // SYMBOL 5:44 (button master) — has an icon child with VISIBLE ref to defID 7:34
+    const iconMaster = makeNode('VECTOR', 208, {
+      visible: true,
+      componentPropRefs: [
+        { defID: { sessionID: 7, localID: 34 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    });
+    const buttonMaster = makeNode('SYMBOL', 44, {}, [iconMaster]);
+
+    // INSTANCE 60:340 — alret's primary action button. Carries a prop
+    // assignment that hides the arrow icon via the boolean-property binding.
+    const instance = makeNode('INSTANCE', 340, {
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 44 },
+        symbolOverrides: [], // no direct visibility override here
+      },
+      componentPropAssignments: [
+        { defID: { sessionID: 7, localID: 34 }, value: { boolValue: false } },
+      ],
+    });
+
+    const symbolIndex = buildSymbolIndex([buttonMaster, instance]);
+    const out = toClientNode(instance, [], symbolIndex);
+
+    const renderChildren = out._renderChildren as Array<{ visible?: boolean }>;
+    expect(renderChildren).toHaveLength(1);
+    expect(renderChildren[0].visible).toBe(false);
+    // Master untouched — a sibling instance without the assignment must
+    // still render the icon.
+    expect(iconMaster.data.visible).toBe(true);
+  });
+
+  it('two instances of the same master with opposite prop assignments do not cross-talk (I-M2 + I-P10)', () => {
+    const iconMaster = makeNode('VECTOR', 208, {
+      visible: true,
+      componentPropRefs: [
+        { defID: { sessionID: 7, localID: 34 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    });
+    const master = makeNode('SYMBOL', 44, {}, [iconMaster]);
+
+    const instHidden = makeNode('INSTANCE', 1, {
+      symbolData: { symbolID: { sessionID: 0, localID: 44 }, symbolOverrides: [] },
+      componentPropAssignments: [
+        { defID: { sessionID: 7, localID: 34 }, value: { boolValue: false } },
+      ],
+    });
+    const instShown = makeNode('INSTANCE', 2, {
+      symbolData: { symbolID: { sessionID: 0, localID: 44 }, symbolOverrides: [] },
+      componentPropAssignments: [
+        { defID: { sessionID: 7, localID: 34 }, value: { boolValue: true } },
+      ],
+    });
+
+    const symbolIndex = buildSymbolIndex([master, instHidden, instShown]);
+    const outHidden = toClientNode(instHidden, [], symbolIndex);
+    const outShown = toClientNode(instShown, [], symbolIndex);
+
+    const childHidden = (outHidden._renderChildren as Array<{ visible?: boolean }>)[0];
+    const childShown = (outShown._renderChildren as Array<{ visible?: boolean }>)[0];
+    expect(childHidden.visible).toBe(false);
+    expect(childShown.visible).not.toBe(false);
   });
 });
