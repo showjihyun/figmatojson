@@ -20,22 +20,31 @@ universal-primitive 결함 #5.
 
 ## 2. Figma 데이터 형태
 
-TEXT 노드의 `data.textData`:
+TEXT 노드의 `data.textData` (메타리치 input-box-9_42 의 state-text 노드 `11:457` / `427:5498` 실측):
 
 ```ts
 {
-  characters: "설명문구, 오류문구, 성공문구",
-  styleOverrideTable: {
-    [styleID]: { fillPaints, fontWeight, fontFamily, ...overrides },
-    ...
-  },
-  characterStyleIDs: number[]  // characters 와 같은 길이; 각 글자가
-                                // 어느 styleID 를 쓰는지 매핑
+  characters: "설명문구, 오류문구, 성공문구",  // 16 chars
+  characterStyleIDs: [0,0,0,0,0,0, 3,3,3,3, 0,0, 2,2,2,2],  // chars 와 같은 길이
+  styleOverrideTable: [
+    { styleID: 2, fillPaints: [{ type: 'SOLID', color: {r:0.007,g:0.58,b:0.42,a:1}, ... }] },  // green
+    { styleID: 3, fillPaints: [{ type: 'SOLID', color: {r:0.86,g:0.07,b:0.07,a:1}, ... }] },  // red
+  ],
+  lines: ...
 }
 ```
 
-`characterStyleIDs[i] === 0` 이면 노드 자체의 베이스 스타일 사용. 그 외
-값이면 `styleOverrideTable[id]` 의 partial override 가 베이스 위로 머지.
+**중요한 데이터 형태 nuance:**
+
+- `styleOverrideTable` 은 **array of `{styleID, ...overrides}` entries**, *map* 이 아님. lookup 은 array 를 iterate 해 `entry.styleID === id` 매칭. 첫 발견 win (Figma 가 같은 styleID 를 두 번 정의하면 corrupt).
+- `characterStyleIDs[i] === 0` 이면 *베이스* 스타일 — `styleOverrideTable` 에서 styleID 0 entry 는 *없다* (베이스가 곧 styleID 0 의 의미).
+- `characterStyleIDs[i] === n (n > 0)` 이면 `styleOverrideTable` 에서 `styleID === n` 인 entry 의 fields 가 *partial override* — 베이스 노드의 fillPaints/fontWeight/등 위로 entry 에 명시된 필드만 덮어쓴다.
+
+위 데이터 → 4 runs:
+1. indices 0-5 (`"설명문구, "`): styleID 0 → 베이스 (dark gray)
+2. indices 6-9 (`"오류문구"`): styleID 3 → red
+3. indices 10-11 (`", "`): styleID 0 → 베이스 (dark gray)
+4. indices 12-15 (`"성공문구"`): styleID 2 → green
 
 ## 3. Invariants
 
@@ -48,7 +57,7 @@ TEXT 노드의 `data.textData`:
 
 - I-R1 `characterStyleIDs` 가 모두 `0` 이거나 `styleOverrideTable` 이 비어있으면 → 기존 단일 KText 렌더 그대로. 회귀 없음.
 - I-R2 `characterStyleIDs` 의 unique 값이 2 이상이면 → 텍스트를 *연속 같은 styleID 의 글자 묶음 (run)* 으로 split. 각 run 은 별도 KText 로 렌더, x 좌표는 이전 run 들의 누적 너비.
-- I-R3 각 run 의 effective 스타일 = `nodeBaseStyle (fillPaints, fontSize, fontFamily, ...) ⊕ styleOverrideTable[styleID] (있는 필드만 덮어씀)`. fillPaints 가 override 에 있으면 그 색을 쓴다 (state-text 의 빨강/녹색).
+- I-R3 각 run 의 effective 스타일 = `nodeBaseStyle (fillPaints, fontSize, fontFamily, ...) ⊕ styleOverrideEntry (있는 필드만 덮어씀)`, 단 styleOverrideEntry 는 `styleOverrideTable.find(e => e.styleID === characterStyleIDs[i])`. fillPaints 가 override 에 있으면 그 색을 쓴다 (state-text 의 빨강/녹색). styleID 0 또는 매칭 entry 없음 → 베이스만.
 - I-R4 run split 시 measurement: 같은 fontFamily/fontSize/letterSpacing 으로 KText 의 `getTextWidth` 사용. 다국어 (한/영 mix) 에서도 작동하는지 확인.
 - I-R5 textAlign / lineHeight / wrap 정책은 노드 레벨 그대로 — split 은 fill/fontWeight 같은 inline 스타일 범위만, 레이아웃 prop 은 노드 전체에 한 번 적용.
 - I-R6 multi-line 텍스트 (newline 포함) 에서 run 이 줄을 가로지르면: 줄바꿈 시점 마다 run 도 다시 시작. (Konva 가 자동 wrap 하지 않으므로 우리가 manually 줄 분할 해야 할 가능성. 메타리치 케이스는 single-line 이라 v1 에선 single-line 만 다루고 multi-line 은 비대상.)
