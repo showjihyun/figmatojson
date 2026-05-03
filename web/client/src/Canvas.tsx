@@ -54,6 +54,8 @@ import { konvaBlendMode } from './lib/blendMode';
 import { computeImageCrop } from './lib/imageScale';
 import { layerBlurFromEffects } from './lib/blurEffect';
 import { LayerBlurWrapper } from './components/canvas/LayerBlurWrapper';
+import { variantLabelText } from './lib/variantLabel';
+import { VariantLabel } from './components/canvas/VariantLabel';
 import { rotationDegrees } from './lib/transform';
 import { konvaLineCap, konvaLineJoin } from './lib/strokeCapJoin';
 import { firstStopRgba, gradientFromPaint, type KonvaGradient } from './lib/gradient';
@@ -712,6 +714,10 @@ function NodeShapeImpl({
         <Line points={[0, 0, 0, h]} stroke={stroke!.color} strokeWidth={bl} lineCap={lineCap} dash={dash} listening={false} />
       )}
       {hasChildren && renderMaskedChildren(renderableChildren, onSelect, onDragGroup, sessionId)}
+      {/* Variant property labels (round 10 §5) — Component Set / state
+          group children get a small Figma-style label above each variant.
+          Rendered AFTER children so labels paint on top. */}
+      {hasChildren && isVariantContainer(node) && renderVariantLabels(renderableChildren)}
     </Group>
   );
 
@@ -875,6 +881,46 @@ function makeMaskClipFunc(mask: any): (ctx: CanvasRenderingContext2D) => void {
       ctx.rect(mx, my, w, h);
     }
   };
+}
+
+/**
+ * True when `node` is a Figma Component Set / state group — its children
+ * are variants and should get property labels above them (round 10 §2).
+ *
+ * Two encodings cover both modern and legacy Figma:
+ *   - `type === 'COMPONENT_SET'` (newer)
+ *   - `isStateGroup === true`    (legacy / metarich format)
+ */
+function isVariantContainer(node: any): boolean {
+  if (!node) return false;
+  if (node.type === 'COMPONENT_SET') return true;
+  if (node.isStateGroup === true) return true;
+  return false;
+}
+
+/**
+ * Emit one VariantLabel per variant child (round 10 §5). Positioned
+ * 4px above the variant's top-left in the container's local space.
+ *
+ * Children that are not SYMBOL / COMPONENT, or whose name isn't variant-
+ * shaped (no `=`), are skipped — they get no label.
+ */
+function renderVariantLabels(children: any[]): React.ReactNode {
+  const labels: React.ReactNode[] = [];
+  for (let i = 0; i < children.length; i++) {
+    const c = children[i];
+    if (!c || c.visible === false) continue;
+    if (c.type !== 'SYMBOL' && c.type !== 'COMPONENT') continue;
+    const text = variantLabelText(c.name);
+    if (!text) continue;
+    const x = c.transform?.m02 ?? 0;
+    const y = c.transform?.m12 ?? 0;
+    // Label height (18) + gap (4) — render just above the variant top.
+    labels.push(
+      <VariantLabel key={`vl-${i}`} x={x} y={y - 22} text={text} />,
+    );
+  }
+  return labels;
 }
 
 // Memoized so that re-renders triggered by pan/zoom/selection at the Canvas
