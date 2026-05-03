@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyInstanceReflow,
   collectFillOverridesFromInstance,
+  collectPropAssignmentsAtPathFromInstance,
   collectPropAssignmentsFromInstance,
   collectTextOverridesFromInstance,
   toClientChildForRender,
@@ -732,6 +733,66 @@ describe('applyInstanceReflow (spec web-instance-autolayout-reflow §2 / §3)', 
     expect((out[1] as { transform: { m12: number } }).transform.m12).toBeCloseTo(7);
   });
 
+  it('T-overlap-1: VERTICAL master with overlapping visible children — reflowed to flow positions (Phase B)', () => {
+    // Mirrors the metarich Dropdown rail: master has 3 visible children
+    // stacked at the same y=127, the first should keep its position and
+    // the second should flow down by (size.y + spacing).
+    const a = child({ sx: 233, sy: 40, tx: 4, ty: 127, visible: true });
+    const b = child({ sx: 233, sy: 40, tx: 4, ty: 127, visible: true });
+    const masterData = { stackMode: 'VERTICAL', stackSpacing: 1 };
+    // Sizes don't differ → I-T1 false → CENTER reflow doesn't fire,
+    // but overlap-group reflow does (alignment-independent per I-O*).
+    const out = applyInstanceReflow([a, b], masterData, { x: 241, y: 130 }, { x: 111, y: 276 });
+    expect((out[0] as { transform: { m12: number } }).transform.m12).toBeCloseTo(127);
+    expect((out[1] as { transform: { m12: number } }).transform.m12).toBeCloseTo(127 + 40 + 1);
+  });
+
+  it('T-overlap-2: HORIZONTAL master with overlapping visible children — primary axis = x', () => {
+    const a = child({ sx: 30, sy: 16, tx: 50, ty: 0, visible: true });
+    const b = child({ sx: 30, sy: 16, tx: 50, ty: 0, visible: true });
+    const masterData = { stackMode: 'HORIZONTAL', stackSpacing: 4 };
+    const out = applyInstanceReflow([a, b], masterData, { x: 100, y: 16 }, { x: 100, y: 16 });
+    expect((out[0] as { transform: { m02: number } }).transform.m02).toBe(50);
+    expect((out[1] as { transform: { m02: number } }).transform.m02).toBeCloseTo(50 + 30 + 4);
+  });
+
+  it('T-overlap-3: invisible children excluded from overlap detection (do not cause reflow on their own)', () => {
+    const visible = child({ sx: 233, sy: 40, tx: 4, ty: 0, visible: true });
+    const hidden = child({ sx: 233, sy: 40, tx: 4, ty: 0, visible: false });
+    const masterData = { stackMode: 'VERTICAL', stackSpacing: 1 };
+    const out = applyInstanceReflow([visible, hidden], masterData, { x: 100, y: 100 }, { x: 100, y: 100 });
+    // Only one visible child → no overlap → no reflow fires (visible
+    // child stays at master position).
+    expect((out[0] as { transform: { m12: number } }).transform.m12).toBe(0);
+    // Hidden child untouched.
+    expect((out[1] as { transform: { m12: number } }).transform.m12).toBe(0);
+  });
+
+  it('T-overlap-4: no overlap between visible children → no reflow even though master has stackMode', () => {
+    const a = child({ sx: 50, sy: 16, tx: 0, ty: 0, visible: true });
+    const b = child({ sx: 50, sy: 16, tx: 0, ty: 20, visible: true });
+    const masterData = { stackMode: 'VERTICAL', stackSpacing: 4 };
+    const out = applyInstanceReflow([a, b], masterData, { x: 50, y: 36 }, { x: 50, y: 36 });
+    expect((out[0] as { transform: { m12: number } }).transform.m12).toBe(0);
+    expect((out[1] as { transform: { m12: number } }).transform.m12).toBe(20);
+  });
+
+  it('T-overlap-5: VERTICAL overlap with intervening invisible-but-overlap-positioned child', () => {
+    // a at y=0 (visible), b at y=0 (hidden), c at y=0 (visible).
+    // After Phase B: a stays at 0, c moves down to size+spacing (b doesn't
+    // contribute because it's hidden).
+    const a = child({ sx: 233, sy: 40, tx: 4, ty: 0, visible: true });
+    const b = child({ sx: 233, sy: 40, tx: 4, ty: 0, visible: false });
+    const c = child({ sx: 233, sy: 40, tx: 4, ty: 0, visible: true });
+    const masterData = { stackMode: 'VERTICAL', stackSpacing: 1 };
+    const out = applyInstanceReflow([a, b, c], masterData, { x: 233, y: 100 }, { x: 233, y: 100 });
+    expect((out[0] as { transform: { m12: number } }).transform.m12).toBeCloseTo(0);
+    // Hidden b unchanged.
+    expect((out[1] as { transform: { m12: number } }).transform.m12).toBe(0);
+    // c should slot into the next flow position.
+    expect((out[2] as { transform: { m12: number } }).transform.m12).toBeCloseTo(41);
+  });
+
   it('T-8: missing transform on a visible child — new transform is generated', () => {
     const c = child({ sx: 20, sy: 20, visible: true });
     delete (c as { transform?: unknown }).transform;
@@ -742,8 +803,175 @@ describe('applyInstanceReflow (spec web-instance-autolayout-reflow §2 / §3)', 
     expect(newC.transform.m02).toBeCloseTo(5);
     expect(newC.transform.m12).toBeCloseTo(5);
   });
+});
 
-  it('T-9 integration: alert-button-style INSTANCE — TEXT child centers in shrunk bbox via toClientNode', () => {
+describe('collectPropAssignmentsAtPathFromInstance (spec §3.4 I-P11, round 15 Phase A)', () => {
+  it('returns an empty map when symbolOverrides is undefined or non-array', () => {
+    expect(collectPropAssignmentsAtPathFromInstance(undefined).size).toBe(0);
+    expect(collectPropAssignmentsAtPathFromInstance([]).size).toBe(0);
+  });
+
+  it('extracts componentPropAssignments from a symbolOverride entry, keyed by guidPath', () => {
+    const m = collectPropAssignmentsAtPathFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 15, localID: 292 }] },
+        visible: true,
+        componentPropAssignments: [
+          { defID: { sessionID: 23, localID: 11 }, value: { boolValue: false } },
+        ],
+      },
+    ]);
+    expect(m.size).toBe(1);
+    const inner = m.get('15:292');
+    expect(inner).toBeDefined();
+    expect(inner!.get('23:11')).toBe(false);
+  });
+
+  it('skips entries without componentPropAssignments', () => {
+    const m = collectPropAssignmentsAtPathFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 1 }] },
+        textData: { characters: 'just text' },
+      },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('skips entries with corrupt guidPath', () => {
+    const m = collectPropAssignmentsAtPathFromInstance([
+      {
+        guidPath: {},
+        componentPropAssignments: [
+          { defID: { sessionID: 0, localID: 1 }, value: { boolValue: false } },
+        ],
+      },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('handles multi-step guidPath (joined with /)', () => {
+    const m = collectPropAssignmentsAtPathFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 5 }, { sessionID: 0, localID: 9 }] },
+        componentPropAssignments: [
+          { defID: { sessionID: 0, localID: 100 }, varValue: { value: { boolValue: true } } },
+        ],
+      },
+    ]);
+    expect(m.get('0:5/0:9')!.get('0:100')).toBe(true);
+  });
+});
+
+describe('toClientChildForRender — outer-override propAssignments propagation (round 15 Phase A)', () => {
+  it('hides an inner-master child whose VISIBLE prop is bound by an outer symbolOverride entry', () => {
+    // Mirrors the metarich Dropdown rail case: outer Dropdown INSTANCE
+    // carries symbolOverrides[] entries for child option-rows. Each entry
+    // has a guidPath pointing at the option-row INSTANCE (master child)
+    // AND componentPropAssignments that should toggle the row's icon
+    // visibility. Without Phase A, we only read componentPropAssignments
+    // from the option-row INSTANCE itself (empty), missing the outer
+    // override and leaving the icon visible.
+    //
+    // Setup: outer master with one INSTANCE child (the "option row") whose
+    // own master has a VECTOR icon bound to defID 23:11 via VISIBLE prop.
+    // Outer override entry on path [option-row guid] passes prop
+    // assignment {23:11 → false}. Expected: icon ends up visible:false.
+    const innerIconMaster = makeNode('VECTOR', 200, {
+      visible: true,
+      componentPropRefs: [
+        { defID: { sessionID: 23, localID: 11 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    });
+    const innerMaster = makeNode('SYMBOL', 514, {}, [innerIconMaster]);
+    const optionRow = makeNode('INSTANCE', 292, {
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 514 },
+        symbolOverrides: [],
+      },
+    });
+    const outerMaster = makeNode('SYMBOL', 532, {}, [optionRow]);
+    const outerInstance = makeNode('INSTANCE', 279, {
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 532 },
+        symbolOverrides: [
+          {
+            guidPath: { guids: [{ sessionID: 0, localID: 292 }] },
+            visible: true,
+            componentPropAssignments: [
+              { defID: { sessionID: 23, localID: 11 }, value: { boolValue: false } },
+            ],
+          },
+        ],
+      },
+    });
+
+    const symbolIndex = buildSymbolIndex([innerMaster, outerMaster, outerInstance]);
+    const out = toClientNode(outerInstance, [], symbolIndex);
+
+    // Outer's _renderChildren = [option-row]. Inside option-row's own
+    // _renderChildren we should find the inner icon with visible:false
+    // because the outer's path-keyed prop assignment hid it.
+    const renderChildren = out._renderChildren as Array<{
+      type: string;
+      _renderChildren?: Array<{ type: string; visible?: boolean }>;
+    }>;
+    expect(renderChildren).toHaveLength(1);
+    const optionRowOut = renderChildren[0];
+    expect(optionRowOut.type).toBe('INSTANCE');
+    const innerIconOut = optionRowOut._renderChildren?.[0];
+    expect(innerIconOut?.type).toBe('VECTOR');
+    expect(innerIconOut?.visible).toBe(false);
+  });
+
+  it('does not affect siblings of the path-targeted node — outer-override prop assigns are scoped', () => {
+    // Two option-rows under outer master. Outer override targets only one;
+    // the other should still render its icon (no leakage of prop assigns).
+    const iconA = makeNode('VECTOR', 200, {
+      visible: true,
+      componentPropRefs: [
+        { defID: { sessionID: 23, localID: 11 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    });
+    const iconB = makeNode('VECTOR', 201, {
+      visible: true,
+      componentPropRefs: [
+        { defID: { sessionID: 23, localID: 11 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    });
+    const innerA = makeNode('SYMBOL', 514, {}, [iconA]);
+    const innerB = makeNode('SYMBOL', 515, {}, [iconB]);
+    const rowA = makeNode('INSTANCE', 292, { symbolData: { symbolID: { sessionID: 0, localID: 514 }, symbolOverrides: [] } });
+    const rowB = makeNode('INSTANCE', 293, { symbolData: { symbolID: { sessionID: 0, localID: 515 }, symbolOverrides: [] } });
+    const outerMaster = makeNode('SYMBOL', 532, {}, [rowA, rowB]);
+    const outerInstance = makeNode('INSTANCE', 279, {
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 532 },
+        symbolOverrides: [
+          {
+            guidPath: { guids: [{ sessionID: 0, localID: 292 }] },
+            componentPropAssignments: [
+              { defID: { sessionID: 23, localID: 11 }, value: { boolValue: false } },
+            ],
+          },
+        ],
+      },
+    });
+
+    const symbolIndex = buildSymbolIndex([innerA, innerB, outerMaster, outerInstance]);
+    const out = toClientNode(outerInstance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{
+      _renderChildren?: Array<{ visible?: boolean }>;
+    }>;
+    const rowAIcon = renderChildren[0]._renderChildren?.[0];
+    const rowBIcon = renderChildren[1]._renderChildren?.[0];
+    // Row A's icon hidden by outer override; Row B's icon untouched.
+    expect(rowAIcon?.visible).toBe(false);
+    expect(rowBIcon?.visible).not.toBe(false);
+  });
+});
+
+describe('toClientNode INSTANCE — applyInstanceReflow integration (round 14 §5 T-9)', () => {
+  it('alert-button-style INSTANCE — TEXT child centers in shrunk bbox via toClientNode', () => {
     // Master: HORIZONTAL CENTER, 88×32, with TEXT "Button" + icon INSTANCE.
     // Outer INSTANCE: size 48×32, prop assignment hides the icon, text override "삭제".
     // Expected: resolved TEXT transform centers in 48×32 (not at master x=36).

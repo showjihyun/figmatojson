@@ -84,8 +84,9 @@ export function toClientNode(
         const fillOverrides = collectFillOverridesFromInstance(sd?.symbolOverrides);
         const visOverrides = collectVisibilityOverridesFromInstance(sd?.symbolOverrides);
         const propAssignments = collectPropAssignmentsFromInstance(data);
+        const propAssignmentsByPath = collectPropAssignmentsAtPathFromInstance(sd?.symbolOverrides);
         const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments),
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath),
         );
         if (expanded.length > 0) {
           // Spec web-instance-autolayout-reflow: when the INSTANCE size
@@ -251,6 +252,55 @@ export function collectPropAssignmentsFromInstance(
 }
 
 /**
+ * Pull path-keyed component-property assignments out of an outer INSTANCE's
+ * `symbolOverrides[]`. Each entry whose `componentPropAssignments` is
+ * non-empty contributes a Map<defID, boolean> at its `guidPath` key.
+ *
+ * Why this exists — the metarich Dropdown rail's "금월"/"전월" option rows
+ * inherit prop assignments from the OUTER Dropdown's symbolOverride
+ * entries, not from their own componentPropAssignments. Without this,
+ * the arrow-icon prop-binding fix from round 12 misses these rows
+ * (they keep the leaked arrow even though the data has the right
+ * assignment to hide it).
+ *
+ * Spec: docs/specs/web-instance-render-overrides.spec.md §3.4 I-P11.
+ */
+export function collectPropAssignmentsAtPathFromInstance(
+  overrides: Array<Record<string, unknown>> | undefined,
+): Map<string, Map<string, boolean>> {
+  const out = new Map<string, Map<string, boolean>>();
+  if (!Array.isArray(overrides)) return out;
+  for (const o of overrides) {
+    const cpa = o.componentPropAssignments as
+      | Array<{
+          defID?: { sessionID?: number; localID?: number };
+          value?: { boolValue?: boolean };
+          varValue?: { value?: { boolValue?: boolean } };
+        }>
+      | undefined;
+    if (!Array.isArray(cpa) || cpa.length === 0) continue;
+    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+    const key = pathKeyFromGuids(guids);
+    if (key === null) continue;
+    // Build the per-path assignments map using the same shape as
+    // collectPropAssignmentsFromInstance — direct boolValue first, fall
+    // back to varValue, skip non-boolean entries.
+    const inner = new Map<string, boolean>();
+    for (const a of cpa) {
+      const d = a.defID;
+      if (!d || typeof d.sessionID !== 'number' || typeof d.localID !== 'number') continue;
+      const directV = a.value?.boolValue;
+      const varV = a.varValue?.value?.boolValue;
+      const v = typeof directV === 'boolean' ? directV : (typeof varV === 'boolean' ? varV : undefined);
+      if (typeof v !== 'boolean') continue;
+      inner.set(`${d.sessionID}:${d.localID}`, v);
+    }
+    if (inner.size > 0) out.set(key, inner);
+  }
+  return out;
+}
+
+/**
  * Test a node's `componentPropRefs` against a propAssignments map. Returns
  * `false` if any VISIBLE-field ref resolves to a `false` assignment, else
  * `undefined` (meaning "no opinion — leave existing visibility as-is").
@@ -303,70 +353,141 @@ export function applyInstanceReflow(
 ): DocumentNode[] {
   const stackMode = masterData.stackMode as string | undefined;
   if (stackMode !== 'HORIZONTAL' && stackMode !== 'VERTICAL') return expanded;
-  const primaryAlign = masterData.stackPrimaryAlignItems as string | undefined;
-  const counterAlign = masterData.stackCounterAlignItems as string | undefined;
-  if (primaryAlign !== 'CENTER' || counterAlign !== 'CENTER') return expanded;
-  if (!masterSize || !instSize) return expanded;
-  const sizesDiffer =
-    (masterSize.x ?? 0) !== (instSize.x ?? 0) || (masterSize.y ?? 0) !== (instSize.y ?? 0);
-  if (!sizesDiffer) return expanded;
 
   const isHorizontal = stackMode === 'HORIZONTAL';
   const primaryAxis: 'x' | 'y' = isHorizontal ? 'x' : 'y';
   const counterAxis: 'x' | 'y' = isHorizontal ? 'y' : 'x';
-  const instPrimary = instSize[primaryAxis];
-  const instCounter = instSize[counterAxis];
-  if (typeof instPrimary !== 'number' || typeof instCounter !== 'number') return expanded;
-
   const spacing = (masterData.stackSpacing as number | undefined) ?? 0;
 
-  // Effective visible children participate in the layout calculation.
+  // Effective visible children participate in any layout calculation.
   // Invisible children stay at master coords (their transforms are not
   // touched) — Canvas drops them anyway via `node.visible === false`.
-  type SizedChild = { idx: number; w: number; h: number };
+  type SizedChild = { idx: number; w: number; h: number; primaryPos: number };
   const visibleSized: SizedChild[] = [];
   for (let i = 0; i < expanded.length; i++) {
     const c = expanded[i] as DocumentNode & {
       visible?: boolean;
       size?: { x?: number; y?: number };
+      transform?: { m02?: number; m12?: number };
     };
     if (c.visible === false) continue;
     const sz = c.size;
     if (!sz || typeof sz.x !== 'number' || typeof sz.y !== 'number') continue;
-    visibleSized.push({ idx: i, w: sz.x, h: sz.y });
+    const primaryPos = isHorizontal ? (c.transform?.m02 ?? 0) : (c.transform?.m12 ?? 0);
+    visibleSized.push({ idx: i, w: sz.x, h: sz.y, primaryPos });
   }
   if (visibleSized.length === 0) return expanded;
-
-  const totalPrimary = visibleSized.reduce(
-    (sum, c) => sum + (primaryAxis === 'x' ? c.w : c.h),
-    0,
-  ) + spacing * Math.max(0, visibleSized.length - 1);
-  let cursor = (instPrimary - totalPrimary) / 2;
 
   // Float32 rounding to match the precision the rest of the pipeline uses
   // when copying transforms (see src/pen-export.ts:f32 usage).
   const f32 = Math.fround;
 
-  // Build a new array — don't mutate the input children. Visible ones get
-  // a fresh transform; invisible ones pass through.
+  // Spec §3.1-3.5: CENTER+CENTER reflow when sizes differ. Re-positions
+  // every visible child for the new INSTANCE bbox.
+  const primaryAlign = masterData.stackPrimaryAlignItems as string | undefined;
+  const counterAlign = masterData.stackCounterAlignItems as string | undefined;
+  const sizesDiffer = !!masterSize && !!instSize && (
+    (masterSize.x ?? 0) !== (instSize.x ?? 0) ||
+    (masterSize.y ?? 0) !== (instSize.y ?? 0)
+  );
+  if (
+    primaryAlign === 'CENTER' && counterAlign === 'CENTER' &&
+    sizesDiffer && instSize
+  ) {
+    const instPrimary = instSize[primaryAxis];
+    const instCounter = instSize[counterAxis];
+    if (typeof instPrimary === 'number' && typeof instCounter === 'number') {
+      const totalPrimary = visibleSized.reduce(
+        (sum, c) => sum + (primaryAxis === 'x' ? c.w : c.h),
+        0,
+      ) + spacing * Math.max(0, visibleSized.length - 1);
+      let cursor = (instPrimary - totalPrimary) / 2;
+      const out = expanded.slice();
+      for (const v of visibleSized) {
+        const c = out[v.idx] as DocumentNode & {
+          transform?: {
+            m00?: number; m01?: number; m02?: number;
+            m10?: number; m11?: number; m12?: number;
+          };
+        };
+        const childPrimary = primaryAxis === 'x' ? v.w : v.h;
+        const childCounter = counterAxis === 'x' ? v.w : v.h;
+        const newPrimary = f32(cursor);
+        const newCounter = f32((instCounter - childCounter) / 2);
+        const baseT = c.transform ?? { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 };
+        const newTransform = isHorizontal
+          ? { ...baseT, m02: newPrimary, m12: newCounter }
+          : { ...baseT, m02: newCounter, m12: newPrimary };
+        out[v.idx] = { ...c, transform: newTransform };
+        cursor += childPrimary + spacing;
+      }
+      return out;
+    }
+  }
+
+  // Spec §3.6 (round 15 Phase B): overlap-group reflow.
+  // Alignment-independent — fires whenever 2+ visible children share the
+  // same master primary-axis position. The first child of an overlap
+  // group keeps its master position; subsequent visible children flow
+  // forward by (cumulative sizes + spacing) starting from the first's
+  // position. Counter axis untouched.
+  //
+  // Detect any overlap by walking visibleSized once and tracking prior
+  // positions per group. We don't need to scan all-pairs — duplicates of
+  // the first occurrence are enough.
+  const seenPositions = new Map<number, number>(); // primaryPos → first occurrence idx in visibleSized
+  let overlapDetected = false;
+  for (let i = 0; i < visibleSized.length; i++) {
+    const pos = visibleSized[i].primaryPos;
+    if (seenPositions.has(pos)) {
+      overlapDetected = true;
+      break;
+    }
+    seenPositions.set(pos, i);
+  }
+  if (!overlapDetected) return expanded;
+
+  // Walk visibleSized in master order. Maintain a "flow cursor" anchored
+  // to the first occurrence of each primary position. For subsequent
+  // visible children at the same position, slot them at (cursor +=
+  // childPrimary + spacing). For visible children at a NEW (non-overlap)
+  // position, jump cursor to that position and continue.
   const out = expanded.slice();
-  for (const v of visibleSized) {
-    const c = out[v.idx] as DocumentNode & {
-      transform?: {
-        m00?: number; m01?: number; m02?: number;
-        m10?: number; m11?: number; m12?: number;
-      };
-    };
+  let cursor = visibleSized[0].primaryPos;
+  let lastSeenPos = visibleSized[0].primaryPos;
+  for (let i = 0; i < visibleSized.length; i++) {
+    const v = visibleSized[i];
+    if (i === 0) {
+      // First child stays at master position; cursor anchored here.
+      cursor = v.primaryPos;
+      lastSeenPos = v.primaryPos;
+      continue;
+    }
     const childPrimary = primaryAxis === 'x' ? v.w : v.h;
-    const childCounter = counterAxis === 'x' ? v.w : v.h;
-    const newPrimary = f32(cursor);
-    const newCounter = f32((instCounter - childCounter) / 2);
-    const baseT = c.transform ?? { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 };
-    const newTransform = isHorizontal
-      ? { ...baseT, m02: newPrimary, m12: newCounter }
-      : { ...baseT, m02: newCounter, m12: newPrimary };
-    out[v.idx] = { ...c, transform: newTransform };
-    cursor += childPrimary + spacing;
+    if (v.primaryPos === lastSeenPos) {
+      // Overlap with previous — slot at cursor + previous child's primary + spacing.
+      const prev = visibleSized[i - 1];
+      const prevPrimary = primaryAxis === 'x' ? prev.w : prev.h;
+      cursor = cursor + prevPrimary + spacing;
+      const c = out[v.idx] as DocumentNode & {
+        transform?: {
+          m00?: number; m01?: number; m02?: number;
+          m10?: number; m11?: number; m12?: number;
+        };
+      };
+      const baseT = c.transform ?? { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 };
+      const newPrimary = f32(cursor);
+      const newTransform = isHorizontal
+        ? { ...baseT, m02: newPrimary }
+        : { ...baseT, m12: newPrimary };
+      out[v.idx] = { ...c, transform: newTransform };
+    } else {
+      // No overlap with previous — keep this child at master position
+      // and re-anchor the cursor.
+      cursor = v.primaryPos;
+      lastSeenPos = v.primaryPos;
+    }
+    void childPrimary; // referenced for clarity even when not used in non-overlap branch
   }
   return out;
 }
@@ -415,6 +536,7 @@ export function toClientChildForRender(
   depth: number,
   pathFromOuter: string[] = [],
   propAssignments: Map<string, boolean> = new Map(),
+  propAssignmentsByPath: Map<string, Map<string, boolean>> = new Map(),
 ): DocumentNode {
   if (depth > 8) {
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
@@ -425,6 +547,17 @@ export function toClientChildForRender(
   const currentPath = n.guidStr ? [...pathFromOuter, n.guidStr] : pathFromOuter;
   const currentKey = currentPath.join('/');
   const data = (n.data ?? {}) as Record<string, unknown>;
+
+  // Spec §3.4 I-P11 (round 15): merge in any path-keyed prop assignments
+  // from outer symbolOverrides whose guidPath matches THIS node's path.
+  // The merged map then propagates through children + nested-instance
+  // expansion below. Outer-override assignments override outer instance
+  // assignments at the same defID (same flat-overwrite semantics as I-P9).
+  const overrideAssigns = propAssignmentsByPath.get(currentKey);
+  const effectivePropAssignments = overrideAssigns
+    ? new Map([...propAssignments, ...overrideAssigns])
+    : propAssignments;
+
   const out: DocumentNode = {
     id: n.guidStr,
     guid: n.guid,
@@ -432,7 +565,7 @@ export function toClientChildForRender(
     name: n.name,
     _isInstanceChild: true,
     children: n.children.map((c) =>
-      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath, propAssignments),
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath, effectivePropAssignments, propAssignmentsByPath),
     ),
   };
   if (VECTOR_TYPES.has(n.type)) {
@@ -471,13 +604,32 @@ export function toClientChildForRender(
         const mergedVis = mergeOverridesForNested(visibilityOverrides, innerVis, currentPath);
         // Spec §3.4 I-P9: prop assignments are defID-keyed, not path-keyed,
         // so the merge is a flat overwrite of the outer map (inner wins
-        // within this INSTANCE's expansion).
+        // within this INSTANCE's expansion). Use effectivePropAssignments
+        // (which already includes outer-symbolOverride assignments matched
+        // to currentKey via I-P11) as the base, then apply this inner
+        // INSTANCE's own componentPropAssignments on top.
         const innerPropAssignments = collectPropAssignmentsFromInstance(data);
         const mergedPropAssignments = innerPropAssignments.size > 0
-          ? new Map([...propAssignments, ...innerPropAssignments])
-          : propAssignments;
+          ? new Map([...effectivePropAssignments, ...innerPropAssignments])
+          : effectivePropAssignments;
+        // Spec §3.4 I-P11: also collect path-keyed prop assignments from
+        // the inner INSTANCE's own symbolOverrides, prefixed with currentPath
+        // so they reach descendants of the inner expansion. Outer
+        // path-keyed assignments stay valid since they were matched at the
+        // currentKey here already (above).
+        const innerPropAssignsByPath = collectPropAssignmentsAtPathFromInstance(sd?.symbolOverrides);
+        const mergedPropAssignsByPath = innerPropAssignsByPath.size > 0
+          ? new Map(propAssignmentsByPath)
+          : propAssignmentsByPath;
+        if (innerPropAssignsByPath.size > 0) {
+          const prefix = currentPath.join('/');
+          for (const [innerKey, innerVal] of innerPropAssignsByPath) {
+            const merged = prefix.length > 0 ? `${prefix}/${innerKey}` : innerKey;
+            mergedPropAssignsByPath.set(merged, innerVal);
+          }
+        }
         out._renderChildren = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments),
+          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath),
         );
       }
     }
@@ -505,8 +657,12 @@ export function toClientChildForRender(
     // when no explicit visibility override is set for this path. Round 12
     // adds this branch to cover Figma's component-property visibility
     // mechanism — used by alret / input-box / datepicker rail / dropdown
-    // to hide the trailing arrow icon inside Button variants.
-    const propVis = visibleFromPropRefs(data, propAssignments);
+    // to hide the trailing arrow icon inside Button variants. Round 15
+    // (I-P11) adds: outer-symbolOverride path-keyed assignments are now
+    // merged into effectivePropAssignments above, so this lookup also
+    // covers the metarich Dropdown rail's "금월"/"전월" rows where the
+    // arrow-hide assignment lives in the outer Dropdown's overrides.
+    const propVis = visibleFromPropRefs(data, effectivePropAssignments);
     if (propVis === false) out.visible = false;
   }
   return out;
