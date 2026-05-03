@@ -477,9 +477,49 @@ function NodeShapeImpl({
       );
     }
 
+    // Figma's textAutoResize semantics (web-canvas-text-frame-fidelity.spec.md
+    // §2.1 I-1): HEIGHT / WIDTH_AND_HEIGHT / undefined → text renders at its
+    // natural width; the master size.x is just the design-time measured
+    // width (informational, not a hard clip). Passing width=size.x to KText
+    // produces visible clipping ("Button" → "Butto") whenever our font
+    // measures even 1-2px wider than Figma's source font.
+    //
+    // Two cases:
+    //   - align is unset / 'left' / 'justify': omit width entirely. KText
+    //     renders at natural width, no clipping risk.
+    //   - align is 'center' / 'right': width is needed for alignment to
+    //     work, but if the natural text is wider than the master width
+    //     we grow the KText box symmetrically (center) or leftward (right)
+    //     to fit, AND shift x so the visual position stays anchored
+    //     where Figma intended.
+    //   - textAutoResize 'NONE' / 'TRUNCATE': respect the master width as
+    //     a hard limit (rare).
+    const isFixedWidthMode =
+      node.textAutoResize === 'NONE' || node.textAutoResize === 'TRUNCATE';
+    let ktextX = x;
+    let ktextWidth: number | undefined;
+    if (isFixedWidthMode) {
+      ktextWidth = w || undefined;
+    } else if (align === 'center' || align === 'right') {
+      const baseW = w || 0;
+      const natural = measureRunWidth(chars, fontSize, fontFamily, fontStyle, letterSpacing);
+      if (natural > baseW && baseW > 0) {
+        const overflow = natural - baseW;
+        if (align === 'center') {
+          ktextX = x - overflow / 2;
+        } else {
+          ktextX = x - overflow;
+        }
+        ktextWidth = natural;
+      } else {
+        ktextWidth = baseW || undefined;
+      }
+    } else {
+      ktextWidth = undefined;
+    }
     return (
       <KText
-        x={x}
+        x={ktextX}
         y={y}
         rotation={rotation}
         opacity={opacity}
@@ -494,7 +534,7 @@ function NodeShapeImpl({
         verticalAlign={verticalAlign}
         align={align}
         fill={baseFillColor}
-        width={w || undefined}
+        width={ktextWidth}
         height={h || undefined}
         shadowEnabled={shadow != null}
         shadowOffsetX={shadow?.shadowOffsetX}

@@ -4,6 +4,23 @@
     <meta charset="UTF-8" />
     <title>figma_reverse — Tier 2 PoC</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Web fonts that Figma source files commonly target. Loaded ahead
+         of the React bundle so KText measurement matches Figma's layout.
+         Without these, fallback fonts render glyphs wider than the source
+         design, and KText with width set to the master TEXT bbox clips
+         the last character ("Button" → "Butto"). Spec:
+         docs/specs/web-canvas-text-frame-fidelity.spec.md §2.1 I-3a. -->
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap"
+    />
   </head>
   <body>
     <div id="root"></div>
