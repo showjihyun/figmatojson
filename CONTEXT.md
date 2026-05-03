@@ -71,7 +71,17 @@ Effective output is `Master × Overrides`, not just `Master`.
 
 **Expansion**:
 The act of replacing an Instance with its Master's subtree at the `Pen Node` phase — applying Overrides, scaling/reflowing children, and prefixing descendant GUIDs to prevent collisions. After Expansion, Master/Instance no longer exist as distinct concepts in the output; only the resolved tree remains.
+
+Concretely, Expansion is two stacked passes: **Resolve** — `(Master subtree + Instance + Overrides) → resolved Tree Node subtree` (Effective Visibility composed, fillPaints overrides applied, text overrides applied, prop assignments propagated). **Reduce-to-Pen** — collapse the resolved subtree into Pen Node's four types, apply auto-layout reflow, mint Pen IDs. Resolve is shared between CLI and web (lives in `src/expansion.ts`); Reduce-to-Pen is CLI-only (lives in `src/pen-export.ts`).
 _Avoid_: "inlining", "merging" (used for narrower meanings)
+
+**Expansion Context**:
+The per-`.fig` setup needed before any Resolve call: built once from `allNodes` (`createExpansionContext`), holds the **Master Index** and any other lookups the resolver needs. One Expansion Context produces N resolved subtrees (one per Instance) without rebuilding the index.
+_Avoid_: "expansion state", "resolver context"
+
+**Master Index**:
+A `Map<GUID, Master>` over `allNodes`, holding only nodes whose `type ∈ {SYMBOL, COMPONENT, COMPONENT_SET}`. Built once per Expansion Context. The lookup an Instance uses to find its Master before Resolve walks the Master's subtree.
+_Avoid_: "symbol index", "symbol map" (legacy names; "Master" is the project term — see above).
 
 ### Identity
 
