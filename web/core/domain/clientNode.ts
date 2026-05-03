@@ -10,6 +10,7 @@
  */
 
 import { parseVectorNetworkBlob, vectorNetworkToPath } from '../../../src/vector.js';
+import { buildMasterIndex } from '../../../src/masterIndex.js';
 import type { TreeNode } from '../../../src/types.js';
 import type {
   ComponentTextRef,
@@ -814,17 +815,20 @@ export function collectTexts(
 }
 
 /**
- * Build the SymbolIndex used by the mappers above — lookup by guidStr,
- * resolves both COMPONENT/SYMBOL masters and FRAME masters that
- * INSTANCEs may reference.
+ * Re-export of `src/masterIndex.ts:buildMasterIndex` under the legacy
+ * name so existing call sites (LoadSnapshot, FsSessionStore,
+ * messageJson, tests) work without churn during the round-18 cluster A
+ * migration. New callers should import `buildMasterIndex` from
+ * `src/masterIndex.ts` directly.
+ *
+ * Spec: docs/specs/expansion-context.spec.md §3.4.
+ *
+ * Note: the previous in-line implementation here had a dead-code bug
+ * (an unconditional `m.set` after the type-filtered branch) that
+ * caused every Tree Node to be indexed regardless of type. The shared
+ * `buildMasterIndex` filters correctly to SYMBOL/COMPONENT/
+ * COMPONENT_SET only.
  */
 export function buildSymbolIndex(allNodes: Iterable<TreeNode>): Map<string, TreeNode> {
-  const m = new Map<string, TreeNode>();
-  for (const node of allNodes) {
-    if (node.type === 'SYMBOL' || node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
-      m.set(node.guidStr, node);
-    }
-    m.set(node.guidStr, node);
-  }
-  return m;
+  return buildMasterIndex(allNodes);
 }

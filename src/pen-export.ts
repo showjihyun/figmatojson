@@ -16,6 +16,7 @@ import { mkdirSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { decodeCommandsBlob, parseVectorNetworkBlob, vectorNetworkToPath } from './vector.js';
+import { buildMasterIndex } from './masterIndex.js';
 import type { DecodedFig } from './decoder.js';
 import type { BuildTreeResult, ContainerResult, TreeNode } from './types.js';
 
@@ -604,14 +605,9 @@ function fontWeightName(fontStyle?: string): string {
  * Pencil-style 트리 변환 (depth-first).
  * vectorSvgMap: VECTOR 노드 GUID → SVG path geometry 'M ...' 추출 결과
  */
-/** SYMBOL 인덱스 — INSTANCE → master children inline용 */
-function buildSymbolIndex(allNodes: Map<string, TreeNode>): Map<string, TreeNode> {
-  const idx = new Map<string, TreeNode>();
-  for (const n of allNodes.values()) {
-    if (n.type === 'SYMBOL') idx.set(n.guidStr, n);
-  }
-  return idx;
-}
+// Master GUID 인덱스는 round 18 (cluster A 추출 step 1) 부터 src/masterIndex.ts
+// 의 buildMasterIndex 로 통합. SYMBOL/COMPONENT/COMPONENT_SET 모두 인덱스 —
+// 모던 Figma 의 모든 master-가능 type 을 반영.
 
 /**
  * INSTANCE의 symbolOverrides를 master 자손 트리에 적용.
@@ -1839,7 +1835,7 @@ export async function generatePenExport(inputs: PenExportInputs): Promise<PenExp
   mkdirSync(outDir, { recursive: true });
 
   const vectorPathMap = buildVectorPathMap(tree, decoded);
-  const symbolIndex = buildSymbolIndex(tree.allNodes);
+  const symbolIndex = buildMasterIndex(tree.allNodes);
   // styleIdForText 등의 cross-tree 참조 lookup용
   const nodeIndex = tree.allNodes;
   // Figma Variables (color alias chain) resolver — paint.colorVar.alias 를 실제 색으로 풀어냄.
