@@ -2,7 +2,8 @@
 
 | 항목 | 값 |
 |---|---|
-| 상태 | Draft (round 13) |
+| 상태 | Draft — awaiting trigger (활성 버그 없음, round-13 scope 에서 제외) |
+| Trigger | 새 round-trip 태그 추가가 필요한 PR 의 *첫 단계* 로 진행. 그때까지는 ADR-2 + `test/e2e.test.ts` 의 `repack json mode` gate 가 충분. |
 | 구현 | `src/jsonRepackCodec.ts` (new) |
 | 테스트 | `src/jsonRepackCodec.test.ts` (new — encode/decode round-trip 단위 테스트), `test/e2e.test.ts` 의 `repack json mode` (기존 — 회귀 가드) |
 | 형제 | `docs/adr/0002-roundtrip-equality-tiers.md` (lossy mode 금지) |
