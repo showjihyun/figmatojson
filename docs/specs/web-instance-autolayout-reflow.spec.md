@@ -103,6 +103,17 @@ I-S11 invisible children 은 변경 없음.
 - T-8: missing transform on a visible child → new transform generated with computed (x, y).
 - T-9: integration via `toClientNode`: alert button INSTANCE fixture (master 88×32 HORIZONTAL CENTER, instance size 48×32, prop-binding hides icon, text override "삭제") — assert resolved TEXT transform centers in 48×32.
 
+### 3.8 stackPrimarySizing AUTO/RESIZE_TO_FIT_* support (round-20)
+
+Figma 의 `stackPrimarySizing: "RESIZE_TO_FIT*"` 는 INSTANCE 가 children content 에 맞게 primary axis 를 auto-grow 하는 모드. 디자이너가 size override 에 *hint* 또는 *minSize* 를 두지만, 실제 렌더 size 는 content 길이에 따라 결정.
+
+- I-AG1 INSTANCE 의 root override (path = [masterID]) 가 `stackPrimarySizing` 을 `RESIZE_TO_FIT_WITH_IMPLICIT_SIZE` 또는 다른 `RESIZE_TO_FIT*` 로 설정하면 AUTO-grow 모드.
+- I-AG2 v1 fallback: 정확한 text natural-width 측정 인프라가 없으므로, `instance.size.primary < master.size.primary` 일 때 master size 를 사용. 작은 hint (e.g. 44px) 가 master (101px) 보다 작은 케이스에서 leading clip 방지.
+- I-AG3 `instance.size.primary >= master.size.primary` (이미 grown 상태) 는 본 룰 영향 없음 — content 가 master 보다 길어도 우리는 모름. round-21 spec 후보 (text measurement-based reflow).
+- I-AG4 `out.size` 를 grown size 로 업데이트 (`Canvas` 의 INSTANCE auto-clip 도 grown bbox 사용).
+
+소스 케이스: 메타리치 dashboard 의 Excel 다운로드 button INSTANCE 587:7495 size override 44 + RESIZE_TO_FIT → master 101 로 grow → leading clip 회피.
+
 ## 6. 비대상
 
 - **Primary alignment ≠ CENTER** (MIN, MAX, SPACE_BETWEEN, SPACE_EVENLY) — v1 미지원. Master 좌표 유지 + INSTANCE clip. 메타리치 케이스 모두 CENTER 라 불필요.
