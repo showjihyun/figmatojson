@@ -9,6 +9,7 @@ import {
 // Round 18 step 4: collectors live in src/instanceOverrides — import direct.
 import {
   collectDerivedSizesFromInstance,
+  collectDerivedTransformsFromInstance,
   collectFillOverridesFromInstance,
   collectPropAssignmentsAtPathFromInstance,
   collectPropAssignmentsFromInstance,
@@ -1469,6 +1470,371 @@ describe('toClientNode INSTANCE — derivedSymbolData integration (spec §3.9 I-
     // CENTER reflow used the derived size: tx = (160-60)/2 = 50.
     expect(t.transform!.m02).toBeCloseTo(50);
     expect(t.transform!.m12).toBeCloseTo(9.5); // (32-13)/2
+  });
+});
+
+// =====================================================================
+// Round 24 — derivedSymbolData transform baking
+// (spec web-instance-autolayout-reflow.spec.md §3.10, planned)
+//
+// Round 22 baked entry.size + entry.derivedTextData.layoutSize from each
+// outer INSTANCE's `derivedSymbolData[]` and applied it to the master's
+// expanded subtree. §3.9 I-DS6 punted entry.transform — Figma also stamps
+// a *post-layout 2D-affine transform* per descendant (sessionID/localID
+// path), authoritative for placement when present (1570 INSTANCEs in the
+// metarich audit corpus carry at least one such entry).
+//
+// v1 design call (encoded by these tests):
+//   I-DT1  collectDerivedTransformsFromInstance(instData) reads
+//          entry.transform (full 6-field affine) keyed by slash-joined
+//          guidPath; malformed entries silently skipped.
+//   I-DT2  toClientChildForRender accepts derivedTransformsByPath as a
+//          new positional param (mirroring derivedSizesByPath plumbing).
+//          When currentKey matches, out.transform is replaced wholesale.
+//   I-DT3  Nested INSTANCE prefix-merge mirrors round-22 size: an inner
+//          instance's own derivedSymbolData transforms are prefixed with
+//          the outer currentPath and merged into the outer transforms map
+//          before inner-expansion. Outer-stamped paths reach grand-
+//          descendants without help from the inner instance.
+//   I-DT4  applyInstanceReflow runs unchanged. When reflow fires on a
+//          shrunk INSTANCE, it overwrites m02/m12 of direct children
+//          (this is a documented v1 limitation — the rare conflict case;
+//          most of the 1570 INSTANCE corpus does not trigger reflow). For
+//          deeper descendants, derivedTransform always wins because
+//          reflow only touches the outer INSTANCE's direct children.
+// =====================================================================
+
+type Transform2D = {
+  m00: number; m01: number; m02: number;
+  m10: number; m11: number; m12: number;
+};
+
+describe('collectDerivedTransformsFromInstance (spec web-instance-autolayout-reflow §3.10, round 24)', () => {
+  it('T-deriv-6a: picks up entry.transform keyed by slash-joined guidPath', () => {
+    const m = collectDerivedTransformsFromInstance({
+      derivedSymbolData: [
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 7 }, { sessionID: 0, localID: 9 }] },
+          transform: { m00: 1, m01: 0, m02: 12, m10: 0, m11: 1, m12: 4 },
+        },
+      ],
+    });
+    expect(m.size).toBe(1);
+    expect(m.get('0:7/0:9')).toEqual({ m00: 1, m01: 0, m02: 12, m10: 0, m11: 1, m12: 4 });
+  });
+
+  it('T-deriv-6b: skips entries without a transform field (size-only / TEXT-only entries)', () => {
+    const m = collectDerivedTransformsFromInstance({
+      derivedSymbolData: [
+        // size-only — round-22 collector territory, ignored here.
+        { guidPath: { guids: [{ sessionID: 0, localID: 5 }] }, size: { x: 100, y: 20 } },
+        // derivedTextData-only.
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 6 }] },
+          derivedTextData: { layoutSize: { x: 80, y: 16 } },
+        },
+        // empty entry.
+        { guidPath: { guids: [{ sessionID: 0, localID: 7 }] } },
+      ],
+    });
+    expect(m.size).toBe(0);
+  });
+
+  it('T-deriv-6c: skips transforms with non-numeric / missing affine fields', () => {
+    const m = collectDerivedTransformsFromInstance({
+      derivedSymbolData: [
+        // missing m11.
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 1 }] },
+          transform: { m00: 1, m01: 0, m02: 0, m10: 0, m12: 0 } as unknown as Transform2D,
+        },
+        // m00 not a number.
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 2 }] },
+          transform: { m00: 'oops' as unknown as number, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+        },
+      ],
+    });
+    expect(m.size).toBe(0);
+  });
+
+  it('T-deriv-6d: skips entries with corrupt guidPath (mirrors size collector I-C3)', () => {
+    const m = collectDerivedTransformsFromInstance({
+      derivedSymbolData: [
+        { guidPath: {}, transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 } },
+        { transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 } },
+        {
+          guidPath: { guids: [{ sessionID: 0 } as unknown as { sessionID: number; localID: number }] },
+          transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+        },
+      ],
+    });
+    expect(m.size).toBe(0);
+  });
+
+  it('T-deriv-6e: same path can populate both size (round-22) and transform (round-24) maps independently', () => {
+    const inst = {
+      derivedSymbolData: [
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 5 }] },
+          size: { x: 100, y: 20 },
+          transform: { m00: 1, m01: 0, m02: 30, m10: 0, m11: 1, m12: 7 },
+        },
+      ],
+    };
+    expect(collectDerivedSizesFromInstance(inst).get('0:5')).toEqual({ x: 100, y: 20 });
+    expect(collectDerivedTransformsFromInstance(inst).get('0:5')).toEqual({
+      m00: 1, m01: 0, m02: 30, m10: 0, m11: 1, m12: 7,
+    });
+  });
+
+  it('returns an empty map for undefined / non-array input', () => {
+    expect(collectDerivedTransformsFromInstance(undefined).size).toBe(0);
+    expect(collectDerivedTransformsFromInstance({}).size).toBe(0);
+    expect(collectDerivedTransformsFromInstance({ derivedSymbolData: 'nope' }).size).toBe(0);
+  });
+});
+
+describe('toClientChildForRender — derivedSymbolData transform baking (spec §3.10 I-DT2, round 24)', () => {
+  it('T-deriv-7a: descendant transform is replaced by derivedTransformsByPath entry matching its currentKey', () => {
+    // Master TEXT at master coord (m02=0). Outer INSTANCE's derived
+    // transform says: this descendant lives at m02=12, m12=4. The walk
+    // must replace out.transform wholesale, not just merge m02/m12.
+    const text = makeNode('TEXT', 55, {
+      textData: { characters: 'hi' },
+      size: { x: 100, y: 20 },
+      transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+    });
+    const derivedTransforms = new Map<string, Transform2D>([
+      ['0:55', { m00: 1, m01: 0, m02: 12, m10: 0, m11: 1, m12: 4 }],
+    ]);
+    const out = toClientChildForRender(
+      text, [], new Map(), new Map(), new Map(), new Map(), 0,
+      [], new Map(), new Map(), new Map(), new Map(), derivedTransforms,
+    );
+    expect(out.transform).toEqual({ m00: 1, m01: 0, m02: 12, m10: 0, m11: 1, m12: 4 });
+  });
+
+  it('T-deriv-7b: descendant without a matching derivedTransform entry keeps its master transform', () => {
+    const text = makeNode('TEXT', 56, {
+      textData: { characters: 'no match' },
+      transform: { m00: 1, m01: 0, m02: 50, m10: 0, m11: 1, m12: 9 },
+    });
+    const derivedTransforms = new Map<string, Transform2D>([
+      ['0:55', { m00: 1, m01: 0, m02: 12, m10: 0, m11: 1, m12: 4 }], // wrong key
+    ]);
+    const out = toClientChildForRender(
+      text, [], new Map(), new Map(), new Map(), new Map(), 0,
+      [], new Map(), new Map(), new Map(), new Map(), derivedTransforms,
+    );
+    expect(out.transform).toEqual({ m00: 1, m01: 0, m02: 50, m10: 0, m11: 1, m12: 9 });
+  });
+
+  it('T-deriv-7c: derivedTransform fully replaces master transform, including rotation/scale (m00/m01/m10/m11)', () => {
+    // Master has rotation; derived bakes a no-rotation transform → out
+    // must reflect the full derived affine, not just translate fields.
+    const node = makeNode('FRAME', 88, {
+      size: { x: 50, y: 50 },
+      transform: { m00: 0, m01: -1, m02: 100, m10: 1, m11: 0, m12: 100 }, // 90° rotation
+    });
+    const derivedTransforms = new Map<string, Transform2D>([
+      ['0:88', { m00: 1, m01: 0, m02: 33, m10: 0, m11: 1, m12: 44 }],
+    ]);
+    const out = toClientChildForRender(
+      node, [], new Map(), new Map(), new Map(), new Map(), 0,
+      [], new Map(), new Map(), new Map(), new Map(), derivedTransforms,
+    );
+    expect(out.transform).toEqual({ m00: 1, m01: 0, m02: 33, m10: 0, m11: 1, m12: 44 });
+  });
+});
+
+describe('toClientNode INSTANCE — derivedSymbolData transform integration (spec §3.10 I-DT3/I-DT4, round 24)', () => {
+  it('T-deriv-8: outer INSTANCE applies derivedSymbolData transform to a deep descendant when reflow does not fire', () => {
+    // Tree: SYMBOL 70 > FRAME 50 > TEXT 55. Outer INSTANCE has
+    // derivedSymbolData with a path = [50, 55] entry placing TEXT at
+    // m02=30, m12=8. INSTANCE size == master size → reflow no-op → the
+    // derived transform survives as the final transform on the TEXT.
+    const textMaster = makeNode('TEXT', 55, {
+      textData: { characters: 'hi' },
+      size: { x: 80, y: 16 },
+      transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+    });
+    const frameMaster = makeNode('FRAME', 50, {
+      size: { x: 200, y: 32 },
+      transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+    }, [textMaster]);
+    const symMaster = makeNode('SYMBOL', 70, {
+      size: { x: 200, y: 32 },
+      // No stackMode → applyInstanceReflow is a no-op anyway.
+    }, [frameMaster]);
+    const instance = makeNode('INSTANCE', 80, {
+      size: { x: 200, y: 32 }, // unchanged → no reflow trigger
+      symbolData: { symbolID: { sessionID: 0, localID: 70 } },
+      derivedSymbolData: [
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 50 }, { sessionID: 0, localID: 55 }] },
+          transform: { m00: 1, m01: 0, m02: 30, m10: 0, m11: 1, m12: 8 },
+        },
+      ],
+    });
+
+    const symbolIndex = buildSymbolIndex([symMaster, instance]);
+    const out = toClientNode(instance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{
+      type: string;
+      children?: Array<{ type: string; transform?: Transform2D }>;
+    }>;
+    expect(renderChildren).toHaveLength(1);
+    const frame = renderChildren[0];
+    expect(frame.children).toHaveLength(1);
+    const text = frame.children![0];
+    expect(text.transform).toEqual({ m00: 1, m01: 0, m02: 30, m10: 0, m11: 1, m12: 8 });
+  });
+
+  it('T-deriv-9: nested INSTANCE — outer derivedTransform reaches grand-descendant via prefix-merge', () => {
+    // Tree:
+    //   master 60 = SYMBOL > TEXT 55  (the inner master)
+    //   master 70 = SYMBOL > INSTANCE 71 (refers to master 60)  (the outer master)
+    //   outer INSTANCE 80 → master 70
+    // Outer's derivedSymbolData has a path = [71, 55] entry placing TEXT
+    // at m02=42, m12=6. The path-key scheme matches the *visited chain*
+    // (master 60 is a master reference, not a visited node — the walk
+    // descends into its children directly from INSTANCE 71). Same rule
+    // as round-22 size baking. The walk:
+    //   - emits INSTANCE 71's expansion via toClientChildForRender;
+    //   - inside that expansion, TEXT's currentKey is "0:71/0:55";
+    //   - the outer derivedTransforms map (passed through nested merge)
+    //     resolves that key → TEXT.transform = derived.
+    const textMaster = makeNode('TEXT', 55, {
+      textData: { characters: 'inner' },
+      size: { x: 80, y: 16 },
+      transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+    });
+    const innerMaster = makeNode('SYMBOL', 60, { size: { x: 80, y: 16 } }, [textMaster]);
+    const innerInstance = makeNode('INSTANCE', 71, {
+      size: { x: 80, y: 16 },
+      symbolData: { symbolID: { sessionID: 0, localID: 60 } },
+    });
+    const outerMaster = makeNode('SYMBOL', 70, { size: { x: 200, y: 32 } }, [innerInstance]);
+    const outerInstance = makeNode('INSTANCE', 80, {
+      size: { x: 200, y: 32 },
+      symbolData: { symbolID: { sessionID: 0, localID: 70 } },
+      derivedSymbolData: [
+        {
+          guidPath: { guids: [
+            { sessionID: 0, localID: 71 },
+            { sessionID: 0, localID: 55 },
+          ] },
+          transform: { m00: 1, m01: 0, m02: 42, m10: 0, m11: 1, m12: 6 },
+        },
+      ],
+    });
+
+    const symbolIndex = buildSymbolIndex([innerMaster, outerMaster, outerInstance]);
+    const out = toClientNode(outerInstance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{
+      type: string;
+      _renderChildren?: Array<{ type: string; transform?: Transform2D }>;
+    }>;
+    expect(renderChildren).toHaveLength(1);
+    const inner = renderChildren[0];
+    expect(inner.type).toBe('INSTANCE');
+    expect(inner._renderChildren).toBeDefined();
+    expect(inner._renderChildren).toHaveLength(1);
+    const text = inner._renderChildren![0];
+    expect(text.transform).toEqual({ m00: 1, m01: 0, m02: 42, m10: 0, m11: 1, m12: 6 });
+  });
+
+  it('T-deriv-10: deep descendant keeps derivedTransform even when outer reflow fires for direct children', () => {
+    // Tree: SYMBOL 70 (HORIZONTAL CENTER, size 200×32)
+    //         > FRAME 50 (size 100×16, transform.m02 = 50 in master)
+    //             > TEXT 55 (transform.m02 = 0 within FRAME)
+    // INSTANCE size 160×32 → reflow fires for FRAME 50 (direct child),
+    // overwriting its m02. But TEXT 55 (deep descendant) still picks up
+    // the outer's derivedSymbolData transform — reflow never touched it.
+    const textMaster = makeNode('TEXT', 55, {
+      textData: { characters: 'leaf' },
+      size: { x: 60, y: 13 },
+      transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 },
+    });
+    const frameMaster = makeNode('FRAME', 50, {
+      size: { x: 100, y: 16 },
+      transform: { m00: 1, m01: 0, m02: 50, m10: 0, m11: 1, m12: 8 },
+    }, [textMaster]);
+    const symMaster = makeNode('SYMBOL', 70, {
+      size: { x: 200, y: 32 },
+      stackMode: 'HORIZONTAL',
+      stackPrimaryAlignItems: 'CENTER',
+      stackCounterAlignItems: 'CENTER',
+      stackSpacing: 0,
+    }, [frameMaster]);
+    const instance = makeNode('INSTANCE', 80, {
+      size: { x: 160, y: 32 }, // shrunk → reflow fires for FRAME 50
+      symbolData: { symbolID: { sessionID: 0, localID: 70 } },
+      derivedSymbolData: [
+        // Deep descendant: derivedTransform should survive (reflow only
+        // touches direct children).
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 50 }, { sessionID: 0, localID: 55 }] },
+          transform: { m00: 1, m01: 0, m02: 17, m10: 0, m11: 1, m12: 3 },
+        },
+      ],
+    });
+
+    const symbolIndex = buildSymbolIndex([symMaster, instance]);
+    const out = toClientNode(instance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{
+      type: string;
+      transform?: Transform2D;
+      children?: Array<{ type: string; transform?: Transform2D }>;
+    }>;
+    expect(renderChildren).toHaveLength(1);
+    const frame = renderChildren[0];
+    // FRAME 50 (direct child) — reflow fired, m02/m12 are reflow's CENTER
+    // calculation, not the master 50/8. CENTER reflow: tx = (160-100)/2 = 30.
+    expect(frame.transform!.m02).toBeCloseTo(30);
+    expect(frame.transform!.m12).toBeCloseTo(8); // (32-16)/2
+    // Deep descendant TEXT 55 — derivedTransform survived reflow.
+    expect(frame.children).toHaveLength(1);
+    const text = frame.children![0];
+    expect(text.transform).toEqual({ m00: 1, m01: 0, m02: 17, m10: 0, m11: 1, m12: 3 });
+  });
+
+  it('T-deriv-11: direct child with derivedTransform but no reflow trigger keeps the derivedTransform (size unchanged)', () => {
+    // Same shape as T-deriv-10 but INSTANCE size == master size → reflow
+    // is a no-op. The direct-child FRAME 50's derivedTransform survives
+    // — no reflow to overwrite it. This is the common case across the
+    // 1570-INSTANCE corpus where Figma extended an instance and stamped
+    // post-layout positions but reflow is never triggered.
+    const frameMaster = makeNode('FRAME', 50, {
+      size: { x: 100, y: 16 },
+      transform: { m00: 1, m01: 0, m02: 50, m10: 0, m11: 1, m12: 8 },
+    });
+    const symMaster = makeNode('SYMBOL', 70, {
+      size: { x: 200, y: 32 },
+      stackMode: 'HORIZONTAL',
+      stackPrimaryAlignItems: 'CENTER',
+      stackCounterAlignItems: 'CENTER',
+      stackSpacing: 0,
+    }, [frameMaster]);
+    const instance = makeNode('INSTANCE', 80, {
+      size: { x: 200, y: 32 }, // unchanged → reflow trigger fails
+      symbolData: { symbolID: { sessionID: 0, localID: 70 } },
+      derivedSymbolData: [
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+          transform: { m00: 1, m01: 0, m02: 70, m10: 0, m11: 1, m12: 11 },
+        },
+      ],
+    });
+
+    const symbolIndex = buildSymbolIndex([symMaster, instance]);
+    const out = toClientNode(instance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{ transform?: Transform2D }>;
+    expect(renderChildren).toHaveLength(1);
+    expect(renderChildren[0].transform).toEqual({
+      m00: 1, m01: 0, m02: 70, m10: 0, m11: 1, m12: 11,
+    });
   });
 });
 

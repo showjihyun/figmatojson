@@ -286,6 +286,65 @@ export function collectDerivedSizesFromInstance(
 }
 
 /**
+ * 2D affine transform (Figma's `transform` shape on every TreeNode):
+ *   | m00 m01 m02 |     | x |     | new_x |
+ *   | m10 m11 m12 |  *  | y |  =  | new_y |
+ *   |  0   0   1  |     | 1 |     |   1   |
+ *
+ * Re-exported from instanceOverrides because the round-24 derivedTransform
+ * collector returns this shape and consumers (clientNode walk + tests)
+ * need the type. Same shape as TreeNode.data.transform.
+ */
+export type Transform2D = {
+  m00: number; m01: number; m02: number;
+  m10: number; m11: number; m12: number;
+};
+
+/**
+ * Pull pre-computed `derivedTransform` per descendant path out of an
+ * INSTANCE's `derivedSymbolData[]`. Returns `Map<pathKey, Transform2D>`.
+ *
+ * Why this exists — round-22 baked `entry.size` (and `entry.derivedTextData
+ * .layoutSize`) so reflow gets the right child sizes for spacing. But
+ * Figma also stamps a *post-layout 2D-affine transform* per descendant
+ * when its placement differs from the master's data — the authoritative
+ * position when present (1570 INSTANCEs in the metarich audit corpus
+ * carry at least one such entry). Round-22 §3.9 I-DS6 punted this; round
+ * 24 picks it up.
+ *
+ * Mirrors `collectDerivedSizesFromInstance`: same path-key scheme, same
+ * silent-skip-on-corrupt policy. Entries without a `transform` field are
+ * skipped here (they may still produce a size entry via the size collector).
+ *
+ * Spec: docs/specs/web-instance-autolayout-reflow.spec.md §3.10 (round 24).
+ */
+export function collectDerivedTransformsFromInstance(
+  instData: Record<string, unknown> | undefined,
+): Map<string, Transform2D> {
+  const out = new Map<string, Transform2D>();
+  const ds = instData?.derivedSymbolData as
+    | Array<Record<string, unknown> & {
+        guidPath?: { guids?: Array<{ sessionID?: number; localID?: number }> };
+        transform?: Partial<Transform2D>;
+      }>
+    | undefined;
+  if (!Array.isArray(ds)) return out;
+  for (const entry of ds) {
+    const guids = entry.guidPath?.guids;
+    const key = pathKeyFromGuids(guids);
+    if (key === null) continue;
+    const t = entry.transform;
+    if (!t) continue;
+    if (
+      typeof t.m00 !== 'number' || typeof t.m01 !== 'number' || typeof t.m02 !== 'number' ||
+      typeof t.m10 !== 'number' || typeof t.m11 !== 'number' || typeof t.m12 !== 'number'
+    ) continue;
+    out.set(key, { m00: t.m00, m01: t.m01, m02: t.m02, m10: t.m10, m11: t.m11, m12: t.m12 });
+  }
+  return out;
+}
+
+/**
  * Merge a nested INSTANCE's own override map into the outer overrides,
  * prefixing each inner key with the outer path so it matches against the
  * deeper visit path. The outer overrides remain in place (their full paths

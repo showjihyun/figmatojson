@@ -14,6 +14,7 @@ import { buildMasterIndex } from '../../../src/masterIndex.js';
 import { isHiddenByPropBinding } from '../../../src/effectiveVisibility.js';
 import {
   collectDerivedSizesFromInstance,
+  collectDerivedTransformsFromInstance,
   collectFillOverridesFromInstance,
   collectPropAssignmentsAtPathFromInstance,
   collectPropAssignmentsFromInstance,
@@ -21,6 +22,7 @@ import {
   collectTextOverridesFromInstance,
   collectVisibilityOverridesFromInstance,
   mergeOverridesForNested,
+  type Transform2D,
 } from '../../../src/instanceOverrides.js';
 import type { TreeNode } from '../../../src/types.js';
 
@@ -104,8 +106,13 @@ export function toClientNode(
         const propAssignmentsByPath = collectPropAssignmentsAtPathFromInstance(sd?.symbolOverrides);
         const swapTargetsByPath = collectSwapTargetsAtPathFromInstance(sd?.symbolOverrides);
         const derivedSizesByPath = collectDerivedSizesFromInstance(data);
+        // Round 24: also collect Figma's post-layout transforms for any
+        // descendant (path-keyed). Applied during descendant emit; reflow
+        // only touches direct children, so deep descendants always keep
+        // the derived transform. Spec §3.10 I-DT2.
+        const derivedTransformsByPath = collectDerivedTransformsFromInstance(data);
         const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath),
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath),
         );
         if (expanded.length > 0) {
           // Spec web-instance-autolayout-reflow: when the INSTANCE size
@@ -462,6 +469,7 @@ export function toClientChildForRender(
   propAssignmentsByPath: Map<string, Map<string, boolean>> = new Map(),
   swapTargetsByPath: Map<string, string> = new Map(),
   derivedSizesByPath: Map<string, { x: number; y: number }> = new Map(),
+  derivedTransformsByPath: Map<string, Transform2D> = new Map(),
 ): DocumentNode {
   if (depth > 8) {
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
@@ -490,7 +498,7 @@ export function toClientChildForRender(
     name: n.name,
     _isInstanceChild: true,
     children: n.children.map((c) =>
-      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath),
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath),
     ),
   };
   if (VECTOR_TYPES.has(n.type)) {
@@ -616,8 +624,22 @@ export function toClientChildForRender(
             mergedDerivedSizes.set(merged, innerVal);
           }
         }
+        // Round 24: same prefix-merge for derivedTransforms so the inner
+        // instance's own post-layout transform deltas reach descendants of
+        // the inner expansion. Spec §3.10 I-DT3.
+        const innerDerivedTransforms = collectDerivedTransformsFromInstance(data);
+        const mergedDerivedTransforms = innerDerivedTransforms.size > 0
+          ? new Map(derivedTransformsByPath)
+          : derivedTransformsByPath;
+        if (innerDerivedTransforms.size > 0) {
+          const prefix = currentPath.join('/');
+          for (const [innerKey, innerVal] of innerDerivedTransforms) {
+            const merged = prefix.length > 0 ? `${prefix}/${innerKey}` : innerKey;
+            mergedDerivedTransforms.set(merged, innerVal);
+          }
+        }
         const nestedExpanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes),
+          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes, mergedDerivedTransforms),
         );
         // Round 20: AUTO-grow primarySizing also fires for nested INSTANCEs
         // (the dashboard "Excel 다운로드" button is a nested INSTANCE inside
@@ -704,6 +726,17 @@ export function toClientChildForRender(
   const derivedSize = derivedSizesByPath.get(currentKey);
   if (derivedSize) {
     out.size = { x: derivedSize.x, y: derivedSize.y };
+  }
+  // Spec §3.10 I-DT2 (round-24): apply outer INSTANCE's derivedSymbolData
+  // transform to descendants. Replaces out.transform wholesale (rotation +
+  // scale + translation), not just m02/m12. For direct children of an
+  // INSTANCE that also triggers reflow, applyInstanceReflow may overwrite
+  // m02/m12 afterwards (v1 limitation — documented in spec §3.10 I-DT4);
+  // deeper descendants are never touched by reflow so the derived
+  // transform is final for them.
+  const derivedTransform = derivedTransformsByPath.get(currentKey);
+  if (derivedTransform) {
+    out.transform = { ...derivedTransform };
   }
   return out;
 }
