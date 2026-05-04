@@ -16,6 +16,7 @@ import {
   collectSwapTargetsAtPathFromInstance,
   collectTextOverridesFromInstance,
   collectTextStyleOverridesFromInstance,
+  collectVisualStyleOverridesFromInstance,
 } from '../../../src/instanceOverrides.js';
 import type { TreeNode } from '../../../src/types.js';
 
@@ -2179,4 +2180,206 @@ describe('toClientChildForRender — TEXT styling override (spec §3.5 I-S4/I-S5
     expect(textOut.lineHeight).toEqual({ value: 1, units: 'RAW' }); // master preserved
   });
 });
+
+// =====================================================================
+// Round 27 — Visual style override (stroke / cornerRadius / opacity)
+// (spec web-instance-render-overrides.spec.md §3.6)
+//
+// Round-12 path-keyed override pipeline currently handles `fillPaints`
+// only. Round-27 extends to the rest of the *visual* style fields that
+// metarich INSTANCEs stamp per-variant: strokePaints, opacity, and the
+// cornerRadius family (cornerRadius + 4 per-corner fields). 7-field
+// whitelist (I-V2). Same path-key + apply layer + nested-prefix-merge
+// + master-immutability rules as round-12 / round-26.
+//
+// Distribution measurement (test-results/round24-triage/inspect-stroke-
+// effects.mjs):
+//   strokePaints: 122 / opacity: 11 /
+//   cornerRadius + rectangleTop/Bottom/Left/Right per-corner: ~45 each.
+// =====================================================================
+
+describe('collectVisualStyleOverridesFromInstance (spec §3.6, round 27)', () => {
+  it('T-vs-1: picks up whitelisted visual style fields keyed by slash-joined guidPath', () => {
+    const m = collectVisualStyleOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+        strokePaints: [{ type: 'SOLID', color: { r: 0, g: 0.5, b: 1, a: 1 } }],
+        opacity: 0.5,
+        cornerRadius: 8,
+      },
+    ]);
+    expect(m.size).toBe(1);
+    const o = m.get('0:50')!;
+    expect(o.strokePaints).toEqual([{ type: 'SOLID', color: { r: 0, g: 0.5, b: 1, a: 1 } }]);
+    expect(o.opacity).toBe(0.5);
+    expect(o.cornerRadius).toBe(8);
+  });
+
+  it('T-vs-2: ignores non-whitelisted fields (fillPaints / textData / size etc. are other collectors\' jobs)', () => {
+    const m = collectVisualStyleOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+        fillPaints: [{ type: 'SOLID' }],            // round-12 territory
+        textData: { characters: 'foo' },             // round-4
+        size: { x: 100, y: 20 },                     // round-22 territory
+        fontSize: 14,                                 // round-26 TEXT styling
+        // Single visual field present so the entry isn't fully skipped:
+        opacity: 0.7,
+      },
+    ]);
+    const o = m.get('0:50')!;
+    expect(o.opacity).toBe(0.7);
+    expect((o as Record<string, unknown>).fillPaints).toBeUndefined();
+    expect((o as Record<string, unknown>).textData).toBeUndefined();
+    expect((o as Record<string, unknown>).size).toBeUndefined();
+    expect((o as Record<string, unknown>).fontSize).toBeUndefined();
+  });
+
+  it('T-vs-3: per-corner fields are independently extracted', () => {
+    const m = collectVisualStyleOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+        rectangleTopLeftCornerRadius: 12,
+        rectangleTopRightCornerRadius: 12,
+        rectangleBottomLeftCornerRadius: 0,
+        rectangleBottomRightCornerRadius: 0,
+      },
+    ]);
+    const o = m.get('0:50')!;
+    expect(o.rectangleTopLeftCornerRadius).toBe(12);
+    expect(o.rectangleTopRightCornerRadius).toBe(12);
+    expect(o.rectangleBottomLeftCornerRadius).toBe(0);
+    expect(o.rectangleBottomRightCornerRadius).toBe(0);
+  });
+
+  it('T-vs-4: skips entries with no whitelisted visual fields (I-V3)', () => {
+    const m = collectVisualStyleOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+        textData: { characters: 'foo' },
+        fillPaints: [{ type: 'SOLID' }],
+      },
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 51 }] },
+        // empty entry except guidPath
+      },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('T-vs-5: skips entries with corrupt guidPath', () => {
+    const m = collectVisualStyleOverridesFromInstance([
+      { guidPath: {}, opacity: 0.5 },
+      { opacity: 0.5 },
+      { guidPath: { guids: [{ sessionID: 0 } as unknown as { sessionID: number; localID: number }] }, opacity: 0.5 },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('returns empty map when overrides is undefined or empty', () => {
+    expect(collectVisualStyleOverridesFromInstance(undefined).size).toBe(0);
+    expect(collectVisualStyleOverridesFromInstance([]).size).toBe(0);
+  });
+});
+
+describe('toClientChildForRender — visual style override (spec §3.6 I-V4/I-V5, round 27)', () => {
+  it('T-vs-6: applies stroke / opacity / cornerRadius to a non-TEXT node at matching path', () => {
+    // RECTANGLE master with master cornerRadius=4, opacity=1, no stroke.
+    // Override at path "0:50" patches all three. Expected: out.* = override.
+    const rect = makeNode('RECTANGLE', 50, {
+      fillPaints: [{ type: 'SOLID', color: { r: 1, g: 1, b: 1, a: 1 } }],
+      cornerRadius: 4,
+      opacity: 1,
+    });
+    const visualOverrides = new Map<string, Record<string, unknown>>([
+      ['0:50', {
+        strokePaints: [{ type: 'SOLID', color: { r: 0, g: 0.5, b: 1, a: 1 } }],
+        opacity: 0.5,
+        cornerRadius: 12,
+      }],
+    ]);
+    const out = toClientChildForRender(
+      rect, [], new Map(), new Map(), new Map(), new Map(), 0,
+      [], new Map(), new Map(), new Map(), new Map(), new Map(), new Map(), visualOverrides,
+    );
+    expect(out.strokePaints).toEqual([{ type: 'SOLID', color: { r: 0, g: 0.5, b: 1, a: 1 } }]);
+    expect(out.opacity).toBe(0.5);
+    expect(out.cornerRadius).toBe(12);
+    // master's fillPaints unaffected (different override category — round-12).
+    expect(out.fillPaints).toEqual([{ type: 'SOLID', color: { r: 1, g: 1, b: 1, a: 1 } }]);
+  });
+
+  it('T-vs-7: NO TEXT-type guard — visual style override applies to all node types (I-V4)', () => {
+    // VECTOR with stroke override should pick it up (same as RECTANGLE).
+    // This contrasts with round-26 which guards on TEXT-only.
+    const vec = makeNode('VECTOR', 50, {
+      fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }],
+    });
+    const visualOverrides = new Map<string, Record<string, unknown>>([
+      ['0:50', { strokePaints: [{ type: 'SOLID', color: { r: 0, g: 1, b: 0, a: 1 } }] }],
+    ]);
+    const out = toClientChildForRender(
+      vec, [], new Map(), new Map(), new Map(), new Map(), 0,
+      [], new Map(), new Map(), new Map(), new Map(), new Map(), new Map(), visualOverrides,
+    );
+    expect(out.strokePaints).toEqual([{ type: 'SOLID', color: { r: 0, g: 1, b: 0, a: 1 } }]);
+  });
+
+  it('T-vs-8: partial-override merge preserves master fields the override does not mention (I-V5)', () => {
+    const rect = makeNode('RECTANGLE', 50, {
+      cornerRadius: 8,
+      opacity: 1,
+      strokePaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }],
+    });
+    // Override only changes opacity. cornerRadius + strokePaints stay master.
+    const visualOverrides = new Map<string, Record<string, unknown>>([
+      ['0:50', { opacity: 0.5 }],
+    ]);
+    const out = toClientChildForRender(
+      rect, [], new Map(), new Map(), new Map(), new Map(), 0,
+      [], new Map(), new Map(), new Map(), new Map(), new Map(), new Map(), visualOverrides,
+    );
+    expect(out.opacity).toBe(0.5);                                         // overridden
+    expect(out.cornerRadius).toBe(8);                                      // master preserved
+    expect(out.strokePaints).toEqual([{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }]); // master preserved
+  });
+
+  it('T-vs-9: integration via toClientNode — outer INSTANCE applies stroke override to a RECTANGLE descendant under FRAME', () => {
+    // master 70 (SYMBOL) → FRAME 60 (skipped from path-key) → RECT 50.
+    // Outer INSTANCE override on path [50] changes strokePaints.
+    const rectMaster = makeNode('RECTANGLE', 50, {
+      fillPaints: [{ type: 'SOLID', color: { r: 1, g: 1, b: 1, a: 1 } }],
+      cornerRadius: 4,
+    });
+    const frame = makeNode('FRAME', 60, { size: { x: 100, y: 40 } }, [rectMaster]);
+    const symMaster = makeNode('SYMBOL', 70, { size: { x: 100, y: 40 } }, [frame]);
+    const instance = makeNode('INSTANCE', 80, {
+      size: { x: 100, y: 40 },
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 70 },
+        symbolOverrides: [
+          {
+            // FRAME 60 skipped under round-25 path-key → path = [50]
+            guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+            strokePaints: [{ type: 'SOLID', color: { r: 0, g: 0.5, b: 1, a: 1 } }],
+            cornerRadius: 12,
+          },
+        ],
+      },
+    });
+    const symbolIndex = buildSymbolIndex([symMaster, instance]);
+    const out = toClientNode(instance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{
+      type: string;
+      children?: Array<{ type: string; strokePaints?: unknown; cornerRadius?: number }>;
+    }>;
+    expect(renderChildren).toHaveLength(1);
+    const frameOut = renderChildren[0];
+    expect(frameOut.children).toHaveLength(1);
+    const rectOut = frameOut.children![0];
+    expect(rectOut.strokePaints).toEqual([{ type: 'SOLID', color: { r: 0, g: 0.5, b: 1, a: 1 } }]);
+    expect(rectOut.cornerRadius).toBe(12);
+  });
+});
+
 

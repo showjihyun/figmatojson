@@ -171,6 +171,65 @@ export function collectTextStyleOverridesFromInstance(
 }
 
 /**
+ * Visual style fields that round-27 lets symbolOverrides override per
+ * INSTANCE on a path-keyed basis. Whitelist (spec §3.6 I-V2). The
+ * fields cover stroke (1), opacity (1), and corner radius (1 + 4
+ * per-corner) — Figma's standard "independent corners" toggle uses
+ * the per-corner fields, otherwise the singular `cornerRadius`.
+ *
+ * Distinguished from round-26's TEXT-styling whitelist by:
+ *   - applies to ALL node types (FRAME / RECTANGLE / VECTOR / etc.) —
+ *     no TEXT-type guard at the application site (spec §3.6 I-V4).
+ *   - covers visual-presentation fields rather than text-shaping.
+ *
+ * Distinguished from round-12's fillPaints handling (which uses its
+ * own per-array collector) by:
+ *   - unified Map<key, Record<string, unknown>> shape so multiple
+ *     fields share one map and one walk-side application point.
+ */
+const VISUAL_STYLE_OVERRIDE_FIELDS: ReadonlySet<string> = new Set([
+  'strokePaints', 'opacity',
+  'cornerRadius',
+  'rectangleTopLeftCornerRadius', 'rectangleTopRightCornerRadius',
+  'rectangleBottomLeftCornerRadius', 'rectangleBottomRightCornerRadius',
+]);
+
+/**
+ * Pull visual style overrides (stroke / opacity / corner radius family)
+ * out of an INSTANCE's symbolOverrides[]. Returns Map<pathKey,
+ * Partial<VisualStyleFields>>. Mirror of `collectTextStyleOverrides
+ * FromInstance` (round-26) but for visual-presentation fields and
+ * applies to all node types.
+ *
+ * Skips entries with no whitelisted visual fields (avoids empty-record
+ * lookups during the walk).
+ *
+ * Spec: docs/specs/web-instance-render-overrides.spec.md §3.6 I-V1..V3
+ *       (round-27).
+ */
+export function collectVisualStyleOverridesFromInstance(
+  overrides: Array<Record<string, unknown>> | undefined,
+): Map<string, Record<string, unknown>> {
+  const m = new Map<string, Record<string, unknown>>();
+  if (!Array.isArray(overrides)) return m;
+  for (const o of overrides) {
+    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+    const key = pathKeyFromGuids(guids);
+    if (key === null) continue;
+    const subset: Record<string, unknown> = {};
+    let hasAny = false;
+    for (const k of Object.keys(o)) {
+      if (VISUAL_STYLE_OVERRIDE_FIELDS.has(k)) {
+        subset[k] = o[k];
+        hasAny = true;
+      }
+    }
+    if (hasAny) m.set(key, subset);
+  }
+  return m;
+}
+
+/**
  * Pull boolean component-property assignments off an INSTANCE node's `data`.
  * Returns Map<defIdKey, boolean> keyed by `${sessionID}:${localID}` of the
  * property's defID. Used by the walk to resolve descendants whose
