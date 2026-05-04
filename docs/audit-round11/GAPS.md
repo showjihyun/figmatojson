@@ -679,3 +679,96 @@ SPEC-architecture §13.2 + symbolOverride field distribution scan:
   cases.
 
 Round 26 ships clean. No new regressions identified.
+
+## Round 27 close (2026-05-05)
+
+Round 27 picked Option A from the round-26 close candidate list — visual
+style override (strokePaints / opacity / cornerRadius family). Spec §3.6
+(I-V1..I-V7) + impl + 10 unit tests landed in b52d839. Baselines refreshed
+for mobile (a6f72f5), WEB (b97da6e). design-setting + dash-board both
+0-delta — same scope-correctness pattern as rounds 25 / 26.
+
+### Pre-flight diagnostic — chose Option A over stack* fields
+
+The round-26 close listed stack* override fields as the largest-volume
+candidate (~5,400 entries: stackPrimarySizing 2776 + stackPrimaryAlignItems
+1288 + stackChildPrimaryGrow 1037 + stackSpacing 294 + padding ~700).
+Pre-flight diagnostics measured potential redundancy with rounds 22/24:
+- `inspect-stack-coverage.mjs`: 2,002 INSTANCEs override at least one
+  stack* field.
+- `inspect-stack-coverage-2.mjs`: path-key construction between the
+  override target (a FRAME with stack* override) and derivedSymbolData
+  stamps (its children's post-layout positions/sizes) is non-trivial.
+  Measuring real visual redundancy requires expensive corpus visual
+  audit.
+
+Stack* deferred to a future round. Pivoted to Option A
+(stroke/cornerRadius/opacity, ~236 entries) — clean mirror of round-12
+fillPaints pattern, predictable outcome, low risk. ~30 lines of impl
++ 10 tests.
+
+### Scope of impact
+
+| corpus | modified / total | notes |
+|---|---:|---|
+| design-setting | 0 / 28 | SYMBOL master captures (not affected — same as rounds 25/26) |
+| dash-board | 0 / 44 | Few visual-style overrides on dashboard INSTANCEs |
+| mobile | 12 / 147 | mostly star-icon opacity dimming on customer detail pages |
+| WEB | **161 / 529** | wide distribution — sidemenu / lnb / category / popup families |
+
+WEB at 161 modified is round-27's wide-but-shallow signature: visual
+style overrides (especially opacity) apply to inactive UI states across
+many fixtures, but each override is a small pixel-color shift (typically
+sub-330 B per fixture) rather than the dramatic content reveal of rounds
+24-26.
+
+### Top wins
+
+- WEB / `category-339_2102` (-327 B): manager sidemenu. Inactive items
+  ("공지사항 관리", "Option 1", "제휴업체 관리") now show dimmed icons
+  matching the variant-stamped opacity override; active "업체계정관리"
+  stays full-opacity.
+- WEB / 12+ sidemenu / category / lnb / right_top fixtures (sub-200 B
+  drops): same opacity-dim pattern across the navigation family.
+- WEB / 8+ container / unnamed fixtures (sub-130 B grows): variant-
+  stamped strokePaints applies for the first time, adding stroke
+  pixels to inputs / cards.
+- mobile / unnamed-485_7034, unnamed-1377_13803 (-400 / -397 B):
+  customer-detail page top-right star icon. Opacity override
+  correctly dims the "not favorited" state.
+
+### Earlier wins preserved
+
+- Round-26 alret-1184_14772 (multi-line modal text reveal):
+  pixel-identical.
+- Round-25 alret-364_2962 (path-key + visibility resolves
+  cancel-button-hide): pixel-identical.
+- Round-24 mobile/frame-2323-477_6439 (5-row customer list): pixel-
+  identical.
+
+Both e2e contract gates run green:
+- `audit-transform-baking.spec.ts > round-24` (mobile 5-row)
+- `audit-transform-baking.spec.ts > round-25` (alret 삭제 button blue)
+
+### Round 28 candidate list
+
+After 6 rounds (22-27) of INSTANCE pipeline extension, remaining items
+from SPEC-architecture §13.2 + symbolOverride field-distribution scan:
+
+- **stack\* override fields** (~5,400 entries) — auto-layout *parameter*
+  overrides per INSTANCE. Round-27 pre-flight surfaced complexity in
+  measuring redundancy with round-22+24 derivedSymbolData. Remains the
+  largest single quantity of unhandled override entries. Best approached
+  via:
+    (a) **stackSpacing + 4 padding fields only** (~1,000 entries, simple
+    value override, no algorithmic change to reflow), or
+    (b) **stackPrimarySizing for descendants** (round-20 currently only
+    handles outer instance).
+  These can each be a separate small round.
+- **componentPropNodeField TEXT / INSTANCE_SWAP** — still 0 in metarich
+  (foundation-only work for future .fig corpora).
+- **effects / blendMode override** — sub-50 entries, sub-priority.
+- **Add a non-metarich audit corpus** — to surface entirely new edge
+  cases beyond metarich's variant patterns.
+
+Round 27 ships clean.
