@@ -13,6 +13,7 @@ import { parseVectorNetworkBlob, vectorNetworkToPath } from '../../../src/vector
 import { buildMasterIndex } from '../../../src/masterIndex.js';
 import { isHiddenByPropBinding } from '../../../src/effectiveVisibility.js';
 import {
+  collectDerivedSizesFromInstance,
   collectFillOverridesFromInstance,
   collectPropAssignmentsAtPathFromInstance,
   collectPropAssignmentsFromInstance,
@@ -102,8 +103,9 @@ export function toClientNode(
         const propAssignments = collectPropAssignmentsFromInstance(data);
         const propAssignmentsByPath = collectPropAssignmentsAtPathFromInstance(sd?.symbolOverrides);
         const swapTargetsByPath = collectSwapTargetsAtPathFromInstance(sd?.symbolOverrides);
+        const derivedSizesByPath = collectDerivedSizesFromInstance(data);
         const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath),
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath),
         );
         if (expanded.length > 0) {
           // Spec web-instance-autolayout-reflow: when the INSTANCE size
@@ -273,17 +275,32 @@ export function applyInstanceReflow(
   // when copying transforms (see src/pen-export.ts:f32 usage).
   const f32 = Math.fround;
 
-  // Spec §3.1-3.5: CENTER+CENTER reflow when sizes differ. Re-positions
-  // every visible child for the new INSTANCE bbox.
+  // Spec §3.1-3.5: CENTER+CENTER reflow when INSTANCE has SHRUNK from
+  // master on the primary axis. Re-centers visible children in the new
+  // (smaller) bbox.
+  //
+  // Round 21 narrowing: only fires when `instance.primary < master.primary`.
+  // The previous "any size differs" condition fired for grown instances
+  // too (e.g. dropdown rail option rows have master 117 but instance
+  // 233 — wider, designer wanted overflow), and CENTER-recentering the
+  // content pushed text right past the parent Dropdown's clip.
   const primaryAlign = masterData.stackPrimaryAlignItems as string | undefined;
   const counterAlign = masterData.stackCounterAlignItems as string | undefined;
-  const sizesDiffer = !!masterSize && !!instSize && (
-    (masterSize.x ?? 0) !== (instSize.x ?? 0) ||
-    (masterSize.y ?? 0) !== (instSize.y ?? 0)
-  );
+  const instPrimaryRaw = instSize?.[primaryAxis];
+  const masterPrimaryRaw = masterSize?.[primaryAxis];
+  const instCounterRaw = instSize?.[counterAxis];
+  const masterCounterRaw = masterSize?.[counterAxis];
+  const instanceShrunkOnPrimary =
+    typeof instPrimaryRaw === 'number' &&
+    typeof masterPrimaryRaw === 'number' &&
+    instPrimaryRaw < masterPrimaryRaw;
+  const instanceShrunkOnCounter =
+    typeof instCounterRaw === 'number' &&
+    typeof masterCounterRaw === 'number' &&
+    instCounterRaw < masterCounterRaw;
   if (
     primaryAlign === 'CENTER' && counterAlign === 'CENTER' &&
-    sizesDiffer && instSize
+    (instanceShrunkOnPrimary || instanceShrunkOnCounter) && instSize
   ) {
     const instPrimary = instSize[primaryAxis];
     const instCounter = instSize[counterAxis];
@@ -444,6 +461,7 @@ export function toClientChildForRender(
   propAssignments: Map<string, boolean> = new Map(),
   propAssignmentsByPath: Map<string, Map<string, boolean>> = new Map(),
   swapTargetsByPath: Map<string, string> = new Map(),
+  derivedSizesByPath: Map<string, { x: number; y: number }> = new Map(),
 ): DocumentNode {
   if (depth > 8) {
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
@@ -472,7 +490,7 @@ export function toClientChildForRender(
     name: n.name,
     _isInstanceChild: true,
     children: n.children.map((c) =>
-      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath),
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath),
     ),
   };
   if (VECTOR_TYPES.has(n.type)) {
@@ -585,8 +603,21 @@ export function toClientChildForRender(
             mergedSwapTargets.set(merged, innerVal);
           }
         }
+        // Round 21: also collect inner derivedSymbolData sizes from the
+        // nested instance + prefix-merge with outer (same path-key scheme).
+        const innerDerivedSizes = collectDerivedSizesFromInstance(data);
+        const mergedDerivedSizes = innerDerivedSizes.size > 0
+          ? new Map(derivedSizesByPath)
+          : derivedSizesByPath;
+        if (innerDerivedSizes.size > 0) {
+          const prefix = currentPath.join('/');
+          for (const [innerKey, innerVal] of innerDerivedSizes) {
+            const merged = prefix.length > 0 ? `${prefix}/${innerKey}` : innerKey;
+            mergedDerivedSizes.set(merged, innerVal);
+          }
+        }
         const nestedExpanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets),
+          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes),
         );
         // Round 20: AUTO-grow primarySizing also fires for nested INSTANCEs
         // (the dashboard "Excel 다운로드" button is a nested INSTANCE inside
@@ -658,6 +689,22 @@ export function toClientChildForRender(
   if ((out as { _swapApplied?: boolean })._swapApplied !== undefined) {
     delete (out as { _swapApplied?: boolean })._swapApplied;
   }
+  // Round 21 (deferred): we tried using the outer instance's
+  // derivedSymbolData[].size as Figma's authoritative measurement for
+  // TEXT descendants whose override produced a different rendered
+  // width than master. Applying it improved the dashboard "Excel
+  // 다운로드" icon-text overlap, BUT broke the datepicker rail —
+  // changing only TEXT sizes (not INSTANCE container sizes) shifted
+  // CENTER-reflowed text positions past the parent Dropdown's clip.
+  // Applying to INSTANCE+TEXT broke the rail too because outer
+  // Dropdown's size override (241→111) implies children should
+  // similarly shrink (233→103 per derivedSymbolData), which we don't
+  // do — keeping master child size + applying derived TEXT misaligns.
+  //
+  // The clean fix requires applying derivedSymbolData to ALL nested
+  // sizes (including INSTANCE containers) AND re-running auto-layout
+  // for all parent INSTANCEs whose own sizes changed. Bigger surface
+  // than this round affords. Documented as round-22 candidate.
   return out;
 }
 

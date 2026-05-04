@@ -232,6 +232,44 @@ export function collectPropAssignmentsAtPathFromInstance(
 }
 
 /**
+ * Pull pre-computed `derivedSize` per descendant path out of an INSTANCE's
+ * `derivedSymbolData[]`. Returns `Map<pathKey, {x, y}>`.
+ *
+ * Why this exists — Figma pre-computes the rendered size of TEXT
+ * descendants (after text/font overrides are applied) and stamps the
+ * result into the INSTANCE's `derivedSymbolData`. This is *Figma's*
+ * authoritative measurement using the actual font metrics of the override
+ * text. Without it, our reflow uses the master TEXT size (e.g. 43px for
+ * default "Button") even when the override is much wider (e.g. 85px for
+ * "Excel 다운로드"), producing wrong CENTER positions and icon-text
+ * overlap.
+ *
+ * pen-export.ts uses the same source via `buildDerivedMap` +
+ * `applyDerivedSymbolData`. v1 here covers `size` only — other derived
+ * fields (fillGeometry, transform, fontMetaData) are not applied yet.
+ *
+ * Spec: docs/specs/web-instance-autolayout-reflow.spec.md §3.8 (round 21).
+ */
+export function collectDerivedSizesFromInstance(
+  instData: Record<string, unknown> | undefined,
+): Map<string, { x: number; y: number }> {
+  const out = new Map<string, { x: number; y: number }>();
+  const ds = instData?.derivedSymbolData as
+    | Array<Record<string, unknown> & { guidPath?: { guids?: Array<{ sessionID?: number; localID?: number }> }; size?: { x?: number; y?: number } }>
+    | undefined;
+  if (!Array.isArray(ds)) return out;
+  for (const entry of ds) {
+    const sz = entry.size;
+    if (!sz || typeof sz.x !== 'number' || typeof sz.y !== 'number') continue;
+    const guids = entry.guidPath?.guids;
+    const key = pathKeyFromGuids(guids);
+    if (key === null) continue;
+    out.set(key, { x: sz.x, y: sz.y });
+  }
+  return out;
+}
+
+/**
  * Merge a nested INSTANCE's own override map into the outer overrides,
  * prefixing each inner key with the outer path so it matches against the
  * deeper visit path. The outer overrides remain in place (their full paths

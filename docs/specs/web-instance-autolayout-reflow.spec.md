@@ -103,6 +103,12 @@ I-S11 invisible children 은 변경 없음.
 - T-8: missing transform on a visible child → new transform generated with computed (x, y).
 - T-9: integration via `toClientNode`: alert button INSTANCE fixture (master 88×32 HORIZONTAL CENTER, instance size 48×32, prop-binding hides icon, text override "삭제") — assert resolved TEXT transform centers in 48×32.
 
+### 3.7.5 CENTER reflow trigger narrowing (round-21)
+
+Round-14 spec §3.2 I-T1 originally said "fire CENTER+CENTER reflow when sizes differ". Round-20 wired CENTER reflow into nested-INSTANCE expansion as well. Combined, this fired CENTER for ANY size mismatch — including the case where INSTANCE is *bigger* than master (e.g. WEB Dropdown rail's option-row INSTANCEs are 233 wide vs master 117 — designer intentionally extended). CENTER-recentering pushed text past the parent Dropdown's clip.
+
+Trigger narrowed to **`instance.primary < master.primary` OR `instance.counter < master.counter`** (any axis shrunk). Grown instances keep master positions — they reflect the designer's intent to extend.
+
 ### 3.8 stackPrimarySizing AUTO/RESIZE_TO_FIT_* support (round-20)
 
 Figma 의 `stackPrimarySizing: "RESIZE_TO_FIT*"` 는 INSTANCE 가 children content 에 맞게 primary axis 를 auto-grow 하는 모드. 디자이너가 size override 에 *hint* 또는 *minSize* 를 두지만, 실제 렌더 size 는 content 길이에 따라 결정.
