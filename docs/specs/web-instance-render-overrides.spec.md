@@ -94,9 +94,31 @@ Figma 가 만든 .fig 안의 INSTANCE 에는 종종 `symbolData.symbolOverrides[
 - override entry 의 `fillPaints` 가 null / 잘못된 타입 — I-C2/C3 로 silently skip.
 - 같은 guidStr 에 충돌하는 텍스트+색 override 가 있을 때 — 두 map 모두 채워지고 둘 다 적용 (텍스트는 `_renderTextOverride`, 색은 `out.fillPaints` 교체) — 충돌 없음.
 
+### 3.5 TEXT styling override (round-26)
+
+배경 — round-4 가 추가한 텍스트 override 는 `textData.characters` (실제 글자) 만 다뤘다. 그런데 메타리치 audit corpus 의 INSTANCE symbolOverrides 분포를 측정하면 `fontSize` (1443), `fontName` (1436), `lineHeight` (1436), `letterSpacing` / `textTracking` (1423 each), `styleIdForText` (1418), `textAutoResize` (814), `fontVariations` 등 **TEXT 의 비-글자 스타일 필드들** 이 변형(variant)별 override 의 가장 큰 미처리 영역이다. round-26 은 이 필드들을 INSTANCE 확장 시 자손 TEXT 노드에 적용한다.
+
+- I-S1 `collectTextStyleOverridesFromInstance(overrides) → Map<pathKey, TextStyleOverride>`. 각 entry 의 *whitelist 된 styling 필드* 만 추출 (전체 entry 가 아님 — text/fill 등은 별도 collector 처리). pathKey scheme 은 §3.1 I-C1 (round-25 v3) 그대로.
+- I-S2 **whitelist** — 적용되는 TEXT 스타일 필드 목록:
+  ```
+  fontSize, fontName, fontVersion, lineHeight, letterSpacing, textTracking,
+  styleIdForText, fontVariations, textAutoResize,
+  fontVariantCommonLigatures, fontVariantContextualLigatures,
+  textDecorationSkipInk, textAlignHorizontal, textAlignVertical
+  ```
+  목록 외 필드는 무시 (다른 collector 의 책임이거나 미지원 영역). whitelist 명시는 (a) 의도하지 않은 필드 overwrite 방지, (b) Canvas 가 실제로 읽는 필드와 align (`web/client/src/lib/textStyle.ts` + `textStyleRuns.ts` 가 위 필드들을 Konva.Text props 로 변환).
+- I-S3 entry 가 위 필드를 *하나도* 가지지 않으면 (textData / fillPaints / size 등 만 있으면) map 에 추가하지 않음 (silent skip — 빈 record 가 남으면 무의미한 lookup).
+- I-S4 `toClientChildForRender` 에서 **TEXT 노드만** 적용 (`n.type === 'TEXT'` guard). 다른 타입에 잘못 매칭되어도 적용 안 함 — Figma 의 ref 도 TEXT 노드를 가리킴.
+- I-S5 적용은 **data spread 직후, fillPaints / visibility / derivedSize / derivedTransform 적용과 같은 layer**. 즉 master 의 fontSize 가 18 인데 override 가 14 로 patch 하면 `out.fontSize = 14`. 부분 override 보존 — override 가 fontName 만 가지면 fontSize 는 master 값 유지.
+- I-S6 nested INSTANCE prefix-merge — round-25 path-key plumbing 그대로 재사용. inner INSTANCE 가 자체 textStyleOverride 를 가지면 inner key 들을 outer currentPath 로 prefix 한 새 map 으로 merge.
+- I-S7 master immutability — 적용은 `_renderChildren` 의 per-instance 복제본에만. master TEXT 의 data 는 변경되지 않는다 — 같은 master 의 다른 INSTANCE 는 자기 고유 override 로 자기 자손만 변형.
+
+소스 케이스: 메타리치의 1,443 INSTANCE 에서 `fontSize` 가 master 와 다르게 stamp 되어 있는 경우 (예: Dropdown 의 11:506 TEXT 는 master Regular-14 인데 11:529 INSTANCE 에서 Medium 으로 패치). round-25 까지는 master 의 Regular-14 가 그대로 렌더되어 시각적으로 figma 와 다름. round-26 부터는 instance 별 styled font 가 정확히 적용.
+
 ## 6. 비대상 (v1)
 
 - **stroke / effects / opacity / blend mode override** — 같은 패턴으로 `collectStrokeOverridesFromInstance` 등 추가 필요. fillPaints 가 가장 흔한 케이스라 우선 처리. 다음 라운드에서 확장.
+- ~~**TEXT 의 비-글자 스타일 필드 override** (`fontSize`, `fontName`, `lineHeight`, `letterSpacing` 등) — round-4 가 글자만 처리.~~ **(round-26 §3.5 부터 지원 — 14개 필드 whitelist)**
 - **colorVar / variable alias 해석** — override 가 가진 `colorVar.value.alias.guid` 는 Figma 변수 참조. 우리 코드는 literal `color` 값만 읽고 변수 해석은 하지 않는다 (.fig 가 항상 literal 도 함께 저장하므로 시각적 손실 없음).
 - ~~**다단 nested INSTANCE override** — guidPath.length > 1. v1 무시 (I-C4).~~ **(v2 부터 지원 — I-P5 참조)**
 - ~~**Component property visibility binding** — `componentPropAssignments` ↔ `componentPropRefs[VISIBLE]`. v1/v2 무시.~~ **(v3 round-12 부터 지원 — §3.4 참조)**

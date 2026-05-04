@@ -20,6 +20,7 @@ import {
   collectPropAssignmentsFromInstance,
   collectSwapTargetsAtPathFromInstance,
   collectTextOverridesFromInstance,
+  collectTextStyleOverridesFromInstance,
   collectVisibilityOverridesFromInstance,
   mergeOverridesForNested,
   type Transform2D,
@@ -111,8 +112,14 @@ export function toClientNode(
         // only touches direct children, so deep descendants always keep
         // the derived transform. Spec §3.10 I-DT2.
         const derivedTransformsByPath = collectDerivedTransformsFromInstance(data);
+        // Round 26: TEXT styling overrides (fontSize / fontName /
+        // lineHeight / letterSpacing / ...). Whitelist of 14 fields
+        // (spec render-overrides §3.5 I-S2). Applied to TEXT descendants
+        // only at data spread, so the master's fields stay for fields
+        // the override doesn't mention (partial-override merge).
+        const textStyleOverridesByPath = collectTextStyleOverridesFromInstance(sd?.symbolOverrides);
         const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath),
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath),
         );
         if (expanded.length > 0) {
           // Spec web-instance-autolayout-reflow: when the INSTANCE size
@@ -470,6 +477,7 @@ export function toClientChildForRender(
   swapTargetsByPath: Map<string, string> = new Map(),
   derivedSizesByPath: Map<string, { x: number; y: number }> = new Map(),
   derivedTransformsByPath: Map<string, Transform2D> = new Map(),
+  textStyleOverridesByPath: Map<string, Record<string, unknown>> = new Map(),
 ): DocumentNode {
   if (depth > 8) {
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
@@ -505,7 +513,7 @@ export function toClientChildForRender(
     name: n.name,
     _isInstanceChild: true,
     children: n.children.map((c) =>
-      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, childPathFromOuter, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath),
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, childPathFromOuter, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath),
     ),
   };
   if (VECTOR_TYPES.has(n.type)) {
@@ -645,8 +653,15 @@ export function toClientChildForRender(
             mergedDerivedTransforms.set(merged, innerVal);
           }
         }
+        // Round 26: same prefix-merge for TEXT style overrides so the
+        // inner INSTANCE's own per-path text-styling deltas reach
+        // descendants of the inner expansion. Spec §3.5 I-S6.
+        const innerTextStyle = collectTextStyleOverridesFromInstance((data as { symbolData?: { symbolOverrides?: Array<Record<string, unknown>> } }).symbolData?.symbolOverrides);
+        const mergedTextStyle = innerTextStyle.size > 0
+          ? mergeOverridesForNested(textStyleOverridesByPath, innerTextStyle, currentPath)
+          : textStyleOverridesByPath;
         const nestedExpanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes, mergedDerivedTransforms),
+          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes, mergedDerivedTransforms, mergedTextStyle),
         );
         // Round 20: AUTO-grow primarySizing also fires for nested INSTANCEs
         // (the dashboard "Excel 다운로드" button is a nested INSTANCE inside
@@ -744,6 +759,24 @@ export function toClientChildForRender(
   const derivedTransform = derivedTransformsByPath.get(currentKey);
   if (derivedTransform) {
     out.transform = { ...derivedTransform };
+  }
+  // Spec §3.5 I-S4/I-S5 (round-26): TEXT styling override. Whitelist of
+  // 14 fields (fontSize / fontName / lineHeight / letterSpacing /
+  // textTracking / styleIdForText / fontVariations / textAutoResize /
+  // fontVariantCommonLigatures / fontVariantContextualLigatures /
+  // textDecorationSkipInk / textAlignHorizontal / textAlignVertical /
+  // fontVersion). Whitelist is enforced by the collector so this
+  // Object.assign is safe — non-whitelisted fields never reach styleOv.
+  // Applied AFTER data spread so override values win over master; partial-
+  // override merge preserves master fields the override doesn't mention.
+  // TEXT-type guard (I-S4) — Figma's componentPropRefs targeting these
+  // fields only points at TEXT nodes, but the guard makes the contract
+  // explicit and protects against future rule changes.
+  if (n.type === 'TEXT') {
+    const styleOv = textStyleOverridesByPath.get(currentKey);
+    if (styleOv) {
+      Object.assign(out, styleOv);
+    }
   }
   return out;
 }

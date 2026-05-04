@@ -15,6 +15,7 @@ import {
   collectPropAssignmentsFromInstance,
   collectSwapTargetsAtPathFromInstance,
   collectTextOverridesFromInstance,
+  collectTextStyleOverridesFromInstance,
 } from '../../../src/instanceOverrides.js';
 import type { TreeNode } from '../../../src/types.js';
 
@@ -2001,6 +2002,181 @@ describe('round-25 path-key scheme (FRAME / GROUP ancestor skip)', () => {
     );
     const child = (out.children as Array<{ fillPaints?: unknown }>)[0];
     expect(child.fillPaints).toBe(overrideFills);
+  });
+});
+
+// =====================================================================
+// Round 26 — TEXT styling override
+// (spec web-instance-render-overrides.spec.md §3.5)
+//
+// Round-4 added text override for `textData.characters` (the actual
+// glyphs). Round-26 picks up the *non-character* styling fields that
+// Figma stamps per INSTANCE on the same path-keyed mechanism: fontSize,
+// fontName, lineHeight, letterSpacing, etc. Distribution in the metarich
+// audit corpus shows ~1,400 INSTANCEs override fontSize/fontName/...,
+// and pre-round-26 the renderer fell back to the master's defaults for
+// all of them, producing visible font-family / size / line-height
+// mismatches against figma.png.
+//
+// Spec §3.5 I-S1..I-S7. Whitelist (I-S2): fontSize / fontName /
+// fontVersion / lineHeight / letterSpacing / textTracking /
+// styleIdForText / fontVariations / textAutoResize /
+// fontVariantCommonLigatures / fontVariantContextualLigatures /
+// textDecorationSkipInk / textAlignHorizontal / textAlignVertical.
+// =====================================================================
+
+describe('collectTextStyleOverridesFromInstance (spec §3.5, round 26)', () => {
+  it('T-ts-1: picks up whitelisted style fields keyed by slash-joined guidPath', () => {
+    const m = collectTextStyleOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+        fontSize: 14,
+        fontName: { family: 'Pretendard', style: 'Medium', postscript: 'Pretendard-Medium' },
+        lineHeight: { value: 1.5, units: 'RAW' },
+      },
+    ]);
+    expect(m.size).toBe(1);
+    const o = m.get('0:50')!;
+    expect(o.fontSize).toBe(14);
+    expect(o.fontName).toEqual({ family: 'Pretendard', style: 'Medium', postscript: 'Pretendard-Medium' });
+    expect(o.lineHeight).toEqual({ value: 1.5, units: 'RAW' });
+  });
+
+  it('T-ts-2: ignores non-whitelisted fields (textData / fillPaints / size etc. are other collectors\' jobs)', () => {
+    const m = collectTextStyleOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+        textData: { characters: 'override-text' },           // round-4 territory
+        fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }], // round-12
+        size: { x: 100, y: 20 },                              // round-22 territory (different field)
+        // Single style field present so the entry isn't fully skipped:
+        fontSize: 16,
+      },
+    ]);
+    const o = m.get('0:50')!;
+    expect(o.fontSize).toBe(16);
+    // None of the non-whitelisted fields should leak into the style record.
+    expect((o as Record<string, unknown>).textData).toBeUndefined();
+    expect((o as Record<string, unknown>).fillPaints).toBeUndefined();
+    expect((o as Record<string, unknown>).size).toBeUndefined();
+  });
+
+  it('T-ts-3: skips entries with NO whitelisted style fields (avoids empty-record lookups, I-S3)', () => {
+    const m = collectTextStyleOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+        textData: { characters: 'foo' },        // no style fields at all
+        fillPaints: [{ type: 'SOLID' }],
+      },
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 51 }] },
+        // empty entry except guidPath
+      },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('T-ts-4: skips entries with corrupt guidPath', () => {
+    const m = collectTextStyleOverridesFromInstance([
+      { guidPath: {}, fontSize: 14 },
+      { fontSize: 14 },                                                          // no guidPath
+      { guidPath: { guids: [{ sessionID: 0 } as unknown as { sessionID: number; localID: number }] }, fontSize: 14 },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('returns empty map when overrides is undefined or empty', () => {
+    expect(collectTextStyleOverridesFromInstance(undefined).size).toBe(0);
+    expect(collectTextStyleOverridesFromInstance([]).size).toBe(0);
+  });
+});
+
+describe('toClientChildForRender — TEXT styling override (spec §3.5 I-S4/I-S5, round 26)', () => {
+  it('T-ts-5: applies override fields to TEXT node at matching path; partial override preserves master fields', () => {
+    // Master TEXT has fontSize 18, fontName SemiBold. Override changes
+    // only fontName (no fontSize). Expected: out.fontSize stays 18,
+    // out.fontName becomes the override value.
+    const text = makeNode('TEXT', 50, {
+      textData: { characters: 'hi' },
+      fontSize: 18,
+      fontName: { family: 'Pretendard', style: 'SemiBold', postscript: 'Pretendard-SemiBold' },
+      lineHeight: { value: 1.44, units: 'RAW' },
+    });
+
+    const styleOverrides = new Map<string, Record<string, unknown>>([
+      ['0:50', {
+        fontName: { family: 'Pretendard', style: 'Medium', postscript: 'Pretendard-Medium' },
+      }],
+    ]);
+    const out = toClientChildForRender(
+      text, [], new Map(), new Map(), new Map(), new Map(), 0,
+      [], new Map(), new Map(), new Map(), new Map(), new Map(), styleOverrides,
+    );
+    expect(out.fontSize).toBe(18); // master preserved
+    expect(out.fontName).toEqual({ family: 'Pretendard', style: 'Medium', postscript: 'Pretendard-Medium' });
+    expect(out.lineHeight).toEqual({ value: 1.44, units: 'RAW' }); // master preserved
+  });
+
+  it('T-ts-6: TEXT-type guard — override does NOT apply to non-TEXT nodes at the same path (I-S4)', () => {
+    // VECTOR with the same guid as a hypothetical TEXT shouldn't get the
+    // style. Override map keyed at "0:50" but n.type === 'VECTOR'.
+    const vec = makeNode('VECTOR', 50, {
+      fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }],
+    });
+    const styleOverrides = new Map<string, Record<string, unknown>>([
+      ['0:50', { fontSize: 14 }],
+    ]);
+    const out = toClientChildForRender(
+      vec, [], new Map(), new Map(), new Map(), new Map(), 0,
+      [], new Map(), new Map(), new Map(), new Map(), new Map(), styleOverrides,
+    );
+    // VECTOR shouldn't carry fontSize.
+    expect((out as Record<string, unknown>).fontSize).toBeUndefined();
+  });
+
+  it('T-ts-7: integration via toClientNode — outer INSTANCE applies fontName to a TEXT descendant under FRAME', () => {
+    // Mirrors metarich Dropdown 11:529 / 11:506 case:
+    //   master 70 (SYMBOL)
+    //     └ FRAME 60                    ← skipped from path-key (round-25)
+    //         └ TEXT 50 "default"      ← path-key = "0:50"
+    // Outer INSTANCE override on path [50] changes fontName to Medium.
+    // Expected: TEXT renders with override fontName, master fontSize.
+    const textMaster = makeNode('TEXT', 50, {
+      textData: { characters: 'default' },
+      fontSize: 14,
+      fontName: { family: 'Pretendard', style: 'Regular', postscript: 'Pretendard-Regular' },
+      lineHeight: { value: 1, units: 'RAW' },
+      letterSpacing: { value: -0.5, units: 'PERCENT' },
+    });
+    const frame = makeNode('FRAME', 60, { size: { x: 200, y: 32 } }, [textMaster]);
+    const symMaster = makeNode('SYMBOL', 70, { size: { x: 200, y: 32 } }, [frame]);
+    const instance = makeNode('INSTANCE', 80, {
+      size: { x: 200, y: 32 },
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 70 },
+        symbolOverrides: [
+          {
+            // FRAME 60 skipped under round-25 path-key (only INSTANCE
+            // ancestors + target contribute), so the path is just [50].
+            guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+            fontName: { family: 'Pretendard', style: 'Medium', postscript: 'Pretendard-Medium' },
+          },
+        ],
+      },
+    });
+    const symbolIndex = buildSymbolIndex([symMaster, instance]);
+    const out = toClientNode(instance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{
+      type: string;
+      children?: Array<{ type: string; fontSize?: number; fontName?: unknown; lineHeight?: unknown }>;
+    }>;
+    expect(renderChildren).toHaveLength(1);
+    const frameOut = renderChildren[0];
+    expect(frameOut.children).toHaveLength(1);
+    const textOut = frameOut.children![0];
+    expect(textOut.fontSize).toBe(14); // master preserved (partial override)
+    expect(textOut.fontName).toEqual({ family: 'Pretendard', style: 'Medium', postscript: 'Pretendard-Medium' });
+    expect(textOut.lineHeight).toEqual({ value: 1, units: 'RAW' }); // master preserved
   });
 });
 

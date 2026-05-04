@@ -112,6 +112,65 @@ export function collectVisibilityOverridesFromInstance(
 }
 
 /**
+ * TEXT styling fields that round-26 lets symbolOverrides override per
+ * INSTANCE on a path-keyed basis. Whitelist (spec §3.5 I-S2) — entries
+ * outside this set are not copied to the override record (other
+ * collectors handle them, or they're not yet supported).
+ *
+ * Match `web/client/src/lib/textStyle.ts` + `textStyleRuns.ts` which
+ * convert these fields to Konva.Text props at render time. Adding a
+ * new field here without Canvas-side support is a no-op visually.
+ */
+const TEXT_STYLE_OVERRIDE_FIELDS: ReadonlySet<string> = new Set([
+  'fontSize', 'fontName', 'fontVersion', 'lineHeight', 'letterSpacing',
+  'textTracking', 'styleIdForText', 'fontVariations', 'textAutoResize',
+  'fontVariantCommonLigatures', 'fontVariantContextualLigatures',
+  'textDecorationSkipInk', 'textAlignHorizontal', 'textAlignVertical',
+]);
+
+/**
+ * Pull TEXT styling overrides out of an INSTANCE's symbolOverrides[].
+ * Round-4's text override only handled `textData.characters`; round-26
+ * picks up the rest of the per-INSTANCE TEXT styling (fontSize /
+ * fontName / lineHeight / letterSpacing / ...). Returns
+ * `Map<pathKey, Partial<TextStyleFields>>`.
+ *
+ * Wire format observation (metarich .fig): each style field sits at the
+ * top level of the override entry (mirror of node.data shape), not
+ * nested inside a textData substructure. Examples:
+ *   { guidPath: {...}, fontSize: 14, fontName: { family, style, postscript } }
+ * Multiple fields may share one entry; partial overrides are common
+ * (override only changes fontName, leaving master fontSize intact).
+ *
+ * Skips entries with no whitelisted style fields (avoids empty-record
+ * lookups during the walk).
+ *
+ * Spec: docs/specs/web-instance-render-overrides.spec.md §3.5 I-S1..S3
+ *       (round-26).
+ */
+export function collectTextStyleOverridesFromInstance(
+  overrides: Array<Record<string, unknown>> | undefined,
+): Map<string, Record<string, unknown>> {
+  const m = new Map<string, Record<string, unknown>>();
+  if (!Array.isArray(overrides)) return m;
+  for (const o of overrides) {
+    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+    const key = pathKeyFromGuids(guids);
+    if (key === null) continue;
+    const subset: Record<string, unknown> = {};
+    let hasAny = false;
+    for (const k of Object.keys(o)) {
+      if (TEXT_STYLE_OVERRIDE_FIELDS.has(k)) {
+        subset[k] = o[k];
+        hasAny = true;
+      }
+    }
+    if (hasAny) m.set(key, subset);
+  }
+  return m;
+}
+
+/**
  * Pull boolean component-property assignments off an INSTANCE node's `data`.
  * Returns Map<defIdKey, boolean> keyed by `${sessionID}:${localID}` of the
  * property's defID. Used by the walk to resolve descendants whose
