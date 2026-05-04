@@ -102,6 +102,11 @@ I-S11 invisible children 은 변경 없음.
 - T-7: INSTANCE size override only on counter axis (primary unchanged) → counter recompute, primary keeps master values.
 - T-8: missing transform on a visible child → new transform generated with computed (x, y).
 - T-9: integration via `toClientNode`: alert button INSTANCE fixture (master 88×32 HORIZONTAL CENTER, instance size 48×32, prop-binding hides icon, text override "삭제") — assert resolved TEXT transform centers in 48×32.
+- T-deriv-1: `collectDerivedSizesFromInstance` picks up `entry.size` (existing v1 behavior).
+- T-deriv-2: `collectDerivedSizesFromInstance` picks up `entry.derivedTextData.layoutSize` when no `entry.size`.
+- T-deriv-3: `entry.size` wins over `entry.derivedTextData.layoutSize` when both present (size is more general).
+- T-deriv-4: `toClientChildForRender` overrides `out.size` from `derivedSizesByPath` for matching descendant currentKey.
+- T-deriv-5: integration via `toClientNode` — outer INSTANCE has `derivedSymbolData` with size delta for a child; expanded child renders at derived size, and CENTER reflow uses the new size for spacing.
 
 ### 3.7.5 CENTER reflow trigger narrowing (round-21)
 
@@ -119,6 +124,21 @@ Figma 의 `stackPrimarySizing: "RESIZE_TO_FIT*"` 는 INSTANCE 가 children conte
 - I-AG4 `out.size` 를 grown size 로 업데이트 (`Canvas` 의 INSTANCE auto-clip 도 grown bbox 사용).
 
 소스 케이스: 메타리치 dashboard 의 Excel 다운로드 button INSTANCE 587:7495 size override 44 + RESIZE_TO_FIT → master 101 로 grow → leading clip 회피.
+
+### 3.9 derivedSymbolData 사이즈 baking (round-22)
+
+Figma 의 INSTANCE 노드는 `derivedSymbolData: Array<{guidPath, size?, transform?, derivedTextData?, fillGeometry?, ...}>` 필드를 통해 *모든 descendant 의 post-layout 결과 delta* 를 보낸다 — 즉 master 와 다를 때만 entry 를 두고, 그 entry 가 권위 있는 사이즈/위치/glyph 레이아웃이다.
+
+Round-21 의 시도 (TEXT 만 derivedSize 적용) 는 *부분 적용* 이라 실패했다 — outer Dropdown 의 size override 가 children INSTANCE 도 같이 줄여야 (e.g. 233→103) 하는데 우리는 master child size (233) + 작은 derived TEXT size 만 적용 → 텍스트가 wide container 안에서 misaligned. 본 룰은 *모든* descendant 에 적용한다.
+
+- I-DS1 outer INSTANCE 의 `derivedSymbolData` 를 walk, `entry.size` 가 있는 entry 는 path-key (slash-joined GUIDs) → `{x, y}` map 으로 수집. `derivedTextData.layoutSize` 도 같은 map 에 등록 (TEXT descendant 의 자연-폭).
+- I-DS2 `toClientChildForRender` 에서 descendant emit 시점, `derivedSizesByPath.get(currentKey)` 가 있으면 `out.size` 로 *override*. master 의 size 가 wins 가 아니라 derived 가 wins (Figma 의 post-layout 값이 더 정확).
+- I-DS3 nested INSTANCE 의 own size 도 동일 룰 — `nestedInstSize` 우선순위는 `nestedGrownSize (round-20) > derivedSize (round-22) > nestedOrigInstSize (data.size) > master`. AUTO-grow 와 derived 모두 가지면 AUTO-grow wins (round-20 이 더 명시적).
+- I-DS4 nested INSTANCE 의 `derivedSymbolData` 도 inner-prefix-merge 후 outer 와 합쳐 사용 (round-21 의 plumbing 그대로 — outer 가 deeper descendant 의 derived 를 알면 inner override 보다 우선).
+- I-DS5 적용 후 `applyInstanceReflow` (§3.1-3.7.5) 가 *변경된 자식 사이즈* 기반으로 재flow → INSTANCE 경계의 spacing/center 계산이 정확해진다. derivedSymbolData 가 위치 (transform) 를 포함하지 않는 일반 케이스 (sidemenu 35 entries 중 transform 0) 에서 우리의 reflow 룰이 위치를 채운다.
+- I-DS6 단일-entry INSTANCE 의 `transform` 이 있는 케이스 (e.g. icon u:sign-out-alt 7:208 의 derivedSymbolData[0].transform) 는 v1 미적용 — 본 라운드는 size 만 적용. transform 적용은 round-23 후보 (현재 케이스에서 visual 영향 미관찰).
+
+소스 케이스: 메타리치 design-setting datepicker 12:749 의 중간 calendar 라벨 (수/목/금/토) 클립 — outer dropdown rail 의 derived sizes 가 children INSTANCE 를 수축시키면 텍스트가 narrower container 안에 정확히 배치되어 클립 면적이 사라짐.
 
 ## 6. 비대상
 

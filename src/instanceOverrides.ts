@@ -245,26 +245,42 @@ export function collectPropAssignmentsAtPathFromInstance(
  * overlap.
  *
  * pen-export.ts uses the same source via `buildDerivedMap` +
- * `applyDerivedSymbolData`. v1 here covers `size` only — other derived
- * fields (fillGeometry, transform, fontMetaData) are not applied yet.
+ * `applyDerivedSymbolData`. v2 (round-22) collects from BOTH `entry.size`
+ * (any descendant type) AND `entry.derivedTextData.layoutSize` (TEXT natural
+ * width — Figma's post-shaping bbox). transform / fillGeometry remain
+ * unhandled (round-23 candidates).
  *
- * Spec: docs/specs/web-instance-autolayout-reflow.spec.md §3.8 (round 21).
+ * Spec: docs/specs/web-instance-autolayout-reflow.spec.md §3.9 (round 22).
  */
 export function collectDerivedSizesFromInstance(
   instData: Record<string, unknown> | undefined,
 ): Map<string, { x: number; y: number }> {
   const out = new Map<string, { x: number; y: number }>();
   const ds = instData?.derivedSymbolData as
-    | Array<Record<string, unknown> & { guidPath?: { guids?: Array<{ sessionID?: number; localID?: number }> }; size?: { x?: number; y?: number } }>
+    | Array<Record<string, unknown> & {
+        guidPath?: { guids?: Array<{ sessionID?: number; localID?: number }> };
+        size?: { x?: number; y?: number };
+        derivedTextData?: { layoutSize?: { x?: number; y?: number } };
+      }>
     | undefined;
   if (!Array.isArray(ds)) return out;
   for (const entry of ds) {
-    const sz = entry.size;
-    if (!sz || typeof sz.x !== 'number' || typeof sz.y !== 'number') continue;
     const guids = entry.guidPath?.guids;
     const key = pathKeyFromGuids(guids);
     if (key === null) continue;
-    out.set(key, { x: sz.x, y: sz.y });
+    // I-DS1: explicit size delta wins. derivedTextData.layoutSize is the
+    // text-shaped bbox (post-font-substitution); used when the entry has
+    // no explicit size (TEXT-only entries) so reflow gets the right
+    // child-width for spacing calculations.
+    const sz = entry.size;
+    if (sz && typeof sz.x === 'number' && typeof sz.y === 'number') {
+      out.set(key, { x: sz.x, y: sz.y });
+      continue;
+    }
+    const ts = entry.derivedTextData?.layoutSize;
+    if (ts && typeof ts.x === 'number' && typeof ts.y === 'number') {
+      out.set(key, { x: ts.x, y: ts.y });
+    }
   }
   return out;
 }
