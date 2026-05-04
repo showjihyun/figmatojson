@@ -377,3 +377,107 @@ visibly on the canvas (parent clip / SYMBOL descendant), and (b) the
 capture background differs between our screenshot and Figma's REST API
 PNG. Both are tractable improvements to the audit harness — none touch
 the renderer. Filed as round-23 tooling tasks in the table above.
+
+## Round 24 close (2026-05-05)
+
+Round 24 picked up the remaining `derivedSymbolData` field that round 22
+punted (§3.9 I-DS6) — `entry.transform`. Spec §3.10 (I-DT1–5) +
+collector + walk plumbing + 13 unit tests landed in 89bbaa5. Baselines
+refreshed for design-setting (71f33d0), dash-board (f493bd8), mobile
+(ddad018). e2e gate at `web/e2e/audit-transform-baking.spec.ts` pins
+the mobile 5-row contract.
+
+**Wins surfaced this round:**
+- `mobile/frame-2323-477_6439` (+8 KB): customer-list 5th row,
+  previously clipped at master coord, now renders at Figma's derived
+  position. This is the canonical 1,570-INSTANCE pattern — designer
+  kept INSTANCE size = master, Figma stamps placement only, master
+  coords alone push descendants out of the visible bbox.
+- `design-setting/labe-145_674` (-543 B): bottom sibling-leak bar
+  removed by sibling's authoritative derivedTransform pushing it
+  outside the labe crop area.
+- `dash-board/frame-2323-576_6830` and family (+619 / +463 / +433 B):
+  KPI-card unit labels ("억", "%", "건") now render inline next to
+  the number instead of with sub-pixel offset.
+- ~7 `web/container-*` slugs (uniform -228 B): button-row buttons now
+  size-fit their text content (round-22 derivedSize) at correct
+  positions (round-24 derivedTransform). E.g. `web/container-358_5948`:
+  top-row "양식 다운로드 / 파일업로드 / DB 업로드" buttons no longer
+  truncate the text past the rounded pill edge.
+
+**WEB baseline NOT refreshed this round.** Captured 529 slugs of WEB,
+diff'd, surfaced 18 `alret-*` modal-popup INSTANCEs all dropping
+exactly -1098 B with a clean "삭제 button clipped at modal right
+edge" pattern. Triage identified the regression as a **latent
+path-key bug exposed by round-24, not introduced by it** — see
+"Round 25 candidate" below. WEB stays at the round-23 baseline
+(commit a65b12a) until that fix lands and we can recapture cleanly.
+
+### Round 25 candidate — path-key normalization (FRAME ancestor skip)
+
+Direct diagnostic on metarich `INSTANCE 364:2962` (alret-364_2962):
+
+```
+master 64:376 (alret SYMBOL):
+  └ buttons FRAME 60:348  [direct child, m02=223, w=87]
+      ├ Button 60:341 "취소"  [m02=0,  w=31]  ← symbolOverride: visible=false
+      └ Button 60:340 "삭제"  [m02=39, w=48]
+
+INSTANCE 364:2962 symbolOverrides:
+  [60:341]      visible: false        ← key has 1 segment
+  [60:326]      textData: ...         ← 1-seg (target is grandchild via 60:328 FRAME)
+  [60:340/5:45] textData: ...         ← 2-seg crossing INSTANCE boundary
+
+INSTANCE 364:2962 derivedSymbolData:
+  [60:348] size {48,32} t {m02=262, m12=118}  ← post-layout buttons FRAME *assuming 취소 hidden*
+```
+
+Figma's path-key scheme **skips FRAME / GROUP ancestors and includes
+only INSTANCE-typed ancestors plus the target**. The override path
+`[60:341]` targets the cancel-button INSTANCE that sits under FRAME
+`60:348`, but the FRAME does not contribute to the key.
+
+Our walk in `web/core/domain/clientNode.ts:toClientChildForRender`
+uses the *full visit chain* (every ancestor's `guidStr`) — so for the
+same target we compute `60:348/60:341`. Mismatch → visibility
+override silently fails to apply → 취소 stays rendered. Round 22's
+derived size for the buttons FRAME *does* match (it's a direct child
+of the master, single-segment on both sides), so the FRAME shrinks
+to 48 wide assuming 취소 is gone. Combined: 2 buttons stuffed inside
+a 48-wide FRAME → 삭제 overflow → INSTANCE clip.
+
+The same mismatch quietly affects **every override pipeline that uses
+path keys** — text overrides, fill overrides, prop assignments at
+path, swap targets at path, derivedSize, derivedTransform — anywhere
+the target is reached through a FRAME / GROUP container in the
+master. Many cases happen to work because either (a) the target is a
+direct child of master (no intermediate FRAME) or (b) the target sits
+under an INSTANCE ancestor (which our scheme and Figma's both
+include). The alret family is the first place where the mismatch
+produces a loud-and-visible regression.
+
+**Round-25 scope:**
+- Refactor `currentPath` accumulation in `toClientChildForRender` so
+  intermediate FRAME / GROUP / SECTION ancestors are dropped from the
+  key. Only INSTANCE ancestors and the leaf target node contribute.
+- Verify all 7 path-keyed collectors (text / fill / visibility /
+  propAssignAtPath / swapTarget / derivedSize / derivedTransform)
+  behave correctly under the new scheme. Update unit-test fixture
+  paths.
+- Recapture WEB; expect alret-* regression resolved plus likely 0 to
+  many additional silent fixes elsewhere. Triage as usual.
+- Update specs:
+  `web-instance-render-overrides.spec.md §3.1 I-C1` (path-key def),
+  `web-instance-autolayout-reflow.spec.md §3.9 I-DS1` and
+  `§3.10 I-DT1` (derived data path-key def),
+  `web-instance-variant-swap.spec.md §3.1` (swap path-key).
+- Risk: blast radius across visibility / text / fill overrides. If
+  many design-setting + dash-board + mobile cases were silently wrong
+  due to FRAME-ancestor inclusion, fixing this surfaces them as new
+  visual deltas. Some will be wins, some may be new regressions to
+  triage. Plan for a full 4-corpus re-baseline as part of round 25.
+
+**Round-24 verdict:** spec / impl / tests are correct under the
+inherited path-key contract; the alret regression is a path-key
+contract bug whose ownership predates round 24. Round 24 ships its
+3 corpus baselines + the e2e gate; WEB defers to round 25.
