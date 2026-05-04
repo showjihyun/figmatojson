@@ -2,9 +2,9 @@
 
 | 항목 | 값 |
 |---|---|
-| 상태 | Draft (round 14) |
-| 구현 | `web/core/domain/clientNode.ts` (`applyInstanceReflow` helper, INSTANCE 분기에서 호출) |
-| 테스트 | `web/core/domain/clientNode.test.ts` (hand-built fixtures) |
+| 상태 | Draft (round 24) — 마지막 spec 항목 (§3.10 derivedSymbolData transform baking) 추가 |
+| 구현 | `web/core/domain/clientNode.ts` (`applyInstanceReflow` helper + `toClientChildForRender` derived* baking, INSTANCE 분기에서 호출), `src/instanceOverrides.ts` (`collectDerivedSizesFromInstance` round-22, `collectDerivedTransformsFromInstance` round-24) |
+| 테스트 | `web/core/domain/clientNode.test.ts` (hand-built fixtures, round-22 T-deriv-1~5, round-24 T-deriv-6a~e / 7a~c / 8 / 9 / 10 / 11) |
 | 형제 | `web-instance-render-overrides.spec.md` (override pipeline), `web-canvas-instance-clip.spec.md` (round-12 INSTANCE clip — 본 spec 으로 alert text-clip 의 *진짜* 원인 해결) |
 
 ## 1. 목적
@@ -136,9 +136,23 @@ Round-21 의 시도 (TEXT 만 derivedSize 적용) 는 *부분 적용* 이라 실
 - I-DS3 nested INSTANCE 의 own size 도 동일 룰 — `nestedInstSize` 우선순위는 `nestedGrownSize (round-20) > derivedSize (round-22) > nestedOrigInstSize (data.size) > master`. AUTO-grow 와 derived 모두 가지면 AUTO-grow wins (round-20 이 더 명시적).
 - I-DS4 nested INSTANCE 의 `derivedSymbolData` 도 inner-prefix-merge 후 outer 와 합쳐 사용 (round-21 의 plumbing 그대로 — outer 가 deeper descendant 의 derived 를 알면 inner override 보다 우선).
 - I-DS5 적용 후 `applyInstanceReflow` (§3.1-3.7.5) 가 *변경된 자식 사이즈* 기반으로 재flow → INSTANCE 경계의 spacing/center 계산이 정확해진다. derivedSymbolData 가 위치 (transform) 를 포함하지 않는 일반 케이스 (sidemenu 35 entries 중 transform 0) 에서 우리의 reflow 룰이 위치를 채운다.
-- I-DS6 단일-entry INSTANCE 의 `transform` 이 있는 케이스 (e.g. icon u:sign-out-alt 7:208 의 derivedSymbolData[0].transform) 는 v1 미적용 — 본 라운드는 size 만 적용. transform 적용은 round-23 후보 (현재 케이스에서 visual 영향 미관찰).
+- ~~I-DS6 단일-entry INSTANCE 의 `transform` 이 있는 케이스 (e.g. icon u:sign-out-alt 7:208 의 derivedSymbolData[0].transform) 는 v1 미적용 — 본 라운드는 size 만 적용. transform 적용은 round-23 후보 (현재 케이스에서 visual 영향 미관찰).~~ **(round-24 §3.10 에서 해결 — `entry.transform` 도 모든 descendant 에 baking)**
 
 소스 케이스: 메타리치 design-setting datepicker 12:749 의 중간 calendar 라벨 (수/목/금/토) 클립 — outer dropdown rail 의 derived sizes 가 children INSTANCE 를 수축시키면 텍스트가 narrower container 안에 정확히 배치되어 클립 면적이 사라짐.
+
+### 3.10 derivedSymbolData transform baking (round-24)
+
+§3.9 가 `entry.size` (와 `entry.derivedTextData.layoutSize`) 를 baking 한 다음 마지막으로 남은 항목 — `entry.transform` (Figma 가 stamp 한 *post-layout 6-field 2D-affine*) 도 권위 있는 데이터다. 메타리치 audit 코퍼스에서 1,570 INSTANCE 가 적어도 한 entry 에 transform 을 가진다 (대부분은 reflow 가 발동하지 않는 케이스 — 디자이너가 INSTANCE 를 master 사이즈 그대로 두고 Figma 가 placement 만 baking 한 경우). 본 라운드는 §3.9 의 size baking plumbing 을 그대로 transform 에 확장한다.
+
+- I-DT1 `collectDerivedTransformsFromInstance(instData)` 는 outer INSTANCE 의 `derivedSymbolData` 를 walk, `entry.transform` 이 있는 entry 만 path-key → `Transform2D` map 으로 수집. `Transform2D` = `{m00, m01, m02, m10, m11, m12}` 6-field 모두 number 일 때만 통과; 하나라도 비정형이면 silent skip (§3.9 I-DS1 과 동일 정책).
+- I-DT2 `toClientChildForRender` 에서 descendant emit 시점, `derivedTransformsByPath.get(currentKey)` 가 있으면 `out.transform` 을 *통째 교체* (m02/m12 만 patch 가 아니라 rotation/scale 포함 6-field 전체). 적용 위치는 §3.9 의 `out.size` 적용 직후 — 같은 currentKey 를 size + transform 둘 다 가지는 entry 도 두 적용이 독립적으로 일어난다.
+- I-DT3 nested INSTANCE 의 `derivedSymbolData` 도 inner-prefix-merge 후 outer 와 합쳐 사용 (§3.9 I-DS4 의 plumbing 재사용 — 같은 path-key scheme). outer 가 deeper descendant 의 derivedTransform 을 알면 inner own data 보다 우선.
+- I-DT4 **reflow 와의 충돌 — v1 punt**: `applyInstanceReflow` 는 INSTANCE 의 *직접 자식* 만 mutate (m02/m12). reflow 가 fire 한 케이스 (instance < master) 에서 직접 자식의 path 가 derivedTransform 에 등록되어 있어도 reflow 가 wins — Figma 의 derivedTransform 을 *덮어쓴다*. 깊은 descendant 는 reflow 가 건드리지 않으므로 derivedTransform 이 항상 final. v1 punt 의 정당화: (a) 1,570 INSTANCE 코퍼스의 대부분은 reflow trigger 를 만족하지 않음 (round-21 narrowing 이후 instance < master 에서만 fire), (b) reflow 가 fire 하는 shrunk 케이스는 derivedTransform 과 reflow 의 계산이 *원리적으로 일치* 해야 함 (Figma 의 post-layout = 우리 simulation 의 목표). 둘이 visible 하게 다르면 별도 라운드로 reflow 의 룰을 derivedTransform 에 align.
+- I-DT5 master immutability — derivedTransform 적용은 `_renderChildren` 의 per-instance 복제본에만 (§3.3 I-M1 그대로). 같은 master 를 참조하는 다른 INSTANCE 가 자기 고유의 derivedTransform 으로 자기 자손만 변형.
+
+소스 케이스: 메타리치 audit 코퍼스의 1,570 INSTANCE 중 reflow 비fire 케이스가 dominant — 디자이너가 button/icon INSTANCE 를 master 와 같은 사이즈로 두고 Figma 가 자식의 글자 폭/아이콘 위치를 post-layout 으로 stamp 한 경우. round-22 size 만으로는 자식이 master 위치에 머물러 클립 면적 발생; transform baking 이 들어가면 Figma 와 픽셀 일치.
+
+테스트: `web/core/domain/clientNode.test.ts` 의 round-24 블록 (T-deriv-6a~e: collector, T-deriv-7a~c: walk apply, T-deriv-8: 깊은 descendant, T-deriv-9: nested prefix-merge, T-deriv-10: reflow 와의 conflict 케이스 v1 punt 검증, T-deriv-11: 직접 자식 + reflow 비fire = derivedTransform 살아남음).
 
 ## 6. 비대상
 
@@ -148,7 +162,7 @@ Round-21 의 시도 (TEXT 만 derivedSize 적용) 는 *부분 적용* 이라 실
 - **Nested INSTANCE 안의 reflow** — `toClientChildForRender` 의 INSTANCE 분기에는 v1 추가 안 함 (inner INSTANCE 는 자기 master coords 그대로). 메타리치 케이스에는 outer INSTANCE 만 reflow 필요.
 - **Auto-layout proportional sizing** (`stackPrimarySizing: AUTO` 등 child size auto-grow) — v1 미지원.
 - **Master 가 stackMode === 'NONE' 인 경우의 proportional scale** — `pen-export.ts` 의 `scaleNode` 로직. 본 spec 은 stackMode 케이스만 다룸. NONE 케이스가 metarich 에 있는지는 별도 audit 으로 평가.
-
-## 7. CLI 와의 관계
+- **(round-24) reflow 가 fire 한 직접 자식의 derivedTransform 보존** — §3.10 I-DT4 의 v1 punt. reflow 의 CENTER/MIN-pack 시뮬레이션이 Figma 의 derivedTransform 을 덮어쓴다. shrunk INSTANCE 케이스에서만 발생하고, 두 계산이 원리적으로 일치해야 하므로 visual 영향이 미관찰될 가능성이 높지만, audit 에서 conflict 케이스가 발견되면 reflow 가 derivedTransform 의 m02/m12 를 *anchor* 로 삼도록 라운드를 분리.
+- **(round-24) `entry.fillGeometry` / `entry.strokeGeometry` baking** — Figma 가 vector 의 post-tessellation 윤곽도 stamp 하지만 본 라운드는 transform/size 만. Vector descendants 는 master 의 `vectorData` 로 충분히 커버되므로 우선순위 낮음.
 
 본 spec 은 web 측 단독 구현 — `pen-export.ts:reflowMasterChildren` 과 *동일 동작이 아님* (CLI 는 Pencil flow 에 위임). 두 구현이 *다른 각도에서* 같은 문제 (INSTANCE size override) 를 다루는 셈. 미래에 cluster A (Expansion 추출) 가 trigger 되면 둘을 통합하는 것이 자연스럽지만, 본 spec 은 그 추출 *없이도* 메타리치 audit 의 시각 결함을 해결한다.
