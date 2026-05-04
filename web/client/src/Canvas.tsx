@@ -135,15 +135,26 @@ interface HoverApi {
 const HoverContext = createContext<HoverApi | null>(null);
 
 // Round-23 audit-tooling: render-in-isolation. When `__setIsolateNode(id)` is
-// called (audit script does this before each capture), this context holds the
-// set of ancestor IDs of the target node. Each NodeShape consults the set;
-// if its own id is in there, it suppresses fillPaints so the captured area
-// shows only the target + its descendants — same as Figma's REST API render
-// of the target in isolation. Suppressing only fills (not strokes / effects)
-// is enough for the metarich case where ancestors are flat-color FRAME
-// backgrounds; revisit if a node ever has a stroke that bleeds into a child
-// audit crop.
-const IsolationContext = createContext<Set<string> | null>(null);
+// called (audit script does this before each capture), this context holds:
+//   - `ancestors`: ids of every node on the path from root to target. Each
+//     NodeShape with its id in this set suppresses fillPaints so its
+//     background doesn't bleed into the captured area.
+//   - `hide`: ids of every node that is NOT an ancestor of target, NOT the
+//     target itself, NOT a descendant of target. NodeShape returns null for
+//     these, so they don't render at all.
+//
+// The `hide` set is the round-23-v2 fix for popup-style slugs: previously
+// the metarich `mobile/frame-2364-1324_16535` "상담 신청 완료" popup had a
+// privacy-policy screen at the same canvas coordinates (a sibling top-level
+// FRAME). With v1 isolation (only `ancestors` known), the popup's parent
+// fill was suppressed → the privacy-policy text bled through into the
+// captured popup. v2 hides those sibling subtrees outright, matching Figma
+// REST API's "render this single node alone" behavior.
+interface IsolationMask {
+  ancestors: Set<string>;
+  hide: Set<string>;
+}
+const IsolationContext = createContext<IsolationMask | null>(null);
 
 interface CanvasProps {
   page: any;
@@ -314,11 +325,12 @@ function NodeShapeImpl({
   const isSelected = useIsSelected(guid);
   const dragApi = useContext(DragSnapshotContext);
   const hoverApi = useContext(HoverContext);
-  // Round-23 isolation: when this node is an ancestor of the audit target,
-  // pretend it has no fill so children render as if floating on a transparent
-  // background — same scope figma's REST API renders.
-  const isolateAncestors = useContext(IsolationContext);
-  const isAncestorOfIsolated = isolateAncestors?.has((node as { id?: string }).id ?? '') === true;
+  // Round-23 isolation. (Round-23-v2: also drops sibling subtrees outright
+  // so they don't leak into the captured area through z-order overlap.)
+  const isolation = useContext(IsolationContext);
+  const myId = (node as { id?: string }).id ?? '';
+  if (isolation?.hide.has(myId)) return null;
+  const isAncestorOfIsolated = isolation?.ancestors.has(myId) === true;
 
   if (node.visible === false) return null;
   const x = node.transform?.m02 ?? 0;
@@ -1442,33 +1454,65 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
   }, [scale, offset, size.width, size.height]);
 
   // Round-23 audit isolation API: __setIsolateNode(id) walks the page tree
-  // starting from `page`, finds the node with that id, and stores the set of
-  // ancestor ids in state. NodeShape consumes via IsolationContext and
-  // suppresses fillPaints when its own id is in the set. Pass null to clear.
-  // Audit script calls this before each capture so captured screenshots
-  // compare against Figma's REST-API isolated render.
-  const [isolateAncestorIds, setIsolateAncestorIds] = useState<Set<string> | null>(null);
+  // starting from `page` and computes:
+  //   - `ancestors`: ids on the path from page root to target. Their fills
+  //     are suppressed so the captured crop has a transparent backdrop.
+  //   - `hide`: ids of every node not in {target, descendants, ancestors}.
+  //     Their NodeShape returns null, so unrelated subtrees (e.g. a
+  //     privacy-policy screen sitting at the same canvas coords as a popup)
+  //     don't bleed into the crop. This makes our render match Figma REST
+  //     API's "render this node alone" behavior.
+  // Pass null to clear isolation.
+  type TreeNode = { id?: string; guid?: { sessionID?: number; localID?: number }; children?: TreeNode[] };
+  const [isolation, setIsolation] = useState<IsolationMask | null>(null);
   useEffect(() => {
     const w = window as unknown as Record<string, unknown>;
     w.__setIsolateNode = (id: string | null) => {
-      if (!id) {
-        setIsolateAncestorIds(null);
-        return;
-      }
+      if (!id) { setIsolation(null); return; }
       const ancestors = new Set<string>();
-      const find = (n: { id?: string; guid?: { sessionID?: number; localID?: number }; children?: unknown[] }, chain: string[]): boolean => {
-        const nid = n.id ?? (n.guid ? `${n.guid.sessionID}:${n.guid.localID}` : '');
+      const path: string[] = [];
+      const nidOf = (n: TreeNode): string =>
+        n.id ?? (n.guid ? `${n.guid.sessionID}:${n.guid.localID}` : '');
+      const find = (n: TreeNode, chain: string[]): boolean => {
+        const nid = nidOf(n);
         if (nid === id) {
-          for (const a of chain) ancestors.add(a);
+          for (const a of chain) { ancestors.add(a); path.push(a); }
           return true;
         }
-        for (const c of (n.children ?? []) as Array<typeof n>) {
+        for (const c of n.children ?? []) {
           if (find(c, [...chain, nid])) return true;
         }
         return false;
       };
-      find(page as never, []);
-      setIsolateAncestorIds(ancestors);
+      const found = find(page as TreeNode, []);
+      if (!found) { setIsolation(null); return; }
+      // Compute `hide`: walk the tree, mark every subtree that's neither an
+      // ancestor of target nor part of {target, descendants}.
+      const pathSet = new Set(path);
+      pathSet.add(id);
+      const hide = new Set<string>();
+      const markHide = (n: TreeNode): void => {
+        const nid = nidOf(n);
+        if (nid === id) return; // target — keep it (and its descendants render normally)
+        if (ancestors.has(nid)) {
+          // walk: keep the on-path child, hide off-path siblings entirely
+          for (const c of n.children ?? []) {
+            const cid = nidOf(c);
+            if (pathSet.has(cid)) markHide(c);
+            else hide.add(cid);
+          }
+        } else {
+          // unreachable in correct trees: only ancestors and target reach here
+          hide.add(nid);
+        }
+      };
+      // Top level: each child is either an ancestor (recurse) or hide-it.
+      for (const c of (page as TreeNode).children ?? []) {
+        const cid = nidOf(c);
+        if (pathSet.has(cid)) markHide(c);
+        else hide.add(cid);
+      }
+      setIsolation({ ancestors, hide });
     };
     return () => { delete (w as Record<string, unknown>).__setIsolateNode; };
   }, [page]);
@@ -1669,7 +1713,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
           <SelectionContext.Provider value={selectionStore}>
             <DragSnapshotContext.Provider value={dragSnapshotApi}>
               <HoverContext.Provider value={hoverApi}>
-                <IsolationContext.Provider value={isolateAncestorIds}>
+                <IsolationContext.Provider value={isolation}>
                 {visibleChildren.map((c) => (
                   // Key by guid so React reuses the same NodeShape instance
                   // when culling shifts the array — avoids unmount/remount of
