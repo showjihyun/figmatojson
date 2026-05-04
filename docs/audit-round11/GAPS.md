@@ -322,20 +322,32 @@ classes from re-appearing in future audit cycles:
 
 3. **Render-in-isolation in `Canvas.tsx` (`__setIsolateNode` API)**
    New `IsolationContext` + imperative `window.__setIsolateNode(id)`.
-   When set, the canvas walks the page tree, collects every ancestor id
-   of the target, and any `NodeShape` whose own id is in that set
-   suppresses its `fillPaints` (passes `undefined` to `paintLayers`).
-   Net effect: only the target node + its descendants paint visible
-   pixels in the captured area — same scope as Figma REST API's render.
-   `audit-round11-screenshots.mjs` now calls `__setIsolateNode(c.id)`
+   When set, the canvas walks the page tree and computes:
+   - `ancestors`: id of every node on the path from page root to target.
+     `NodeShape` consumes the set; if its id is in `ancestors`, it
+     suppresses `fillPaints` (passes `undefined` to `paintLayers`) so
+     the captured backdrop becomes transparent / white.
+   - `hide` (round-23-v2): id of every node that is NOT an ancestor,
+     NOT the target, NOT a descendant. `NodeShape` returns `null` for
+     these, so unrelated subtrees that happen to overlap the captured
+     bbox via z-order do not bleed in.
+   `audit-round11-screenshots.mjs` calls `__setIsolateNode(c.id)`
    before each per-component shot and clears it between pages.
 
    Verified A/B on `right_top-401_7181`: NOISO crop shows the dark-navy
    page-FRAME bg bleeding through the NO_FILL right_top → ISO crop
    shows white bg (matches figma.png). All 9 `web/right_top-*` slugs
-   are expected to resolve the same way on next audit re-capture. The
-   change suppresses fills only — strokes, effects, descendants of
-   ancestors are untouched, so unrelated visual properties don't shift.
+   resolve the same way on the round-23 re-capture (commit 141ce21).
+
+   Round-23-v1 only had `ancestors`, not `hide`. The MOBILE re-capture
+   surfaced popup-style slugs (e.g. `mobile/frame-2364-1324_16535`,
+   "상담 신청 완료") where the popup sits at the same canvas coords as
+   a privacy-policy screen FRAME (top-level sibling). v1 suppressed
+   the popup's parent fill but left the privacy screen rendering, so
+   privacy-text bled into the popup capture. v2's `hide` set fixes
+   this — verified A/B on the same slug. Suppresses fills + hides
+   subtrees only; strokes, effects, descendants of the target itself
+   are untouched.
 
 **Audit method note:** The "byte-delta + tiny-after" filter found
 30 candidates across 743 pairs. After round-23 investigation, **ZERO are
