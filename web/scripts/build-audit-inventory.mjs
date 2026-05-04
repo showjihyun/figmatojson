@@ -134,6 +134,11 @@ async function main() {
 
   for (let pi = 0; pi < (doc.children ?? []).length; pi++) {
     const page = doc.children[pi];
+    // Skip CANVAS pages hidden from Figma's UI tab strip (e.g. "Internal Only
+    // Canvas" — designer scratchpad holding VARIABLE/BRUSH/SYMBOL definitions
+    // referenced from other pages). Figma's REST API also returns no thumbnail
+    // for these, so the inventory entry has nothing to compare against.
+    if (page.visible === false) continue;
     const pageSlug = uniqueSlug(slugify(page.name), new Set());
     const used = new Set();
     const out = [];

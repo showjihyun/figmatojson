@@ -1,7 +1,7 @@
 # Round 11 — full audit inventory
 
 Source: `docs/메타리치 화면 UI Design.fig`
-Total pages: 6
+Total pages: 5
 
 Selection rules:
 - containers (`FRAME / SECTION / SYMBOL / INSTANCE / COMPONENT_SET`)
@@ -42,14 +42,7 @@ Selection rules:
 | 2 | FRAME | labe | 145:674 | 2024 | 1583 | 185 | 320 | `labe-145_674` |
 | 1 | INSTANCE | sidemenu | 28:168 | 3053 | 1049 | 250 | 417 | `sidemenu-28_168` |
 
-## Internal Only Canvas (`internal-only-canvas`) — 2 captures, page bbox (0,-1124) 1308×2402
-
-| depth | type | name | id | x | y | w | h | slug |
-|---:|---|---|---|---:|---:|---:|---:|---|
-| 1 | SYMBOL | .Building Blocks/status-bar | 425:5214 | 187 | 657 | 360 | 52 | `building-blocksstatus-bar-425_5214` |
-| 1 | SYMBOL | .Building Blocks/status-bar | 425:5237 | 187 | 751 | 360 | 52 | `building-blocksstatus-bar-425_5237` |
-
-## WEB (`web`) — 526 captures, page bbox (-31910,-1831) 91672×18330
+## WEB (`web`) — 528 captures, page bbox (-31910,-1831) 91672×18330
 
 | depth | type | name | id | x | y | w | h | slug |
 |---:|---|---|---|---:|---:|---:|---:|---|
@@ -135,32 +128,34 @@ Selection rules:
 | 3 | FRAME | container | 604:11669 | -14942 | 759 | 1100 | 796 | `container-604_11669` |
 | 1 | SYMBOL | lnb | 400:4266 | -21136 | -271 | 250 | 784 | `lnb-400_4266` |
 | 2 | FRAME | category | 339:2102 | -21136 | -271 | 250 | 221 | `category-339_2102` |
-| 3 | INSTANCE | sidemenu | 339:2106 | -21136 | -253 | 250 | 203 | `sidemenu-339_2106` |
+| 3 | INSTANCE | sidemenu | 339:2106 | -21136 | -253 | 250 | 417 | `sidemenu-339_2106` |
 | 2 | FRAME | category | 339:2107 | -21136 | -48 | 250 | 221 | `category-339_2107` |
-| 3 | INSTANCE | sidemenu | 339:2111 | -21136 | -30 | 250 | 203 | `sidemenu-339_2111` |
+| 3 | INSTANCE | sidemenu | 339:2111 | -21136 | -30 | 250 | 417 | `sidemenu-339_2111` |
 | 2 | FRAME | category | 339:2112 | -21136 | 175 | 250 | 368 | `category-339_2112` |
-| 3 | INSTANCE | sidemenu | 339:2116 | -21136 | 193 | 250 | 350 | `sidemenu-339_2116` |
+| 3 | INSTANCE | sidemenu | 339:2116 | -21136 | 193 | 250 | 417 | `sidemenu-339_2116` |
 | 2 | FRAME | category | 339:2117 | -21136 | 496 | 250 | 270 | `category-339_2117` |
-| 3 | INSTANCE | sidemenu | 339:2121 | -21136 | 514 | 250 | 252 | `sidemenu-339_2121` |
+| 3 | INSTANCE | sidemenu | 339:2121 | -21136 | 514 | 250 | 417 | `sidemenu-339_2121` |
 | 1 | SYMBOL | lnb | 602:9240 | -9223 | -1278 | 250 | 784 | `lnb-602_9240` |
 | 2 | FRAME | category | 602:8910 | -9223 | -1278 | 250 | 74 | `category-602_8910` |
+| 3 | INSTANCE | sidemenu | 602:8913 | -9223 | -1260 | 250 | 417 | `sidemenu-602_8913` |
 | 2 | FRAME | category | 602:8918 | -9223 | -511 | 250 | 270 | `category-602_8918` |
-| 3 | INSTANCE | sidemenu | 602:8922 | -9223 | -493 | 250 | 301 | `sidemenu-602_8922` |
+| 3 | INSTANCE | sidemenu | 602:8922 | -9223 | -493 | 250 | 417 | `sidemenu-602_8922` |
 | 2 | FRAME | category | 602:8914 | -9223 | -1278 | 250 | 270 | `category-602_8914` |
-| 3 | INSTANCE | sidemenu | 602:8917 | -9223 | -1260 | 250 | 252 | `sidemenu-602_8917` |
+| 3 | INSTANCE | sidemenu | 602:8917 | -9223 | -1260 | 250 | 417 | `sidemenu-602_8917` |
 | 2 | FRAME | category | 1119:14743 | -9223 | -1000 | 250 | 221 | `category-1119_14743` |
-| 3 | INSTANCE | sidemenu | 1119:14746 | -9223 | -982 | 250 | 203 | `sidemenu-1119_14746` |
+| 3 | INSTANCE | sidemenu | 1119:14746 | -9223 | -982 | 250 | 417 | `sidemenu-1119_14746` |
 | 2 | FRAME | category | 797:9448 | -9223 | -771 | 250 | 123 | `category-797_9448` |
-| 3 | INSTANCE | sidemenu | 797:9451 | -9223 | -753 | 250 | 105 | `sidemenu-797_9451` |
+| 3 | INSTANCE | sidemenu | 797:9451 | -9223 | -753 | 250 | 417 | `sidemenu-797_9451` |
 | 1 | FRAME | lnb | 1119:14581 | -9606 | -1278 | 250 | 784 | `lnb-1119_14581` |
 | 2 | FRAME | category | 1119:14582 | -9606 | -1278 | 250 | 74 | `category-1119_14582` |
+| 3 | INSTANCE | sidemenu | 1119:14585 | -9606 | -1260 | 250 | 417 | `sidemenu-1119_14585` |
 | 2 | FRAME | category | 1119:14586 | -9606 | -511 | 250 | 270 | `category-1119_14586` |
-| 3 | INSTANCE | sidemenu | 1119:14590 | -9606 | -493 | 250 | 301 | `sidemenu-1119_14590` |
+| 3 | INSTANCE | sidemenu | 1119:14590 | -9606 | -493 | 250 | 417 | `sidemenu-1119_14590` |
 | 2 | FRAME | category | 1119:14591 | -9606 | -1278 | 250 | 495 | `category-1119_14591` |
 | 3 | FRAME | sidemenu | 1119:14647 | -9606 | -1260 | 250 | 252 | `sidemenu-1119_14647` |
 | 3 | FRAME | sidemenu | 1119:14686 | -9606 | -986 | 250 | 203 | `sidemenu-1119_14686` |
 | 2 | FRAME | category | 1119:14595 | -9606 | -775 | 250 | 123 | `category-1119_14595` |
-| 3 | INSTANCE | sidemenu | 1119:14598 | -9606 | -757 | 250 | 105 | `sidemenu-1119_14598` |
+| 3 | INSTANCE | sidemenu | 1119:14598 | -9606 | -757 | 250 | 417 | `sidemenu-1119_14598` |
 | 1 | SECTION | 거래업체 | 367:2981 | -20200 | 5609 | 8620 | 10890 | `unnamed-367_2981` |
 | 2 | FRAME | 조직조회 | 367:6186 | -19960 | 5833 | 1920 | 946 | `unnamed-367_6186` |
 | 3 | FRAME | side | 367:6187 | -19960 | 5833 | 250 | 946 | `side-367_6187` |
