@@ -583,3 +583,99 @@ No new candidates flagged for round 26 in this session — the path-key
 normalization closes out the cluster of round-23-discovered tooling
 issues + round-22..24 INSTANCE-pipeline foundation. Future rounds can
 build on top with confidence that override matching is solid.
+
+## Round 26 close (2026-05-05)
+
+Round 26 picked the largest measured-impact item from the SPEC-
+architecture round-26 candidate list — **TEXT styling override**
+(fontSize / fontName / lineHeight / letterSpacing / etc per-INSTANCE).
+Spec §3.5 (I-S1..I-S7) + impl + 8 unit tests landed in 5cd17d9.
+Baselines refreshed for mobile (e6083cb), WEB (27fa44e). design-setting
++ dash-board both 0-delta — confirms the fix is correctly scoped to
+descendants where text-styling overrides actually exist.
+
+### Pre-flight diagnostic — pivot from prop-binding TEXT/INSTANCE_SWAP
+
+The originally-recommended round-26 candidate was "componentPropNodeField
+TEXT / INSTANCE_SWAP support" (the next item on the round-25 candidate
+list). A pre-flight diagnostic measured the metarich corpus:
+- componentPropRefs.componentPropNodeField: **VISIBLE 74 / TEXT 0 /
+  INSTANCE_SWAP 0**
+- componentPropAssignments.value: boolValue 966 / empty 1090 — no
+  textValue / swapID at all
+- componentPropDefs.type: BOOL 1 / unset 73 — no TEXT / VARIANT
+  property defs
+
+So implementing TEXT/INSTANCE_SWAP prop-binding would land foundation
+code with **zero audit-visible win** on the existing corpus. Pivoted
+to TEXT styling override which has the largest measured impact (1,400+
+fontSize entries / 1,436 fontName / 1,418 styleIdForText / etc.).
+
+Diagnostics scripts (kept in `test-results/round24-triage/` for
+future round prep):
+- `inspect-prop-binding-2.mjs` — componentPropRefs + assignments +
+  defs distribution counter
+- `inspect-stroke-effects.mjs` — symbolOverride field distribution
+- `inspect-text-style.mjs` — wire-format dump of TEXT styling override
+  entries
+
+### Scope of impact
+
+| corpus | modified / total | notes |
+|---|---:|---|
+| design-setting | 0 / 28 | SYMBOL masters (not affected — same as round-25) |
+| dash-board | 0 / 44 | Few/no text-styling overrides on dashboard INSTANCEs |
+| mobile | 26 / 147 | sub-2 KB grows — placeholder text fontWeight/Size shift |
+| WEB | 84 / 529 | alret + modal SYMBOL families with multi-line content reveal |
+
+WEB alret/modal concentration is the round-26 signature — the variant
+descendants' textData newlines were previously truncated because the
+master TEXT's textAutoResize / fontSize was used; with the override
+applied, the second line of body text renders.
+
+### Top wins
+
+- **WEB / alret-1184_14772 + 3 sister fixtures (+6302 B uniform)**:
+  "배정 대상 변경" modal. Pre showed the body as ONE line ("현재
+  선택한 배정 정보가 초기화 됩니다."); the second line ("계속 진행하시겠
+  습니까?") was missing entirely. Post-round-26 both lines render —
+  matches figma.png exactly. The largest single delta in the round.
+- WEB / 12 alret + modal sister fixtures at -2690 / -2755 B uniform:
+  "배정 완료" / "항목 삭제하기" / "DB 분배" variants. Body text
+  thinner / smaller post-fix — variant-stamped fontWeight/fontSize
+  applies for the first time.
+- WEB / modal-arlet-1431_29312 + 1 sister (+1519 B): another alret
+  variant family with fontSize bump.
+- mobile / unnamed-489_8120 + container-489_8123 (+1807 / +1440 B):
+  "비밀번호 변경" form input placeholders pick up the variant text
+  styling.
+
+### Round-25 wins preserved
+
+- mobile/frame-2323-477_6439 (round-24 5-row contract) — pixel-
+  identical: round-25 audit-transform-baking e2e test still passes.
+- web/alret-364_2962 (round-25 path-key contract) — pixel-identical:
+  round-25 audit-transform-baking alret e2e test still passes.
+
+Both e2e gates run green throughout round-26: 2 / 2 contracts hold.
+
+### Round 27 candidate (potential future work)
+
+Rounds 22-26 closed out the major INSTANCE-pipeline override gaps
+identified by metarich audit. Remaining smaller candidates from
+SPEC-architecture §13.2 + symbolOverride field distribution scan:
+
+- **stack* override fields** — `stackPrimarySizing` (2776 entries),
+  `stackPrimaryAlignItems` (1288), `stackChildPrimaryGrow` (1037),
+  `stackSpacing` (294), padding fields (~700) — auto-layout *parameter*
+  overrides per INSTANCE that flow into reflow. Implementing these
+  would let reflow pick up variant-specific layout tweaks. Estimated
+  impact: medium — depends on how many metarich variants use these.
+- **stroke / cornerRadius / opacity override** (~180 + 45 + 11 entries)
+  — small but tractable, mirrors round-12 fillPaints pattern.
+- **componentPropNodeField TEXT / INSTANCE_SWAP** (still 0 in metarich;
+  foundation work for future .fig corpora).
+- **Add a non-metarich audit corpus** to surface entirely new edge
+  cases.
+
+Round 26 ships clean. No new regressions identified.
