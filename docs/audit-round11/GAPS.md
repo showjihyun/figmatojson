@@ -481,3 +481,105 @@ produces a loud-and-visible regression.
 inherited path-key contract; the alret regression is a path-key
 contract bug whose ownership predates round 24. Round 24 ships its
 3 corpus baselines + the e2e gate; WEB defers to round 25.
+
+## Round 25 close (2026-05-05)
+
+Round 25 picked up the path-key normalization candidate from round 24's
+close. Spec §3.1 I-C1 / §3.2 I-P2 (v3) + impl + 11 unit tests landed
+in 28989be. Baselines refreshed for dash-board (77bc01c), mobile
+(320fe46), WEB (721c779). e2e gate at
+`web/e2e/audit-transform-baking.spec.ts` adds the round-25 alret
+contract alongside the round-24 5-row contract.
+
+design-setting was 0-delta (28 / 28 byte-identical) — the audit
+inventory captures SYMBOL master nodes there, not INSTANCEs, so the
+INSTANCE-level path-key fix has no effect. This was the right
+validation signal that round-25's behavior is correctly scoped.
+
+### Scope of impact
+
+| corpus | modified / total | win pattern |
+|---|---:|---|
+| design-setting | 0 / 28 | (SYMBOL masters — not affected) |
+| dash-board | 18 / 44 | KPI toggle labels, dropdown variant values |
+| mobile | 54 / 147 | textarea / form variant content (4-line notes etc.) |
+| WEB | **410 / 529** | full-form variant content, alret modal regression resolved |
+
+WEB at 77.5 % modified is the largest single audit refresh in the
+project. The denominator skew reflects WEB's heavy use of FRAME-wrapped
+INSTANCE descendants — the exact pattern round-25 unlocks.
+
+### Round-24 alret regression resolved
+
+```
+master 64:376 (alret SYMBOL)
+  └ buttons FRAME 60:348  ← FRAME-skip applies under round-25
+      ├ Button 60:341 "취소"  ← visibility override [60:341] now MATCHES
+      └ Button 60:340 "삭제"  ← derivedTransform [60:340] now MATCHES
+```
+
+INSTANCE 364:2962 in WEB now renders as Figma intended:
+- header "DB분배" (variant text override resolves)
+- body "3개의 항목의 분배가 완료되었습니다." (variant override resolves)
+- 취소 button hidden (visibility override resolves)
+- 삭제 button fully visible inside the 330×170 modal bbox
+
+All 18 alret-* INSTANCEs converge to their proper variant
+rendering. e2e gate `web/alret-364_2962 — 삭제 button renders fully
+inside modal` pins the contract by sampling at fx=0.866, fy=0.788
+and asserting blue (b > r AND b > g AND b > 200).
+
+### Top wins (beyond alret)
+
+- WEB: `container-734_9832` (+36 KB) — NS홈쇼핑 broadcast notice. Pre
+  was empty placeholders; post shows full multi-paragraph variant
+  content with attached filename. Single fixture with the largest
+  delta in the entire audit.
+- WEB: `popup-231_722` / `popup-734_9829` (+33.5 KB each) —
+  companion popup containers, same content-reveal pattern.
+- WEB: `container-287_1655` (-12.3 KB) — partner-registration form.
+  Pre had master placeholders; post has stamped values
+  (제휴업체명 "[테스트]제휴업체", 이름 "손보미", 연락처
+  "010-1234-5678"), ID button "확인"→"중복확인",
+  "중복된 ID 입니다." error appears.
+- mobile: `container-481_7624` (+10.1 KB) — "반품 정보" form.
+  Three textareas were master placeholders; post shows full
+  multi-line customer-call note + designer comment (figma exact).
+- dash-board: `frame-2324-576_6875` (+2.4 KB) — KPI summary card.
+  Right-side toggle pair was "Y / N" master defaults; post shows
+  "인정보험료 / 계약건수" Figma variant labels.
+- dash-board: `260319-1201_15784` (-1.3 KB) — top-right "기준년월"
+  dropdown was placeholder "내용을 입력해주세요"; post shows
+  stamped "2025년 12월".
+
+### Round-24 wins preserved
+
+- mobile/`frame-2323-477_6439` (5-row customer list — round-24
+  source case) shifted only -184 B (encoding noise) on the round-25
+  refresh. Round-24's derivedTransform fix is not regressed by the
+  path-key change.
+- e2e gate `audit-transform-baking.spec.ts` runs 2 tests, both pass:
+  the round-24 5-row contract + the round-25 alret contract.
+
+### Risk that didn't materialize
+
+GAPS round-24 close flagged: "many design-setting + dash-board + mobile
+cases were silently wrong due to FRAME-ancestor inclusion → fixing
+this surfaces them as new visual deltas. Some will be wins, some may
+be new regressions." On audit, every spot-checked delta was a win
+(text/visibility overrides finally applying). No new regressions
+identified. The path-key fix is a one-direction unlock — it only
+*enables* override matches that previously silently failed.
+
+### Round-25 verdict
+
+Round 25 ships clean: spec / impl / 11 unit tests / 4-corpus baseline
+refresh / 2 e2e contracts. The path-key contract that quietly
+underpinned visibility / text / fill / propAssignAtPath / swapTarget /
+derivedSize / derivedTransform pipelines is now correct end-to-end and
+matches Figma's wire format.
+
+No new candidates flagged for round 26 in this session — the path-key
+normalization closes out the cluster of round-23-discovered tooling
+issues + round-22..24 INSTANCE-pipeline foundation. Future rounds can
+build on top with confidence that override matching is solid.

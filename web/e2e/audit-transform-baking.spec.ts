@@ -123,6 +123,22 @@ async function clickPageByName(page: Page, needle: string): Promise<void> {
   throw new Error(`page "${needle}" not found in sidebar`);
 }
 
+async function clickWebPage(page: Page): Promise<void> {
+  const pagesSection = page.locator('[data-testid="pages-section"]');
+  await pagesSection.waitFor({ timeout: 30_000 });
+  const pageItems = pagesSection.locator('li[role="listitem"]');
+  const numPages = await pageItems.count();
+  for (let i = 0; i < numPages; i++) {
+    const t = await pageItems.nth(i).textContent();
+    if (t?.toLowerCase().includes('web')) {
+      await pageItems.nth(i).click();
+      await page.waitForTimeout(1500);
+      return;
+    }
+  }
+  throw new Error('WEB page not found in sidebar');
+}
+
 test.describe('audit transform baking contract (round-24)', () => {
   test.skip(!existsSync(SAMPLE_FIG), `sample missing: ${SAMPLE_FIG}`);
 
@@ -163,5 +179,68 @@ test.describe('audit transform baking contract (round-24)', () => {
       r,
       '5th row text must render (non-near-white) — derivedTransform contract per spec §3.10 I-DT2',
     ).toBeLessThan(220);
+  });
+});
+
+/**
+ * Round-25 path-key normalization contract.
+ *
+ * Pins the alret modal regression resolved by round-25 (commits 28989be
+ * + 721c779). Pre-round-25 our walk used the full visit chain for
+ * path-key matching, so the visibility override [60:341] (hide the 취소
+ * Button INSTANCE inside the alret SYMBOL's "buttons" FRAME 60:348)
+ * silently failed — we computed key "60:348/60:341" but Figma stamps
+ * `[60:341]`. Round-25 skips non-INSTANCE container ancestors from the
+ * key, so the override resolves and 취소 is hidden as Figma intended.
+ *
+ * Spec: web-instance-render-overrides.spec.md §3.1 I-C1, §3.2 I-P2 (v3).
+ *
+ * Concrete fixture: web/alret-364_2962 — alret SYMBOL master 64:376
+ * instantiated as INSTANCE 364:2962. Variant override sets header to
+ * "DB분배", body to a completion message, hides 취소, leaves only
+ * the 삭제 button visible at the right edge of the 330×170 modal.
+ */
+test.describe('audit path-key contract (round-25)', () => {
+  test.skip(!existsSync(SAMPLE_FIG), `sample missing: ${SAMPLE_FIG}`);
+
+  test('web/alret-364_2962 — 삭제 button renders fully inside modal (visibility override + size baking align)', async ({ page }) => {
+    test.setTimeout(180_000);
+    await gotoAuditWithFig(page);
+    await clickWebPage(page);
+
+    // Inventory bbox for INSTANCE 364:2962 (alret modal). 330×170.
+    const box = { x: -17488, y: 4135, w: 330, h: 170 };
+    const clip = await fitAndGetClip(page, box);
+
+    // The 삭제 button is the only one that should render under round-25
+    // (취소 hidden by visibility override [60:341]). It's a blue pill
+    // near the bottom-right of the modal — center sits roughly at:
+    //   absolute x in modal ≈ 286 (m02 of buttons FRAME post-derivedSize
+    //     baking is 262, button width 48, so center = 262 + 24 = 286)
+    //   absolute y ≈ 134 (m12 = 118, height = 32, center = 134)
+    // → fractional fx ≈ 0.866, fy ≈ 0.788 within the 330×170 clip.
+    //
+    // Pre round-25 contract: at this point, the 삭제 button was clipped
+    //   past the modal's right edge (the (round-22 derived) buttons
+    //   FRAME was 48 wide, but our pipeline left BOTH master buttons
+    //   inside it because [60:341]'s visibility override didn't match).
+    //   Sampling here landed on the page background or modal-edge gray.
+    // Post round-25 contract: 취소 hidden, 삭제 derivedTransform places
+    //   it at FRAME's left edge (m02=0 inside FRAME), so the button
+    //   spans within the modal bbox. Sample point lands inside the
+    //   solid-blue button background.
+    const point = { fx: 0.866, fy: 0.788 };
+    const pixel = await samplePixel(page, clip, point);
+
+    // 삭제 button bg is the project's primary blue (Pretendard primary,
+    // approximately rgb(76, 120, 248)). Assert blue dominates: B > R AND
+    // B > G AND B > 200. Pre-fix, this position would either be page
+    // dark-navy bg (R≈30, G≈41, B≈59 — B not > 200) or modal white
+    // (R≈G≈B≈255 — B not > R, equal).
+    const [r, g, b] = pixel;
+    expect(
+      b > r && b > g && b > 200,
+      `삭제 button blue must be visible — round-25 path-key contract per spec §3.1 I-C1. Got rgb(${r},${g},${b}).`,
+    ).toBe(true);
   });
 });
