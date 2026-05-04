@@ -8,6 +8,7 @@ import {
 } from './clientNode.js';
 // Round 18 step 4: collectors live in src/instanceOverrides — import direct.
 import {
+  collectDerivedSizesFromInstance,
   collectFillOverridesFromInstance,
   collectPropAssignmentsAtPathFromInstance,
   collectPropAssignmentsFromInstance,
@@ -1317,6 +1318,157 @@ describe('toClientChildForRender — variant swap (spec web-instance-variant-swa
       _renderChildren?: Array<{ type: string; textData?: { characters?: string } }>;
     }>)[0];
     expect(inner._renderChildren?.[0].textData?.characters).toBe('default');
+  });
+});
+
+describe('collectDerivedSizesFromInstance (spec web-instance-autolayout-reflow §3.9, round 22)', () => {
+  it('T-deriv-1: picks up entry.size keyed by slash-joined guidPath', () => {
+    const m = collectDerivedSizesFromInstance({
+      derivedSymbolData: [
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 7 }, { sessionID: 0, localID: 9 }] },
+          size: { x: 103, y: 24 },
+        },
+      ],
+    });
+    expect(m.size).toBe(1);
+    expect(m.get('0:7/0:9')).toEqual({ x: 103, y: 24 });
+  });
+
+  it('T-deriv-2: falls back to derivedTextData.layoutSize when no entry.size (TEXT-only delta)', () => {
+    const m = collectDerivedSizesFromInstance({
+      derivedSymbolData: [
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 45 }] },
+          derivedTextData: { layoutSize: { x: 86, y: 19 } },
+        },
+      ],
+    });
+    expect(m.size).toBe(1);
+    expect(m.get('0:45')).toEqual({ x: 86, y: 19 });
+  });
+
+  it('T-deriv-3: entry.size wins over derivedTextData.layoutSize when both present', () => {
+    const m = collectDerivedSizesFromInstance({
+      derivedSymbolData: [
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 5 }] },
+          size: { x: 100, y: 20 },
+          derivedTextData: { layoutSize: { x: 200, y: 40 } },
+        },
+      ],
+    });
+    expect(m.get('0:5')).toEqual({ x: 100, y: 20 });
+  });
+
+  it('skips entries with corrupt guidPath, missing size, or non-numeric values', () => {
+    const m = collectDerivedSizesFromInstance({
+      derivedSymbolData: [
+        { guidPath: { guids: [{ sessionID: 0, localID: 1 }] }, size: { x: 'oops' as unknown as number, y: 10 } },
+        { guidPath: {}, size: { x: 10, y: 10 } },
+        { size: { x: 10, y: 10 } },
+        { guidPath: { guids: [{ sessionID: 0, localID: 2 }] } }, // no size, no derivedTextData
+        { guidPath: { guids: [{ sessionID: 0, localID: 3 }] }, derivedTextData: {} }, // empty derivedTextData
+      ],
+    });
+    expect(m.size).toBe(0);
+  });
+
+  it('returns empty map when derivedSymbolData is undefined or non-array', () => {
+    expect(collectDerivedSizesFromInstance(undefined).size).toBe(0);
+    expect(collectDerivedSizesFromInstance({}).size).toBe(0);
+    expect(collectDerivedSizesFromInstance({ derivedSymbolData: 'nope' }).size).toBe(0);
+  });
+});
+
+describe('toClientChildForRender — derivedSymbolData size baking (spec §3.9 I-DS2, round 22)', () => {
+  it('T-deriv-4: descendant size is replaced by derivedSizesByPath entry matching its currentKey', () => {
+    // Master: SYMBOL with one TEXT child (size 200×20). Outer instance's
+    // derivedSymbolData says the TEXT (path = "0:55") shrinks to 80×16.
+    // toClientChildForRender called with derivedSizesByPath should emit
+    // out.size = { x: 80, y: 16 } for the TEXT, not the master's 200×20.
+    const text = makeNode('TEXT', 55, {
+      textData: { characters: 'Option 1' },
+      size: { x: 200, y: 20 },
+    });
+
+    const derivedSizes = new Map<string, { x: number; y: number }>([
+      ['0:55', { x: 80, y: 16 }],
+    ]);
+    const out = toClientChildForRender(
+      text, [], new Map(), new Map(), new Map(), new Map(), 0,
+      [], new Map(), new Map(), new Map(), derivedSizes,
+    );
+    expect(out.size).toEqual({ x: 80, y: 16 });
+  });
+
+  it('T-deriv-4b: descendant without matching derived entry keeps master size', () => {
+    const text = makeNode('TEXT', 56, {
+      textData: { characters: 'Option 2' },
+      size: { x: 200, y: 20 },
+    });
+    const derivedSizes = new Map<string, { x: number; y: number }>([
+      ['0:55', { x: 80, y: 16 }], // different key
+    ]);
+    const out = toClientChildForRender(
+      text, [], new Map(), new Map(), new Map(), new Map(), 0,
+      [], new Map(), new Map(), new Map(), derivedSizes,
+    );
+    // Master size preserved (data-spread copies it through).
+    expect(out.size).toEqual({ x: 200, y: 20 });
+  });
+});
+
+describe('toClientNode INSTANCE — derivedSymbolData integration (spec §3.9 I-DS5, round 22)', () => {
+  it('T-deriv-5: outer INSTANCE applies derivedSymbolData size to descendants → CENTER reflow uses new sizes for spacing', () => {
+    // Master: HORIZONTAL CENTER 200×32 with one TEXT child at master width 100.
+    // Outer INSTANCE size 200×32 (unchanged primary), but derivedSymbolData
+    // says TEXT shrank to 60. CENTER reflow with new TEXT size = 60 →
+    // tx = (200 - 60) / 2 = 70 (not the master's 50).
+    const textMaster = makeNode('TEXT', 71, {
+      textData: { characters: 'hello' },
+      size: { x: 100, y: 13 },
+      transform: { m00: 1, m01: 0, m02: 50, m10: 0, m11: 1, m12: 9.5 },
+    });
+    const symMaster = makeNode(
+      'SYMBOL', 70,
+      {
+        size: { x: 200, y: 32 },
+        stackMode: 'HORIZONTAL',
+        stackPrimaryAlignItems: 'CENTER',
+        stackCounterAlignItems: 'CENTER',
+        stackSpacing: 0,
+      },
+      [textMaster],
+    );
+    // Instance: shrinks primary to 160 (so reflow fires per §3.7.5
+    // narrowing — instance < master). derivedSymbolData says TEXT child
+    // shrinks to 60. Expected center: (160 - 60) / 2 = 50.
+    const instance = makeNode('INSTANCE', 80, {
+      size: { x: 160, y: 32 },
+      symbolData: { symbolID: { sessionID: 0, localID: 70 } },
+      derivedSymbolData: [
+        {
+          guidPath: { guids: [{ sessionID: 0, localID: 71 }] },
+          size: { x: 60, y: 13 },
+        },
+      ],
+    });
+
+    const symbolIndex = buildSymbolIndex([symMaster, instance]);
+    const out = toClientNode(instance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{
+      type: string;
+      size?: { x: number; y: number };
+      transform?: { m02: number; m12: number };
+    }>;
+    expect(renderChildren).toHaveLength(1);
+    const t = renderChildren[0];
+    // Derived size applied to TEXT child.
+    expect(t.size).toEqual({ x: 60, y: 13 });
+    // CENTER reflow used the derived size: tx = (160-60)/2 = 50.
+    expect(t.transform!.m02).toBeCloseTo(50);
+    expect(t.transform!.m12).toBeCloseTo(9.5); // (32-13)/2
   });
 });
 

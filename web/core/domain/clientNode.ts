@@ -630,7 +630,12 @@ export function toClientChildForRender(
         if (nestedGrownSize) {
           (out as { _autoGrownSize?: { x?: number; y?: number } })._autoGrownSize = nestedGrownSize;
         }
-        const nestedInstSize = nestedGrownSize ?? nestedOrigInstSize;
+        // Spec §3.9 I-DS3 (round-22): nestedInstSize priority is
+        // grown (round-20) > derived (round-22) > origInstSize > master.
+        // The derivedSize lookup uses currentKey — the outer instance's
+        // derivedSymbolData entry for THIS nested INSTANCE descendant.
+        const nestedDerivedSize = derivedSizesByPath.get(currentKey);
+        const nestedInstSize = nestedGrownSize ?? nestedDerivedSize ?? nestedOrigInstSize;
         // Apply auto-layout reflow to the nested INSTANCE expansion too.
         out._renderChildren = applyInstanceReflow(nestedExpanded, nestedMasterData, nestedMasterSize, nestedInstSize);
         // Spec web-instance-variant-swap §3.3 I-V1: when swap is applied
@@ -689,22 +694,17 @@ export function toClientChildForRender(
   if ((out as { _swapApplied?: boolean })._swapApplied !== undefined) {
     delete (out as { _swapApplied?: boolean })._swapApplied;
   }
-  // Round 21 (deferred): we tried using the outer instance's
-  // derivedSymbolData[].size as Figma's authoritative measurement for
-  // TEXT descendants whose override produced a different rendered
-  // width than master. Applying it improved the dashboard "Excel
-  // 다운로드" icon-text overlap, BUT broke the datepicker rail —
-  // changing only TEXT sizes (not INSTANCE container sizes) shifted
-  // CENTER-reflowed text positions past the parent Dropdown's clip.
-  // Applying to INSTANCE+TEXT broke the rail too because outer
-  // Dropdown's size override (241→111) implies children should
-  // similarly shrink (233→103 per derivedSymbolData), which we don't
-  // do — keeping master child size + applying derived TEXT misaligns.
-  //
-  // The clean fix requires applying derivedSymbolData to ALL nested
-  // sizes (including INSTANCE containers) AND re-running auto-layout
-  // for all parent INSTANCEs whose own sizes changed. Bigger surface
-  // than this round affords. Documented as round-22 candidate.
+  // Spec §3.9 I-DS2 (round-22): apply outer INSTANCE's derivedSymbolData
+  // size to ALL descendant types — not just TEXT. Round-21's TEXT-only
+  // attempt broke the datepicker rail because container INSTANCEs kept
+  // their master sizes while their descendant text shrank. Now every
+  // descendant gets the Figma-derived size when present; subsequent
+  // applyInstanceReflow at the outer INSTANCE boundary picks up the
+  // updated child sizes for correct CENTER/MIN spacing.
+  const derivedSize = derivedSizesByPath.get(currentKey);
+  if (derivedSize) {
+    out.size = { x: derivedSize.x, y: derivedSize.y };
+  }
   return out;
 }
 
