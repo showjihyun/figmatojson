@@ -25,16 +25,15 @@ export default defineConfig({
     stdout: 'pipe',
     stderr: 'pipe',
     env: {
-      // Each e2e test uploads a multi-MB .fig that the server holds in memory
-      // (FsSessionStore keeps every Session indefinitely; the periodic
-      // gcSessions() in server/index.ts only evicts entries older than 1 h,
-      // which never fires inside a ~6-min suite). With Node's default ~4 GB
-      // heap, the cumulative load of all 5 e2e spec files crashes the server
-      // mid-run with "Reached heap limit Allocation failed". Bumping to 8 GB
-      // moves the ceiling well above one full-suite run while leaving the
-      // production process untouched. Real fix is per-test session cleanup
-      // or a shorter GC age — filed for a future round.
-      NODE_OPTIONS: '--max-old-space-size=8192',
+      // Round-23 commit 977f24c bumped NODE heap to 8 GB; the architectural
+      // fix in 4xxxxxx (FsSessionStore.maxCount + SESSION_GC_* env vars)
+      // makes that unnecessary and lets us run the suite at default heap
+      // again. Tight settings here keep memory flat: cap at 5 sessions
+      // (well above any single test's session count) and let GC reclaim
+      // any 30 s-stale entry every 10 s.
+      SESSION_MAX_COUNT: '5',
+      SESSION_GC_AGE_MS: '30000',
+      SESSION_GC_INTERVAL_MS: '10000',
     },
   },
 });

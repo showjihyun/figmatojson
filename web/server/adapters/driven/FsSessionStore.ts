@@ -42,10 +42,45 @@ import {
   buildSymbolIndex,
 } from '../../../core/domain/clientNode.js';
 
+/**
+ * Hard upper bound on simultaneously-held sessions (memory safety).
+ * Each Session pins ~30 MB of expanded documentJson + a tmp working
+ * directory; without a cap the long-lived dev:server eventually trips
+ * Node's heap limit (the e2e suite reproduced this at ~17 sessions in
+ * round-23 commit 977f24c). The cap is a *fallback* — the time-based
+ * gcSessions() in server/index.ts still does the bulk of the work; this
+ * just ensures we never wait an entire GC interval to reclaim memory
+ * when uploads burst faster than the timer fires.
+ *
+ * Configurable via the FsSessionStore constructor; server/index.ts
+ * reads SESSION_MAX_COUNT from the environment.
+ */
+const DEFAULT_MAX_COUNT = 50;
+
+export interface FsSessionStoreOptions {
+  /** Hard cap on `sessions` map size. Default 50. */
+  maxCount?: number;
+}
+
 export class FsSessionStore implements SessionStore {
   private readonly sessions = new Map<string, Session>();
+  private readonly maxCount: number;
+
+  constructor(opts: FsSessionStoreOptions = {}) {
+    this.maxCount = Math.max(1, opts.maxCount ?? DEFAULT_MAX_COUNT);
+  }
 
   async create(figBytes: Uint8Array, origName: string): Promise<Session> {
+    // LRU-by-creation eviction. JS Map preserves insertion order, and ids
+    // are time-prefixed, so the first key is always the oldest session
+    // that's still alive. Loop because a burst-upload could bring us
+    // multiple over the cap in a single tick.
+    while (this.sessions.size >= this.maxCount) {
+      const oldestId = this.sessions.keys().next().value;
+      if (!oldestId) break;
+      await this.destroy(oldestId);
+    }
+
     const dir = mkdtempSync(join(tmpdir(), 'figrev-web-'));
     try {
       const inPath = join(dir, 'in.fig');
@@ -91,8 +126,20 @@ export class FsSessionStore implements SessionStore {
    * Adopt an already-prepared working directory as a new session — used by
    * the snapshot-load path, which materializes extracted/ from base64 sidecars
    * and then needs to register the directory with the store.
+   *
+   * Honors maxCount the same way create() does. Eviction is sync-best-effort
+   * (rmSync is sync but destroy is on the async port) — if a load races a
+   * burst of uploads, we may briefly exceed the cap by 1; that's preferable
+   * to making `adopt` async and rippling through every snapshot caller.
    */
   adopt(session: Session): void {
+    while (this.sessions.size >= this.maxCount) {
+      const oldestId = this.sessions.keys().next().value;
+      if (!oldestId) break;
+      const s = this.sessions.get(oldestId);
+      if (s) rmSync(s.dir, { recursive: true, force: true });
+      this.sessions.delete(oldestId);
+    }
     this.sessions.set(session.id, session);
   }
 

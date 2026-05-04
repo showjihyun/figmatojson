@@ -44,7 +44,14 @@ import { Redo } from '../core/application/Redo.js';
 //
 // Single instances live for the process lifetime. The session-store is
 // stateful (in-memory id→Session map); every other adapter is stateless.
-const sessionStore = new FsSessionStore();
+// Session-store sizing: SESSION_MAX_COUNT caps the in-memory map so an
+// unbounded upload burst can't push the process past Node's heap limit
+// (default 4 GB ≈ 130 sessions of metarich-size documentJson). 50 is
+// generous for interactive use and tight enough for the long-lived
+// e2e suite.
+const sessionStore = new FsSessionStore({
+  maxCount: Number(process.env.SESSION_MAX_COUNT ?? 50),
+});
 const repacker = new KiwiCodec(sessionStore);
 const assetServer = new FsAssetServer(sessionStore);
 const anthropicChat = new AnthropicChat();
@@ -95,19 +102,27 @@ registerRoutes(app, {
 });
 
 
-// Cleanup: simple LRU — drop sessions older than 1h. Uses the FsSessionStore's
-// raw map for iteration; destruction goes through the adapter so the working
-// directory is cleaned up too.
+// Cleanup: time-based eviction by session-id timestamp. Both knobs are
+// env-driven so deployments / tests can tune them:
+//   SESSION_GC_AGE_MS       — evict entries older than this. Default 1 h.
+//   SESSION_GC_INTERVAL_MS  — how often to scan. Default 5 min.
+// The e2e suite sets aggressive values to keep memory flat across its
+// ~3.5 min runtime; production keeps the conservative defaults so a real
+// user's editing session is never garbage-collected mid-edit.
+const SESSION_GC_AGE_MS = Number(process.env.SESSION_GC_AGE_MS ?? 3600 * 1000);
+const SESSION_GC_INTERVAL_MS = Number(
+  process.env.SESSION_GC_INTERVAL_MS ?? 5 * 60 * 1000,
+);
 function gcSessions(): void {
   const now = Date.now();
   for (const id of Array.from(sessionStore.rawMap().keys())) {
     const ageMs = now - parseInt(id.slice(1, 1 + 13), 36);
-    if (ageMs > 3600 * 1000) {
+    if (ageMs > SESSION_GC_AGE_MS) {
       void sessionStore.destroy(id);
     }
   }
 }
-setInterval(gcSessions, 5 * 60 * 1000);
+setInterval(gcSessions, SESSION_GC_INTERVAL_MS);
 
 const port = Number(process.env.PORT ?? 5274);
 serve({ fetch: app.fetch, port }, (info) => {
