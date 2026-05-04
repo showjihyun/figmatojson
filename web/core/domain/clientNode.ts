@@ -22,6 +22,7 @@ import {
   collectTextOverridesFromInstance,
   collectTextStyleOverridesFromInstance,
   collectVisibilityOverridesFromInstance,
+  collectVisualStyleOverridesFromInstance,
   mergeOverridesForNested,
   type Transform2D,
 } from '../../../src/instanceOverrides.js';
@@ -118,8 +119,12 @@ export function toClientNode(
         // only at data spread, so the master's fields stay for fields
         // the override doesn't mention (partial-override merge).
         const textStyleOverridesByPath = collectTextStyleOverridesFromInstance(sd?.symbolOverrides);
+        // Round 27: visual style overrides (strokePaints / opacity /
+        // cornerRadius family). Whitelist of 7 fields (spec §3.6 I-V2).
+        // Applied to all node types (no TEXT guard) at data spread.
+        const visualStyleOverridesByPath = collectVisualStyleOverridesFromInstance(sd?.symbolOverrides);
         const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath),
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath, visualStyleOverridesByPath),
         );
         if (expanded.length > 0) {
           // Spec web-instance-autolayout-reflow: when the INSTANCE size
@@ -478,6 +483,7 @@ export function toClientChildForRender(
   derivedSizesByPath: Map<string, { x: number; y: number }> = new Map(),
   derivedTransformsByPath: Map<string, Transform2D> = new Map(),
   textStyleOverridesByPath: Map<string, Record<string, unknown>> = new Map(),
+  visualStyleOverridesByPath: Map<string, Record<string, unknown>> = new Map(),
 ): DocumentNode {
   if (depth > 8) {
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
@@ -513,7 +519,7 @@ export function toClientChildForRender(
     name: n.name,
     _isInstanceChild: true,
     children: n.children.map((c) =>
-      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, childPathFromOuter, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath),
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, childPathFromOuter, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath, visualStyleOverridesByPath),
     ),
   };
   if (VECTOR_TYPES.has(n.type)) {
@@ -660,8 +666,14 @@ export function toClientChildForRender(
         const mergedTextStyle = innerTextStyle.size > 0
           ? mergeOverridesForNested(textStyleOverridesByPath, innerTextStyle, currentPath)
           : textStyleOverridesByPath;
+        // Round 27: same prefix-merge for visual style overrides
+        // (strokePaints / opacity / cornerRadius family). Spec §3.6 I-V6.
+        const innerVisualStyle = collectVisualStyleOverridesFromInstance((data as { symbolData?: { symbolOverrides?: Array<Record<string, unknown>> } }).symbolData?.symbolOverrides);
+        const mergedVisualStyle = innerVisualStyle.size > 0
+          ? mergeOverridesForNested(visualStyleOverridesByPath, innerVisualStyle, currentPath)
+          : visualStyleOverridesByPath;
         const nestedExpanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes, mergedDerivedTransforms, mergedTextStyle),
+          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes, mergedDerivedTransforms, mergedTextStyle, mergedVisualStyle),
         );
         // Round 20: AUTO-grow primarySizing also fires for nested INSTANCEs
         // (the dashboard "Excel 다운로드" button is a nested INSTANCE inside
@@ -777,6 +789,17 @@ export function toClientChildForRender(
     if (styleOv) {
       Object.assign(out, styleOv);
     }
+  }
+  // Spec §3.6 I-V4/I-V5 (round-27): visual style override (stroke /
+  // opacity / cornerRadius family). Whitelist of 7 fields enforced by
+  // the collector (so this Object.assign is safe). NO TEXT-type guard
+  // — these fields apply to FRAME / RECTANGLE / VECTOR / etc. and the
+  // collector's whitelist already keeps the surface narrow.
+  // Same partial-override merge: master fields preserved when override
+  // doesn't mention them.
+  const visualOv = visualStyleOverridesByPath.get(currentKey);
+  if (visualOv) {
+    Object.assign(out, visualOv);
   }
   return out;
 }

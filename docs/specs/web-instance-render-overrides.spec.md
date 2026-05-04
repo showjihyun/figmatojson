@@ -115,9 +115,30 @@ Figma 가 만든 .fig 안의 INSTANCE 에는 종종 `symbolData.symbolOverrides[
 
 소스 케이스: 메타리치의 1,443 INSTANCE 에서 `fontSize` 가 master 와 다르게 stamp 되어 있는 경우 (예: Dropdown 의 11:506 TEXT 는 master Regular-14 인데 11:529 INSTANCE 에서 Medium 으로 패치). round-25 까지는 master 의 Regular-14 가 그대로 렌더되어 시각적으로 figma 와 다름. round-26 부터는 instance 별 styled font 가 정확히 적용.
 
+### 3.6 Visual style override — stroke / cornerRadius / opacity (round-27)
+
+배경 — round-12 가 `fillPaints` override 를 path-keyed 적용으로 처리. 같은 패턴으로 *시각적* 스타일의 다른 필드들도 INSTANCE 단위로 override 된다. 메타리치 분포: `strokePaints` (122 entries), `cornerRadius` family (5 fields × ~45 entries), `opacity` (11 entries). round-27 은 이 7 필드를 round-26 (TEXT styling) 과 같은 whitelist 패턴으로 적용한다.
+
+- I-V1 `collectVisualStyleOverridesFromInstance(overrides) → Map<pathKey, VisualStyleOverride>`. whitelist 된 *visual* 스타일 필드만 추출. pathKey scheme 은 §3.1 I-C1 (round-25 v3) 그대로.
+- I-V2 **whitelist** — 적용되는 visual 스타일 필드 목록:
+  ```
+  strokePaints, opacity, cornerRadius,
+  rectangleTopLeftCornerRadius, rectangleTopRightCornerRadius,
+  rectangleBottomLeftCornerRadius, rectangleBottomRightCornerRadius
+  ```
+  `strokePaints` 는 array (fillPaints 와 동형 — Paint[]); 나머지 6 필드는 number. `cornerRadius` 와 4개 corner 별 필드의 우선순위는 master 의 일반 룰 그대로 (Figma 의 "independent corners" 토글이 켜진 master 는 4개 별 필드 사용, 아니면 cornerRadius 사용; override 도 master 와 동일 정책으로 stamp).
+- I-V3 entry 가 위 필드를 *하나도* 가지지 않으면 map 에 추가하지 않음 (silent skip — round-26 I-S3 와 동일).
+- I-V4 `toClientChildForRender` 에서 **모든 노드 타입에 적용** (TEXT-type guard 없음). stroke / corner / opacity 는 FRAME / RECTANGLE / VECTOR 등 광범위 노드 타입에 의미. round-26 의 TEXT-only 와 다르게 type guard 없음이 정상.
+- I-V5 적용은 **data spread 직후, 다른 path-keyed override 와 같은 layer**. fillPaints (round-12) / TEXT styling (round-26) / 본 visual style (round-27) 셋 다 같은 시점에 master 값을 override 값으로 patch. 부분 override 보존 — override 가 strokePaints 만 가지면 cornerRadius / opacity 는 master 값 유지.
+- I-V6 nested INSTANCE prefix-merge — round-25 path-key plumbing 그대로 재사용 (round-22/24/26 과 동일).
+- I-V7 master immutability — 적용은 `_renderChildren` 의 per-instance 복제본에만 (§3.3 I-M1 그대로).
+
+소스 케이스: 메타리치 일부 INSTANCE 가 stroke 색을 변형(variant)별로 stamp (예: focus state 의 input 박스 stroke 색). round-26 까지는 master 의 stroke 만 렌더 → 시각적으로 figma 와 다름. round-27 부터는 instance 별 stroke / corner / opacity 가 정확히 적용.
+
 ## 6. 비대상 (v1)
 
-- **stroke / effects / opacity / blend mode override** — 같은 패턴으로 `collectStrokeOverridesFromInstance` 등 추가 필요. fillPaints 가 가장 흔한 케이스라 우선 처리. 다음 라운드에서 확장.
+- ~~**stroke / opacity / cornerRadius override** — 같은 패턴으로 `collectStrokeOverridesFromInstance` 등 추가 필요. fillPaints 가 가장 흔한 케이스라 우선 처리. 다음 라운드에서 확장.~~ **(round-27 §3.6 부터 지원 — stroke + corner family + opacity, 7개 필드 whitelist)**
+- **effects / blendMode override** — round-27 미커버. blend/shadow/blur 가 메타리치 분포에서 작은 영역 (effects ~0, blendMode ~0). 다음 라운드 후보.
 - ~~**TEXT 의 비-글자 스타일 필드 override** (`fontSize`, `fontName`, `lineHeight`, `letterSpacing` 등) — round-4 가 글자만 처리.~~ **(round-26 §3.5 부터 지원 — 14개 필드 whitelist)**
 - **colorVar / variable alias 해석** — override 가 가진 `colorVar.value.alias.guid` 는 Figma 변수 참조. 우리 코드는 literal `color` 값만 읽고 변수 해석은 하지 않는다 (.fig 가 항상 literal 도 함께 저장하므로 시각적 손실 없음).
 - ~~**다단 nested INSTANCE override** — guidPath.length > 1. v1 무시 (I-C4).~~ **(v2 부터 지원 — I-P5 참조)**
