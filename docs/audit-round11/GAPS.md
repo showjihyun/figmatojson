@@ -249,3 +249,112 @@ PR 1 should land first — it removes the loudest visual leak (4 of
 remaining table mojibake. After both, re-run
 `node web/scripts/audit-round11-screenshots.mjs` and re-tile to
 confirm — anything still off is a new round-13 item.
+
+---
+
+## Round 22 follow-up — round 23 candidates (2026-05-04)
+
+After round-22 (`derivedSymbolData[].size` baking applied to ALL
+INSTANCE descendants — commit `64d17bc`) the audit was re-captured
+(`72eab8e`, 682 ours.png). Diff strategy: rank ours.png by byte-delta
+from pre-`64d17bc` baseline, visually inspect every pair where the new
+file dropped >70% AND landed under 10 KB (likely render collapse), then
+sample neighbouring variants to confirm pattern vs one-off.
+
+**Confirmed wins (no change needed):**
+
+- ✅ `design-setting/datepicker-12_749` — 3 calendars + left rail
+  (오늘/최근 1주일/최근 30일/금월/전월/직접 선택) align cleanly,
+  weekday labels (수/목/금/토) no longer clipped. The intended round-22
+  outcome is real.
+- ✅ `design-setting/dropdown-11_532` — 3 Option-1 rows with middle row
+  hover-pill, identical to figma. No regression.
+- ✅ All `dash-board/**/ours.png` — zero byte delta from pre-round-22.
+  Round 22 simply does not affect dashboard renders. The earlier
+  comment in `clientNode.ts` referencing dashboard "Excel 다운로드"
+  icon-text overlap is OBE — round 22's path doesn't reach those nodes.
+- ✅ `web/frame-2307-*` (13 cases, ~46 KB → ~4 KB) — NOT regressions.
+  Tighter post-round-22 bbox crops out an empty area below the title bar.
+  Visible content (e.g. `DB업로드 / 취소 / 다운로드 / 등록`,
+  `DB정보 / 취소 / 삭제 / 수정`) matches figma.
+- ✅ `mobile/section-498_1373`, `mobile/container-498_1334` — bbox
+  correction. Rendered content is the same (or pre-existing content
+  diverges from figma but did so before round 22 too).
+
+**New round-23 candidates:**
+
+| severity | bucket | what's wrong | likely fix point |
+|---|---|---|---|
+| ~~**high**~~ → low | audit-tooling | ~~`web/sidemenu-602_8922`, `web/sidemenu-1119_14590`, `web/sidemenu-339_2121` — entire menu item list disappears post-round-22~~ **RETRACTED after round-23 investigation.** The 3 sidemenu slugs are NOT a render regression. They are inside parent `lnb` FRAMEs/SYMBOLs of size 250×784, but positioned at `transform.m12 = 767` — overlapping the parent boundary so only 17 px of each is visible (or 0 px if the parent uses a SYMBOL master that isn't directly drawn on the WEB canvas, as is the case for 339:2121 inside SYMBOL 400:4266). The audit captures the absolute-coords bbox of the sidemenu (correctly tight to the node), but at that screen position the parent's clip leaves the area mostly empty. Verified by directly capturing the *actually-rendered* sidemenu siblings (602:8917, 1119:14746, 797:9451) — they show menu items (조직·할인 관리, 사원 관리, DB 종류·가격 관리, 자료방, DB 관리) cleanly, matching figma. Renderer is correct. | `web/scripts/build-audit-inventory.mjs` — when emitting an entry, walk parent chain and intersect with the nearest ancestor that has `frameMaskDisabled !== true`; drop the entry if the visible area is < e.g. 50% of node.size. Prevents future spurious "this slug is broken" diagnoses. |
+| ~~med~~ → ✅ resolved | audit-tooling | ~~`web/right_top-*` (9 cases) — breadcrumb strip renders with wrong dark-navy background and "DB 배정" instead of "DB 대장"~~ **RETRACTED + FIXED.** Text was a misread (figma.png is "DB 배정" too — verified after contrast boost; source `symbolOverrides` matches). Background diff was real but not a render bug — it came from the parent page FRAME 401:6772 (`fillPaints[0] = rgb(30,41,59)`) bleeding through the NO_FILL right_top in our in-context render, vs Figma REST API's isolated render (transparent → white). **Resolved** in round 23 by `IsolationContext` + `window.__setIsolateNode(id)` API in `Canvas.tsx` + audit script call before each per-component shot — verified A/B that the captured right_top now has white bg matching figma. | Already implemented (see "Round-23 audit-tooling changes shipped" below). |
+| low | audit-data-hole | `web/category-1119_14586`, `web/category-602_8918` (and 4 sister `category-*` slugs) — `figma.png` missing in audit folder. Re-running `figma-fetch.mjs` returns `[no-url]` from Figma's `/v1/images` API for these node IDs. Confirmed not a code bug — Figma simply won't render these nodes in isolation. Likely cause: they live inside a SYMBOL master (`602:9240` / `400:4266`) and Figma's REST API only renders nodes that have an independently-renderable bbox on a CANVAS (a SYMBOL's children don't qualify). | `web/scripts/figma-fetch.mjs` — when the API returns `no-url` twice in a row, mark the slug as un-fetchable in inventory metadata so it's excluded from "missing figma.png" diagnostics. Or `build-audit-inventory.mjs` — drop SYMBOL-descendant nodes whose only render path is via instances of the SYMBOL (same parent-clip walk improvement above would handle this). |
+
+**Round-23 verdict on round-22:** ✅ The fix is sound. No render regression
+exists. The visible win (datepicker rail, weekday labels) holds; no
+dashboard / dropdown / alret / button / sidemenu / right_top regression.
+Round-22 ships as-is.
+
+### Round-23 audit-tooling changes shipped
+
+Two small infra patches landed this round to prevent the same false-alarm
+classes from re-appearing in future audit cycles:
+
+1. **Parent-clip filter in `build-audit-inventory.mjs`**
+   `MIN_VISIBLE_FRACTION = 0.1` — `visit()` now propagates the nearest
+   container ancestor's bbox as a `clipBox` and skips emission when a
+   node's intersection with its clipBox falls below 10 % of the node's
+   own area. Result on the metarich `.fig`: **7 entries removed** (with 0
+   added), all of them previously-confirmed false alarms:
+   - `web/sidemenu-{339:2121, 602:8922, 1119:14590}` — 0 % visible
+     (positioned at `transform.m12 = 767` inside a 784-tall lnb FRAME,
+     so `clipBox` collapses to 17 px and rejects everything inside)
+   - `web/category-{339:2117, 602:8624, 602:8918, 1119:14586}` — 6.3 %
+     visible (270-tall categories at the same y=767 position)
+
+   Sister sidemenus that ARE partially visible (`sidemenu-1119:14746` at
+   48.7 %, `sidemenu-339:2106` at 48.7 %, etc.) are kept — they render
+   real content even if not the full master bbox.
+
+2. **`?audit=1` white canvas bg in `App.tsx`**
+   The editor chrome `bg-[#0e0e0e]` is replaced with `bg-white` when the
+   audit query param is present. Helps any node whose captured area
+   extends past its parent's bbox (the dark editor bg used to bleed in).
+
+3. **Render-in-isolation in `Canvas.tsx` (`__setIsolateNode` API)**
+   New `IsolationContext` + imperative `window.__setIsolateNode(id)`.
+   When set, the canvas walks the page tree, collects every ancestor id
+   of the target, and any `NodeShape` whose own id is in that set
+   suppresses its `fillPaints` (passes `undefined` to `paintLayers`).
+   Net effect: only the target node + its descendants paint visible
+   pixels in the captured area — same scope as Figma REST API's render.
+   `audit-round11-screenshots.mjs` now calls `__setIsolateNode(c.id)`
+   before each per-component shot and clears it between pages.
+
+   Verified A/B on `right_top-401_7181`: NOISO crop shows the dark-navy
+   page-FRAME bg bleeding through the NO_FILL right_top → ISO crop
+   shows white bg (matches figma.png). All 9 `web/right_top-*` slugs
+   are expected to resolve the same way on next audit re-capture. The
+   change suppresses fills only — strokes, effects, descendants of
+   ancestors are untouched, so unrelated visual properties don't shift.
+
+**Audit method note:** The "byte-delta + tiny-after" filter found
+30 candidates across 743 pairs. After round-23 investigation, **ZERO are
+real render regressions**:
+- 13 `web/frame-2307-*` and 3 mobile `container/section-*` were correct
+  (tighter bbox cropping out empty space) — true negatives, low cost.
+- 9 `web/right_top-*` are NOT regressions — text matches figma exactly;
+  the dark-navy "background" is just the live app's canvas bg showing
+  through the right_top's NO_FILL container, vs Figma REST API's
+  transparent render. (My initial "DB 배정 vs DB 대장" claim was a misread
+  of a near-invisible low-contrast PNG.)
+- 3 `web/sidemenu-*` are audit-inventory aliasing artifacts —
+  the slug points to a node that's clipped by its parent's bbox.
+- 6 `web/category-*` are Figma-API-unrenderable (SYMBOL descendants).
+
+The filter's true-positive rate for "round-22 introduced regression"
+is **0/30 = 0%**. **All 30 false alarms come from one of two audit-tooling
+gaps**: (a) the inventory includes nodes that aren't actually rendered
+visibly on the canvas (parent clip / SYMBOL descendant), and (b) the
+capture background differs between our screenshot and Figma's REST API
+PNG. Both are tractable improvements to the audit harness — none touch
+the renderer. Filed as round-23 tooling tasks in the table above.

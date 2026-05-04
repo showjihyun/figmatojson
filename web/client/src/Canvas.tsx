@@ -134,6 +134,17 @@ interface HoverApi {
 }
 const HoverContext = createContext<HoverApi | null>(null);
 
+// Round-23 audit-tooling: render-in-isolation. When `__setIsolateNode(id)` is
+// called (audit script does this before each capture), this context holds the
+// set of ancestor IDs of the target node. Each NodeShape consults the set;
+// if its own id is in there, it suppresses fillPaints so the captured area
+// shows only the target + its descendants — same as Figma's REST API render
+// of the target in isolation. Suppressing only fills (not strokes / effects)
+// is enough for the metarich case where ancestors are flat-color FRAME
+// backgrounds; revisit if a node ever has a stroke that bleeds into a child
+// audit crop.
+const IsolationContext = createContext<Set<string> | null>(null);
+
 interface CanvasProps {
   page: any;
   selectedGuids: Set<string>;
@@ -303,6 +314,11 @@ function NodeShapeImpl({
   const isSelected = useIsSelected(guid);
   const dragApi = useContext(DragSnapshotContext);
   const hoverApi = useContext(HoverContext);
+  // Round-23 isolation: when this node is an ancestor of the audit target,
+  // pretend it has no fill so children render as if floating on a transparent
+  // background — same scope figma's REST API renders.
+  const isolateAncestors = useContext(IsolationContext);
+  const isAncestorOfIsolated = isolateAncestors?.has((node as { id?: string }).id ?? '') === true;
 
   if (node.visible === false) return null;
   const x = node.transform?.m02 ?? 0;
@@ -600,8 +616,12 @@ function NodeShapeImpl({
   // Multi-paint stacking (round 6 §2). fillPaints[0] is bottom-most;
   // every visible paint becomes its own Konva element. SOLID and
   // gradient paints render as Rects; IMAGE renders as ImageFill.
+  // Round-23: when isolating, suppress fills on ancestors of the target so
+  // captured screenshots compare apples-to-apples with figma.png.
   const layers = paintLayers(
-    node.fillPaints as Array<{ type?: string; visible?: boolean }> | undefined,
+    isAncestorOfIsolated
+      ? undefined
+      : (node.fillPaints as Array<{ type?: string; visible?: boolean }> | undefined),
     w,
     h,
   );
@@ -1421,6 +1441,38 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
     };
   }, [scale, offset, size.width, size.height]);
 
+  // Round-23 audit isolation API: __setIsolateNode(id) walks the page tree
+  // starting from `page`, finds the node with that id, and stores the set of
+  // ancestor ids in state. NodeShape consumes via IsolationContext and
+  // suppresses fillPaints when its own id is in the set. Pass null to clear.
+  // Audit script calls this before each capture so captured screenshots
+  // compare against Figma's REST-API isolated render.
+  const [isolateAncestorIds, setIsolateAncestorIds] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__setIsolateNode = (id: string | null) => {
+      if (!id) {
+        setIsolateAncestorIds(null);
+        return;
+      }
+      const ancestors = new Set<string>();
+      const find = (n: { id?: string; guid?: { sessionID?: number; localID?: number }; children?: unknown[] }, chain: string[]): boolean => {
+        const nid = n.id ?? (n.guid ? `${n.guid.sessionID}:${n.guid.localID}` : '');
+        if (nid === id) {
+          for (const a of chain) ancestors.add(a);
+          return true;
+        }
+        for (const c of (n.children ?? []) as Array<typeof n>) {
+          if (find(c, [...chain, nid])) return true;
+        }
+        return false;
+      };
+      find(page as never, []);
+      setIsolateAncestorIds(ancestors);
+    };
+    return () => { delete (w as Record<string, unknown>).__setIsolateNode; };
+  }, [page]);
+
   // External-store mirror of `selectedGuids`. Created once; .set()'d on every
   // change. NodeShapes subscribe via `useIsSelected` so only the changed
   // guids re-render — the other 35K nodes skip reconciliation entirely.
@@ -1617,6 +1669,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
           <SelectionContext.Provider value={selectionStore}>
             <DragSnapshotContext.Provider value={dragSnapshotApi}>
               <HoverContext.Provider value={hoverApi}>
+                <IsolationContext.Provider value={isolateAncestorIds}>
                 {visibleChildren.map((c) => (
                   // Key by guid so React reuses the same NodeShape instance
                   // when culling shifts the array — avoids unmount/remount of
@@ -1629,6 +1682,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
                     sessionId={sessionId}
                   />
                 ))}
+                </IsolationContext.Provider>
               </HoverContext.Provider>
             </DragSnapshotContext.Provider>
           </SelectionContext.Provider>

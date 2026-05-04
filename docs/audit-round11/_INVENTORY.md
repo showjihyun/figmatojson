@@ -8,6 +8,7 @@ Selection rules:
 - size floors per depth (major × minor): d1 ≥ 50×50, d2 ≥ 80×60, d3 ≥ 150×80
 - depth ≤ 3 from the page root
 - dedupe: same name+size repeated ≥ 10 times under one parent → keep first only
+- parent-clip filter: drop entries whose visible area inside the nearest container ancestor is < 10%
 
 ## design setting (`design-setting`) — 28 captures, page bbox (213,-273) 3090×3100
 
@@ -42,7 +43,7 @@ Selection rules:
 | 2 | FRAME | labe | 145:674 | 2024 | 1583 | 185 | 320 | `labe-145_674` |
 | 1 | INSTANCE | sidemenu | 28:168 | 3053 | 1049 | 250 | 417 | `sidemenu-28_168` |
 
-## WEB (`web`) — 528 captures, page bbox (-31910,-1831) 91672×18330
+## WEB (`web`) — 521 captures, page bbox (-31910,-1831) 91672×18330
 
 | depth | type | name | id | x | y | w | h | slug |
 |---:|---|---|---|---:|---:|---:|---:|---|
@@ -133,13 +134,9 @@ Selection rules:
 | 3 | INSTANCE | sidemenu | 339:2111 | -21136 | -30 | 250 | 417 | `sidemenu-339_2111` |
 | 2 | FRAME | category | 339:2112 | -21136 | 175 | 250 | 368 | `category-339_2112` |
 | 3 | INSTANCE | sidemenu | 339:2116 | -21136 | 193 | 250 | 417 | `sidemenu-339_2116` |
-| 2 | FRAME | category | 339:2117 | -21136 | 496 | 250 | 270 | `category-339_2117` |
-| 3 | INSTANCE | sidemenu | 339:2121 | -21136 | 514 | 250 | 417 | `sidemenu-339_2121` |
 | 1 | SYMBOL | lnb | 602:9240 | -9223 | -1278 | 250 | 784 | `lnb-602_9240` |
 | 2 | FRAME | category | 602:8910 | -9223 | -1278 | 250 | 74 | `category-602_8910` |
 | 3 | INSTANCE | sidemenu | 602:8913 | -9223 | -1260 | 250 | 417 | `sidemenu-602_8913` |
-| 2 | FRAME | category | 602:8918 | -9223 | -511 | 250 | 270 | `category-602_8918` |
-| 3 | INSTANCE | sidemenu | 602:8922 | -9223 | -493 | 250 | 417 | `sidemenu-602_8922` |
 | 2 | FRAME | category | 602:8914 | -9223 | -1278 | 250 | 270 | `category-602_8914` |
 | 3 | INSTANCE | sidemenu | 602:8917 | -9223 | -1260 | 250 | 417 | `sidemenu-602_8917` |
 | 2 | FRAME | category | 1119:14743 | -9223 | -1000 | 250 | 221 | `category-1119_14743` |
@@ -149,8 +146,6 @@ Selection rules:
 | 1 | FRAME | lnb | 1119:14581 | -9606 | -1278 | 250 | 784 | `lnb-1119_14581` |
 | 2 | FRAME | category | 1119:14582 | -9606 | -1278 | 250 | 74 | `category-1119_14582` |
 | 3 | INSTANCE | sidemenu | 1119:14585 | -9606 | -1260 | 250 | 417 | `sidemenu-1119_14585` |
-| 2 | FRAME | category | 1119:14586 | -9606 | -511 | 250 | 270 | `category-1119_14586` |
-| 3 | INSTANCE | sidemenu | 1119:14590 | -9606 | -493 | 250 | 417 | `sidemenu-1119_14590` |
 | 2 | FRAME | category | 1119:14591 | -9606 | -1278 | 250 | 495 | `category-1119_14591` |
 | 3 | FRAME | sidemenu | 1119:14647 | -9606 | -1260 | 250 | 252 | `sidemenu-1119_14647` |
 | 3 | FRAME | sidemenu | 1119:14686 | -9606 | -986 | 250 | 203 | `sidemenu-1119_14686` |
@@ -267,7 +262,6 @@ Selection rules:
 | 3 | FRAME | category | 602:8612 | -8657 | -1674 | 250 | 123 | `category-602_8612` |
 | 3 | FRAME | category | 602:8616 | -8657 | -1543 | 250 | 172 | `category-602_8616` |
 | 3 | FRAME | category | 602:8620 | -8657 | -1363 | 250 | 417 | `category-602_8620` |
-| 3 | FRAME | category | 602:8624 | -8657 | -907 | 250 | 270 | `category-602_8624` |
 | 1 | SECTION | 변경화면 | 602:8825 | -8675 | -617 | 10243 | 12610 | `unnamed-602_8825` |
 | 2 | FRAME | 지점정보 관리 | 602:8992 | -8435 | -393 | 1920 | 946 | `unnamed-602_8992` |
 | 3 | FRAME | side | 602:8993 | -8435 | -393 | 250 | 946 | `side-602_8993` |

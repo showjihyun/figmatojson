@@ -111,10 +111,24 @@ async function main() {
     for (const c of p.children) {
       const dir = resolve(OUT_ROOT, p.slug, c.slug);
       mkdirSync(dir, { recursive: true });
+      // Round-23 isolation: tell the canvas to suppress fills on every
+      // ancestor of this node before fitAndClip + screenshot, so the captured
+      // crop matches Figma REST API's "render in isolation" behavior. Without
+      // this, parent FRAMEs with their own background fills (e.g. the dark
+      // navy page mockup behind every right_top breadcrumb) bleed into the
+      // crop. The fitAndClip+screenshot path is unchanged; we just add one
+      // tiny preamble to set isolation and one to clear it after.
+      await page.evaluate((id) => window.__setIsolateNode?.(id), c.id);
+      // Wait one frame so the isolation re-render lands before clip+shoot.
+      await page.waitForTimeout(50);
       const clip = await fitAndClip({ x: c.x, y: c.y, w: c.w, h: c.h }, 32);
       await page.screenshot({ path: resolve(dir, 'ours.png'), clip });
       console.log(`  [shot] ${c.slug}`);
     }
+    // Clear isolation between pages — overview captures need the full
+    // composition. (Per-component sets get overridden in the next page's
+    // first iteration anyway, but explicit clear is cheap.)
+    await page.evaluate(() => window.__setIsolateNode?.(null));
   }
 
   await browser.close();

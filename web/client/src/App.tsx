@@ -354,7 +354,18 @@ export function App() {
             onDocChange={onRefreshDoc}
           />
         </aside>
-        <div className="relative flex-1 overflow-hidden bg-[#0e0e0e]">
+        {/* Round-23 audit-tooling: ?audit=1 swaps the dark editor chrome for a
+            white canvas bg so screenshots compare like-for-like against Figma's
+            REST API renders (which use a transparent → white background).
+            Without this, nodes with NO_FILL containers (right_top breadcrumb
+            strip etc.) show #0e0e0e in our capture vs white in figma.png and
+            register as 9 spurious "background mismatch" gaps in the audit.
+            See docs/audit-round11/GAPS.md "Round 22 follow-up". */}
+        <div className={`relative flex-1 overflow-hidden ${
+          typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('audit') === '1'
+            ? 'bg-white'
+            : 'bg-[#0e0e0e]'
+        }`}>
           {currentPage ? (
             <Suspense
               fallback={

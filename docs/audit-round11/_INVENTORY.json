@@ -1,5 +1,5 @@
 {
-  "sessionId": "smoqwudjk3na8",
+  "sessionId": "smor5oq4r21oq",
   "pages": [
     {
       "index": 0,
@@ -1291,28 +1291,6 @@
           "h": 417
         },
         {
-          "slug": "category-339_2117",
-          "name": "category",
-          "type": "FRAME",
-          "id": "339:2117",
-          "depth": 2,
-          "x": -21136,
-          "y": 496,
-          "w": 250,
-          "h": 270
-        },
-        {
-          "slug": "sidemenu-339_2121",
-          "name": "sidemenu",
-          "type": "INSTANCE",
-          "id": "339:2121",
-          "depth": 3,
-          "x": -21136,
-          "y": 514,
-          "w": 250,
-          "h": 417
-        },
-        {
           "slug": "lnb-602_9240",
           "name": "lnb",
           "type": "SYMBOL",
@@ -1342,28 +1320,6 @@
           "depth": 3,
           "x": -9223,
           "y": -1260,
-          "w": 250,
-          "h": 417
-        },
-        {
-          "slug": "category-602_8918",
-          "name": "category",
-          "type": "FRAME",
-          "id": "602:8918",
-          "depth": 2,
-          "x": -9223,
-          "y": -511,
-          "w": 250,
-          "h": 270
-        },
-        {
-          "slug": "sidemenu-602_8922",
-          "name": "sidemenu",
-          "type": "INSTANCE",
-          "id": "602:8922",
-          "depth": 3,
-          "x": -9223,
-          "y": -493,
           "w": 250,
           "h": 417
         },
@@ -1463,28 +1419,6 @@
           "depth": 3,
           "x": -9606,
           "y": -1260,
-          "w": 250,
-          "h": 417
-        },
-        {
-          "slug": "category-1119_14586",
-          "name": "category",
-          "type": "FRAME",
-          "id": "1119:14586",
-          "depth": 2,
-          "x": -9606,
-          "y": -511,
-          "w": 250,
-          "h": 270
-        },
-        {
-          "slug": "sidemenu-1119_14590",
-          "name": "sidemenu",
-          "type": "INSTANCE",
-          "id": "1119:14590",
-          "depth": 3,
-          "x": -9606,
-          "y": -493,
           "w": 250,
           "h": 417
         },
@@ -2763,17 +2697,6 @@
           "y": -1363,
           "w": 250,
           "h": 417
-        },
-        {
-          "slug": "category-602_8624",
-          "name": "category",
-          "type": "FRAME",
-          "id": "602:8624",
-          "depth": 3,
-          "x": -8657,
-          "y": -907,
-          "w": 250,
-          "h": 270
         },
         {
           "slug": "unnamed-602_8825",

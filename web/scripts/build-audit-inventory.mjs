@@ -34,6 +34,22 @@ const MIN_DIM_BY_DEPTH = { 1: 50, 2: 60, 3: 80 };
 const MAX_DEPTH = 3;
 const DEDUPE_THRESHOLD = 10;
 
+// Round 23: skip nodes whose visible area inside their nearest clipping
+// ancestor is less than this fraction of the node's own area. The audit
+// can't capture content that the parent clips out — figma.png and ours.png
+// would compare two different scenes (figma renders the node in isolation,
+// ours captures the canvas region behind the parent's clip). 0.1 (10%)
+// drops the obvious false-alarm cluster:
+//   - 0%: sidemenu-{339:2121, 602:8922, 1119:14590} positioned at y=767
+//     inside a 784-tall lnb (overlap 17 px of 417 → first miss but the
+//     clip box becomes 17 high which then rejects everything inside)
+//   - 6.3%: category-{339:2117, 602:8918, 1119:14586, 602:8624} positioned
+//     at y=767 inside the same lnb (270 high, only 17 px visible)
+// Threshold tuned to KEEP the 25-48% partially-visible sidemenus
+// (sidemenu-1119:14746 at 48.7% etc.) which still render usable content
+// for comparison.
+const MIN_VISIBLE_FRACTION = 0.1;
+
 function slugify(s) {
   if (!s) return 'unnamed';
   return String(s)
@@ -75,7 +91,29 @@ function pageBox(page) {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
-function visit(node, depth, parentAbsX, parentAbsY, used, out) {
+// Intersect two axis-aligned bboxes; returns null if no overlap.
+function intersectBox(a, b) {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.w, b.x + b.w);
+  const bottom = Math.min(a.y + a.h, b.y + b.h);
+  const w = right - x;
+  const h = bottom - y;
+  return w > 0 && h > 0 ? { x, y, w, h } : null;
+}
+
+// Round 23: visit() now carries `clipBox` — the nearest clipping ancestor's
+// absolute-coords bbox. A node is skipped from emission if its visible area
+// (intersected with clipBox) is below MIN_VISIBLE_FRACTION. Recursion still
+// proceeds into children even if the parent itself was skipped — a clipped
+// FRAME can still have visible descendants in our test cases — but we narrow
+// the clipBox each time we descend into a container so the ratchet only
+// tightens. (Container types are CONTAINER_TYPES; we treat all of them as
+// clipping for inventory purposes — the goal is "would Figma's REST render
+// this on its own AND would our screenshot capture match", and any
+// container-shaped ancestor that crops the node makes the comparison
+// unfair.)
+function visit(node, depth, parentAbsX, parentAbsY, clipBox, used, out) {
   const t = node.transform ?? {};
   const sz = node.size ?? {};
   const absX = parentAbsX + (t.m02 ?? 0);
@@ -86,7 +124,17 @@ function visit(node, depth, parentAbsX, parentAbsY, used, out) {
   const minMin = MIN_DIM_BY_DEPTH[depth] ?? 50;
   const maj = Math.max(w, h);
   const min = Math.min(w, h);
-  if (CONTAINER_TYPES.has(node.type) && maj >= minMaj && min >= minMin && depth <= MAX_DEPTH) {
+  let visibleFraction = 1;
+  if (clipBox && w > 0 && h > 0) {
+    const vis = intersectBox({ x: absX, y: absY, w, h }, clipBox);
+    visibleFraction = vis ? (vis.w * vis.h) / (w * h) : 0;
+  }
+  if (
+    CONTAINER_TYPES.has(node.type) &&
+    maj >= minMaj && min >= minMin &&
+    depth <= MAX_DEPTH &&
+    visibleFraction >= MIN_VISIBLE_FRACTION
+  ) {
     const baseSlug = `${slugify(node.name)}-${node.id?.replace(':', '_') ?? 'noid'}`;
     const slug = uniqueSlug(baseSlug, used);
     out.push({
@@ -99,6 +147,13 @@ function visit(node, depth, parentAbsX, parentAbsY, used, out) {
     });
   }
   if (depth < MAX_DEPTH && Array.isArray(node.children)) {
+    // Tighten clipBox for descendants when this node is itself a container —
+    // intersect with current clip if any, else seed from this node's bbox.
+    let childClip = clipBox;
+    if (CONTAINER_TYPES.has(node.type) && w > 0 && h > 0) {
+      const myBox = { x: absX, y: absY, w, h };
+      childClip = clipBox ? (intersectBox(myBox, clipBox) ?? myBox) : myBox;
+    }
     // Dedupe pass: if ≥ DEDUPE_THRESHOLD direct kids share the same name+w+h,
     // keep only the first. Cheap O(n) sketch via Map<key, count>.
     const sigCount = new Map();
@@ -113,7 +168,7 @@ function visit(node, depth, parentAbsX, parentAbsY, used, out) {
         if (seenSig.has(k)) continue;
         seenSig.add(k);
       }
-      visit(c, depth + 1, absX, absY, used, out);
+      visit(c, depth + 1, absX, absY, childClip, used, out);
     }
   }
 }
@@ -143,8 +198,10 @@ async function main() {
     const used = new Set();
     const out = [];
     const pb = pageBox(page);
+    // Page root has no clipping (CANVAS isn't a frame). Children start with
+    // clipBox = undefined; the first container they enter seeds the clipBox.
     for (const c of page.children ?? []) {
-      visit(c, 1, 0, 0, used, out);
+      visit(c, 1, 0, 0, undefined, used, out);
     }
     inv.pages.push({
       index: pi,
@@ -169,6 +226,7 @@ async function main() {
     `- size floors per depth (major × minor): d1 ≥ 50×50, d2 ≥ 80×60, d3 ≥ 150×80`,
     `- depth ≤ ${MAX_DEPTH} from the page root`,
     `- dedupe: same name+size repeated ≥ ${DEDUPE_THRESHOLD} times under one parent → keep first only`,
+    `- parent-clip filter: drop entries whose visible area inside the nearest container ancestor is < ${Math.round(MIN_VISIBLE_FRACTION * 100)}%`,
     '',
   ];
   for (const p of inv.pages) {
