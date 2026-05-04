@@ -35,7 +35,7 @@ Figma 가 만든 .fig 안의 INSTANCE 에는 종종 `symbolData.symbolOverrides[
 
 ### 3.1 Collection
 
-- I-C1 `collectFillOverridesFromInstance(overrides)` 와 `collectTextOverridesFromInstance(overrides)` 는 모두 `Map<pathKey, value>` 형태를 반환. **`pathKey`** = `guids.map(g => '${sessionID}:${localID}').join('/')` — outer instance master root 부터 override 타겟까지의 full path. 예: `"11:524/11:506"`. v1 의 single-step 케이스도 자동 호환 — 길이 1이면 `"11:506"` 처럼 슬래시 없는 키가 되어 동일하게 매칭.
+- I-C1 `collectFillOverridesFromInstance(overrides)` 와 `collectTextOverridesFromInstance(overrides)` 는 모두 `Map<pathKey, value>` 형태를 반환. **`pathKey`** = `guids.map(g => '${sessionID}:${localID}').join('/')` — *Figma의 path-key scheme* 그대로 받아 그대로 키로 사용. **(v3, round-25)** Figma scheme의 의미: outer instance master root 부터 override 타겟까지 *INSTANCE-typed ancestor + 타겟 노드* 만 포함; **FRAME / GROUP / SECTION 등 non-INSTANCE 컨테이너 ancestor 는 path 에서 skip**. 예: master 64:376 (alret SYMBOL) → buttons FRAME 60:348 → 60:341 (Button INSTANCE) — 60:341 의 path-key 는 `"60:341"` (FRAME 60:348 미포함). master 64:376 → 60:340 (Button INSTANCE) → inner master 5:44 의 TEXT 5:45 — 5:45 의 path-key 는 `"60:340/5:45"`. ~~outer instance master root 부터 override 타겟까지의 full path~~ **(deprecated v3)** — round-22/24의 잠재 버그 (FRAME 안쪽 타겟 매칭 실패) 가 round-25 에서 해결.
 - I-C2 `fillPaints` (또는 `textData.characters`) 가 없는 entry 는 무시. `Array.isArray` (또는 `typeof === 'string'`) 체크 통과해야 함.
 - I-C3 `guidPath.guids` 가 비어있거나 어느 항목이라도 `{sessionID, localID}` 정수 쌍이 아니면 entry 무시 (silently skip — corrupt override 가 전체 instance 렌더를 깨면 안 됨).
 - I-C4 ~~`guidPath.guids.length > 1` 은 v1 에서 무시~~ **(deprecated v2)** — multi-step path 를 정상 처리.
@@ -44,7 +44,7 @@ Figma 가 만든 .fig 안의 INSTANCE 에는 종종 `symbolData.symbolOverrides[
 ### 3.2 Propagation
 
 - I-P1 `toClientNode` 의 INSTANCE 분기가 `collectTextOverridesFromInstance` 와 `collectFillOverridesFromInstance` 둘 다 호출.
-- I-P2 두 override map 모두 `toClientChildForRender` 의 인자로 전달. 시그니처에 추가로 **`pathFromOuter: string[]`** 인자 (outer instance master root 부터 현재 노드의 *부모* 까지의 guidStr chain — 진입 시 `[]`).
+- I-P2 두 override map 모두 `toClientChildForRender` 의 인자로 전달. 시그니처에 추가로 **`pathFromOuter: string[]`** 인자. **(v3, round-25)** `pathFromOuter` 의 의미: outer instance master root 부터 현재 노드의 *부모* 까지의 *INSTANCE-typed ancestor* chain (FRAME/GROUP/SECTION 컨테이너는 미포함). 자식 재귀 시 `pathFromOuter` 결정: `n.type === 'INSTANCE'` 이면 `[...pathFromOuter, n.guidStr]` (INSTANCE 가 ancestor chain 에 추가), 그 외에는 `pathFromOuter` 그대로 전달 (FRAME/GROUP/etc. 은 chain 에 추가 안 함). 진입 시 `[]`.
 - I-P3 `toClientChildForRender` 진입 시 `currentPath = [...pathFromOuter, currentGuidStr]`, `currentKey = currentPath.join('/')`. 데이터 spread 직후 `fillOverrides.get(currentKey)` 매칭 시 `out.fillPaints` 교체. TEXT 의 경우 `textOverrides.get(currentKey)` 매칭 시 `out._renderTextOverride` 설정.
 - I-P4 자식 재귀 시 `pathFromOuter = currentPath` 로 전달. master 의 모든 자손은 outer instance 기준 path 를 누적 보유.
 - I-P5 **Nested INSTANCE 안의 자손에 대한 override 합치기**: 자식이 INSTANCE 이고 그 INSTANCE 가 자기 own `symbolData.symbolOverrides` 를 가지면, inner own override 의 path 키들을 *현재 path 로 prefix* 한 새 항목으로 outer overrides 에 merge 한 뒤 inner expansion 진행. 즉 inner 의 single-step `[innerTextGuid]` 는 `[...currentPath, innerTextGuid]` 와 동등한 키로 변환되어 inner 트리 안에서 매칭 가능. inner 가 자기 own override 를 *가지지 않아도* outer overrides 가 path 매칭으로 inner 자손까지 도달한다 (메타리치 Dropdown 케이스).

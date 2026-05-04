@@ -475,10 +475,17 @@ export function toClientChildForRender(
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
   }
   // Path tracking: append THIS node's guidStr so descendants see their
-  // full chain from the outer instance master root. Override Maps are
-  // keyed by the same join scheme. Spec §3.2 I-P3 / I-P4.
+  // chain from the outer instance master root. Override Maps are keyed by
+  // the same join scheme. Spec §3.2 I-P3 / I-P4 (round-25 v3): the chain
+  // contains *INSTANCE-typed ancestors only* + the current node — FRAME /
+  // GROUP / SECTION container ancestors are skipped (Figma's path-key
+  // scheme matches its symbolOverrides + derivedSymbolData wire format).
   const currentPath = n.guidStr ? [...pathFromOuter, n.guidStr] : pathFromOuter;
   const currentKey = currentPath.join('/');
+  // For child recursion: only INSTANCE nodes contribute to the ancestor
+  // chain. Non-INSTANCE containers pass `pathFromOuter` through unchanged
+  // so descendants compute the same key Figma stamps.
+  const childPathFromOuter = n.type === 'INSTANCE' ? currentPath : pathFromOuter;
   const data = (n.data ?? {}) as Record<string, unknown>;
 
   // Spec §3.4 I-P11 (round 15): merge in any path-keyed prop assignments
@@ -498,7 +505,7 @@ export function toClientChildForRender(
     name: n.name,
     _isInstanceChild: true,
     children: n.children.map((c) =>
-      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, currentPath, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath),
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, childPathFromOuter, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath),
     ),
   };
   if (VECTOR_TYPES.has(n.type)) {

@@ -188,7 +188,11 @@ describe('toClientChildForRender — fillPaints override', () => {
     expect((out.fillPaints as Array<{ color: { r: number } }>)[0].color.r).toBe(0.5);
   });
 
-  it('threads override down through a non-instance descendant (FRAME → VECTOR), keyed by full path', () => {
+  it('threads override down through a non-instance descendant (FRAME → VECTOR), FRAME skipped from key (round-25 v3)', () => {
+    // Round-25: Figma's path-key scheme skips FRAME / GROUP / SECTION
+    // ancestors. The VECTOR's path-key from outer master root is just
+    // `"0:50"` — FRAME 100 doesn't contribute. Pre-round-25 we used
+    // `"0:100/0:50"` which silently failed to match Figma's `[50]`.
     const inner = makeNode('VECTOR', 50, {
       fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }],
     });
@@ -200,8 +204,7 @@ describe('toClientChildForRender — fillPaints override', () => {
       [],
       new Map(),
       new Map(),
-      // The full path from outer master root is "0:100/0:50" — not just "0:50".
-      new Map([['0:100/0:50', overrideFills]]),
+      new Map([['0:50', overrideFills]]), // FRAME 100 skipped from key
       new Map(),
       0,
     );
@@ -209,9 +212,12 @@ describe('toClientChildForRender — fillPaints override', () => {
     expect(child.fillPaints).toBe(overrideFills);
   });
 
-  it('per-instance visibility override hides matching descendants without touching the master', () => {
+  it('per-instance visibility override hides matching descendants without touching the master (round-25 v3 path-key)', () => {
     // Common Figma pattern: a Button instance hides the trailing chevron
     // icon for the "확인" variant while other instances keep it visible.
+    // Round-25: the icon's path-key is just `"0:50"` (FRAME 100 skipped).
+    // This was the alret-modal regression case fixed by round-25 — pre-fix
+    // the full-chain key `"0:100/0:50"` failed to match Figma's `[50]`.
     const icon = makeNode('VECTOR', 50, {
       fillPaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }],
     });
@@ -223,7 +229,7 @@ describe('toClientChildForRender — fillPaints override', () => {
       new Map(),
       new Map(),
       new Map(),
-      new Map([['0:100/0:50', false]]), // hide the icon at this path
+      new Map([['0:50', false]]), // FRAME 100 skipped from key
       0,
     );
     const child = (out.children as Array<{ visible?: boolean }>)[0];
@@ -232,36 +238,45 @@ describe('toClientChildForRender — fillPaints override', () => {
     expect(icon.data.visible).toBeUndefined();
   });
 
-  it('disambiguates two visits to the same target via different paths (the metarich Dropdown bug)', () => {
-    // master root has two FRAME children A and B; each contains a VECTOR
-    // with the SAME guid (50). Without path keys, an override targeting
-    // VECTOR 50 would apply to BOTH. With path keys, A/50 and B/50 are
-    // distinct and only the matching one is overridden.
+  it('disambiguates two visits to the same target via different INSTANCE paths (round-25 v3)', () => {
+    // Round-25 v3: the disambiguation Figma needs in real .fig files is
+    // when the SAME master is instantiated multiple times. Each outer
+    // INSTANCE has a unique guid, and the chain of INSTANCE-typed
+    // ancestors disambiguates descendants that share leaf guidStrs after
+    // master-instance expansion. The FRAME-disambiguation case the
+    // pre-round-25 test asserted does NOT occur in real .fig files —
+    // within a single master, descendant guids are unique.
     //
-    // Note: the same guid appearing twice in a tree is unusual, but it's
-    // exactly what happens with master-instance expansion in real Figma
-    // files (multiple INSTANCEs of the same master share descendant guids
-    // when expanded). Path-keyed overrides are the fix.
-    const vecA = makeNode('VECTOR', 50, {
+    // Test fixture: an outer master with two INSTANCE children pointing
+    // to the same inner master. Outer's symbolOverrides path-keyed on
+    // each INSTANCE's path resolves correctly to that INSTANCE's
+    // expansion only.
+    const innerVector = makeNode('VECTOR', 50, {
       fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }],
     });
-    const vecB = makeNode('VECTOR', 50, {
-      fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }],
+    const masterInner = makeNode('SYMBOL', 200, {}, [innerVector]);
+    const instanceA = makeNode('INSTANCE', 1, {
+      symbolData: { symbolID: { sessionID: 0, localID: 200 } },
     });
-    const frameA = makeNode('FRAME', 1, {}, [vecA]);
-    const frameB = makeNode('FRAME', 2, {}, [vecB]);
+    const instanceB = makeNode('INSTANCE', 2, {
+      symbolData: { symbolID: { sessionID: 0, localID: 200 } },
+    });
+    const symbolIndex = new Map<string, TreeNode>([['0:200', masterInner]]);
 
     const aFill = [{ type: 'SOLID', color: { r: 0, g: 1, b: 0, a: 1 } }];
     const bFill = [{ type: 'SOLID', color: { r: 0, g: 0, b: 1, a: 1 } }];
+    // INSTANCE-disambiguated keys: `<outer-instance-id>/<inner-target>`.
     const overrides = new Map<string, unknown[]>([
       ['0:1/0:50', aFill],
       ['0:2/0:50', bFill],
     ]);
 
-    const outA = toClientChildForRender(frameA, [], new Map(), new Map(), overrides, new Map(), 0);
-    const outB = toClientChildForRender(frameB, [], new Map(), new Map(), overrides, new Map(), 0);
-    expect((outA.children as Array<{ fillPaints?: unknown }>)[0].fillPaints).toBe(aFill);
-    expect((outB.children as Array<{ fillPaints?: unknown }>)[0].fillPaints).toBe(bFill);
+    const outA = toClientChildForRender(instanceA, [], symbolIndex, new Map(), overrides, new Map(), 0);
+    const outB = toClientChildForRender(instanceB, [], symbolIndex, new Map(), overrides, new Map(), 0);
+    const childA = (outA._renderChildren as Array<{ fillPaints?: unknown }>)[0];
+    const childB = (outB._renderChildren as Array<{ fillPaints?: unknown }>)[0];
+    expect(childA.fillPaints).toBe(aFill);
+    expect(childB.fillPaints).toBe(bFill);
   });
 
   it('does NOT leak outer-instance overrides through a nested INSTANCE (spec I-P5)', () => {
@@ -560,7 +575,9 @@ describe('toClientChildForRender — component-property visibility binding (spec
     const wrapper = makeNode('FRAME', 100, {}, [icon]);
 
     const propAssignments = new Map<string, boolean>([['0:1', false]]);
-    const visibilityOverrides = new Map<string, boolean>([['0:100/0:50', true]]);
+    // Round-25: FRAME 100 is skipped from the path-key, so the icon's
+    // path-key is just `"0:50"`.
+    const visibilityOverrides = new Map<string, boolean>([['0:50', true]]);
     const out = toClientChildForRender(
       wrapper, [], new Map(), new Map(), new Map(), visibilityOverrides, 0, [], propAssignments,
     );
@@ -1671,8 +1688,10 @@ describe('toClientNode INSTANCE — derivedSymbolData transform integration (spe
       size: { x: 200, y: 32 }, // unchanged → no reflow trigger
       symbolData: { symbolID: { sessionID: 0, localID: 70 } },
       derivedSymbolData: [
+        // Round-25 v3: FRAME 50 is skipped from the path-key, so the TEXT's
+        // path-key is just `[55]` (Figma's wire format).
         {
-          guidPath: { guids: [{ sessionID: 0, localID: 50 }, { sessionID: 0, localID: 55 }] },
+          guidPath: { guids: [{ sessionID: 0, localID: 55 }] },
           transform: { m00: 1, m01: 0, m02: 30, m10: 0, m11: 1, m12: 8 },
         },
       ],
@@ -1773,9 +1792,9 @@ describe('toClientNode INSTANCE — derivedSymbolData transform integration (spe
       symbolData: { symbolID: { sessionID: 0, localID: 70 } },
       derivedSymbolData: [
         // Deep descendant: derivedTransform should survive (reflow only
-        // touches direct children).
+        // touches direct children). Round-25 v3: FRAME 50 skipped, key=[55].
         {
-          guidPath: { guids: [{ sessionID: 0, localID: 50 }, { sessionID: 0, localID: 55 }] },
+          guidPath: { guids: [{ sessionID: 0, localID: 55 }] },
           transform: { m00: 1, m01: 0, m02: 17, m10: 0, m11: 1, m12: 3 },
         },
       ],
@@ -1835,6 +1854,153 @@ describe('toClientNode INSTANCE — derivedSymbolData transform integration (spe
     expect(renderChildren[0].transform).toEqual({
       m00: 1, m01: 0, m02: 70, m10: 0, m11: 1, m12: 11,
     });
+  });
+});
+
+// =====================================================================
+// Round 25 — path-key normalization (FRAME / GROUP ancestor skip)
+//
+// Closes the latent path-key bug surfaced by round-24's WEB triage on
+// the alret-* modal family (commits 89bbaa5..ddad018; see GAPS.md
+// "Round 25 candidate"). Figma's wire-format path-keys for symbol-
+// Overrides + derivedSymbolData skip non-INSTANCE container ancestors
+// (FRAME / GROUP / SECTION); only INSTANCE-typed ancestors plus the
+// target node contribute. Pre-round-25 our walk used the full visit
+// chain → silent override misses for any target reached through a
+// container.
+//
+// Spec: web-instance-render-overrides.spec.md §3.1 I-C1, §3.2 I-P2
+//       (round-25 v3 update). Reflow specs §3.9 I-DS1 + §3.10 I-DT1
+//       reference the same scheme.
+// =====================================================================
+
+describe('round-25 path-key scheme (FRAME / GROUP ancestor skip)', () => {
+  it('T-pk-1: alret regression — FRAME-grandchild visibility override applies under new scheme', () => {
+    // Mirrors the metarich INSTANCE 364:2962 (alret modal) shape:
+    //   master 64:376 (alret)
+    //     └ buttons FRAME 60:348
+    //         ├ Button 60:341 "취소" — symbolOverride [60:341] visible:false
+    //         └ Button 60:340 "삭제"
+    // Pre-round-25: our walk computed key "60:348/60:341" → no match → 취소
+    // stays visible. Post-round-25: FRAME 60:348 skipped → key "60:341" →
+    // matches Figma's `[60:341]` → 취소 hidden.
+    const cancelBtn = makeNode('INSTANCE', 341, {
+      size: { x: 31, y: 32 },
+      symbolData: { symbolID: { sessionID: 0, localID: 999 } }, // dummy master
+    });
+    const deleteBtn = makeNode('INSTANCE', 340, {
+      size: { x: 48, y: 32 },
+      symbolData: { symbolID: { sessionID: 0, localID: 998 } }, // dummy master
+    });
+    const buttonsFrame = makeNode('FRAME', 348, {
+      size: { x: 87, y: 32 },
+    }, [cancelBtn, deleteBtn]);
+
+    // Visibility override at path "0:341" — Figma's wire format.
+    const visibilityOverrides = new Map<string, boolean>([['0:341', false]]);
+    const out = toClientChildForRender(
+      buttonsFrame, [], new Map(), new Map(), new Map(), visibilityOverrides, 0,
+    );
+    const children = out.children as Array<{ id: string; visible?: boolean }>;
+    const cancel = children.find((c) => c.id === '0:341')!;
+    const del = children.find((c) => c.id === '0:340')!;
+    expect(cancel.visible).toBe(false); // hidden by visibility override
+    expect(del.visible).not.toBe(false); // not affected
+  });
+
+  it('T-pk-2: FRAME contributes to its OWN key (matches Figma when target IS the FRAME)', () => {
+    // Edge case: when the override targets the FRAME itself (e.g.
+    // round-22 derivedSize for the alret buttons FRAME [60:348] →
+    // size 48×32), the FRAME's own path-key includes itself. Only its
+    // *children* see the FRAME-skipped pathFromOuter.
+    const frameNode = makeNode('FRAME', 50, { size: { x: 100, y: 32 } });
+    const fillOverrides = new Map<string, unknown[]>([['0:50', [{ type: 'SOLID', color: { r: 0, g: 1, b: 0, a: 1 } }]]]);
+    const out = toClientChildForRender(
+      frameNode, [], new Map(), new Map(), fillOverrides, new Map(), 0,
+    );
+    expect(out.fillPaints).toBe(fillOverrides.get('0:50'));
+  });
+
+  it('T-pk-3: nested FRAME chain — all FRAMEs skipped, leaf addressed by its localID alone', () => {
+    // Pathological master: FRAME → FRAME → VECTOR. Pre-round-25 the
+    // VECTOR's key would be "0:1/0:2/0:3"; post-round-25 it's "0:3".
+    // Figma's actual wire format would also be `[3]`.
+    const leaf = makeNode('VECTOR', 3, {
+      fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }],
+    });
+    const innerFrame = makeNode('FRAME', 2, {}, [leaf]);
+    const outerFrame = makeNode('FRAME', 1, {}, [innerFrame]);
+    const overrideFills = [{ type: 'SOLID', color: { r: 0, g: 0, b: 1, a: 1 } }];
+    const out = toClientChildForRender(
+      outerFrame, [], new Map(), new Map(),
+      new Map([['0:3', overrideFills]]), // both FRAMEs skipped
+      new Map(), 0,
+    );
+    const inner = (out.children as Array<{ children?: unknown[] }>)[0];
+    const leafOut = (inner.children as Array<{ fillPaints?: unknown }>)[0];
+    expect(leafOut.fillPaints).toBe(overrideFills);
+  });
+
+  it('T-pk-4: INSTANCE in chain DOES contribute — outer-instance / FRAME / inner-instance / TEXT', () => {
+    // Master has INSTANCE A (master_inner). master_inner has FRAME → TEXT.
+    // Outer outer-INSTANCE has a path override targeting that TEXT.
+    // Path-key chain: outer-instance not in path (it IS the toClientNode
+    // root, expansion starts there at pathFromOuter=[]); inner-instance
+    // A's id IS in path; FRAME skipped; TEXT id terminal.
+    //   → key = "<A.id>/<TEXT.id>"
+    const innerText = makeNode('TEXT', 5, {
+      textData: { characters: 'master-default' },
+      size: { x: 60, y: 16 },
+    });
+    const innerFrame = makeNode('FRAME', 4, {}, [innerText]);
+    const innerMaster = makeNode('SYMBOL', 200, {}, [innerFrame]);
+    const innerInstance = makeNode('INSTANCE', 71, {
+      size: { x: 100, y: 32 },
+      symbolData: { symbolID: { sessionID: 0, localID: 200 } },
+    });
+    const outerMaster = makeNode('SYMBOL', 70, { size: { x: 200, y: 64 } }, [innerInstance]);
+    const outerInstance = makeNode('INSTANCE', 80, {
+      size: { x: 200, y: 64 },
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 70 },
+        symbolOverrides: [
+          {
+            // Path skips inner FRAME 4 → key = [71, 5]
+            guidPath: { guids: [{ sessionID: 0, localID: 71 }, { sessionID: 0, localID: 5 }] },
+            textData: { characters: 'override-text' },
+          },
+        ],
+      },
+    });
+    const symbolIndex = buildSymbolIndex([innerMaster, outerMaster, outerInstance]);
+    const out = toClientNode(outerInstance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{
+      _renderChildren?: Array<{ children?: Array<{ _renderTextOverride?: string }> }>;
+    }>;
+    expect(renderChildren).toHaveLength(1);
+    const inner = renderChildren[0];
+    // inner._renderChildren[0] is the FRAME → its children[0] is TEXT.
+    const innerFrame_out = inner._renderChildren![0];
+    const text_out = innerFrame_out.children![0];
+    expect(text_out._renderTextOverride).toBe('override-text');
+  });
+
+  it('T-pk-5: GROUP ancestor also skipped (same rule as FRAME)', () => {
+    // GROUP behaves identically to FRAME for path-key purposes — only
+    // the type label differs. Verify the new childPathFromOuter rule
+    // treats both as transparent.
+    const leaf = makeNode('VECTOR', 50, {
+      fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }],
+    });
+    const group = makeNode('GROUP', 100, {}, [leaf]);
+    const overrideFills = [{ type: 'SOLID', color: { r: 0, g: 1, b: 1, a: 1 } }];
+    const out = toClientChildForRender(
+      group, [], new Map(), new Map(),
+      new Map([['0:50', overrideFills]]), // GROUP 100 skipped
+      new Map(), 0,
+    );
+    const child = (out.children as Array<{ fillPaints?: unknown }>)[0];
+    expect(child.fillPaints).toBe(overrideFills);
   });
 });
 

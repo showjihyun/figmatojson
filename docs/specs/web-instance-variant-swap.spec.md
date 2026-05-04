@@ -34,7 +34,7 @@ Figma 의 "swap component instance" 메커니즘. 외곽 INSTANCE 의 `symbolOve
 
 ### 3.1 Collection
 
-- I-C1 `collectSwapTargetsAtPathFromInstance(symbolOverrides) → Map<pathKey, swapTargetGuid>`. `pathKey` 는 outer 의 path-key 스킴 그대로 (slash-joined). `swapTargetGuid` 는 `${sessionID}:${localID}` 형식.
+- I-C1 `collectSwapTargetsAtPathFromInstance(symbolOverrides) → Map<pathKey, swapTargetGuid>`. `pathKey` 는 outer 의 path-key 스킴 그대로 — `web-instance-render-overrides.spec.md §3.1 I-C1` 에 정의 (round-25 부터 FRAME/GROUP ancestor skip). `swapTargetGuid` 는 `${sessionID}:${localID}` 형식.
 - I-C2 entry 의 `overriddenSymbolID` 가 `{sessionID, localID}` integer 쌍이 아니면 entry 무시 (silent skip).
 - I-C3 같은 path 에 여러 swap entry → 마지막 이 win.
 
