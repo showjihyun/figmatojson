@@ -704,7 +704,18 @@ function NodeShapeImpl({
     node.type === 'INSTANCE' &&
     node.frameMaskDisabled !== true &&
     Array.isArray(node._renderChildren) && node._renderChildren.length > 0;
-  const wantClip = node.frameMaskDisabled === false || wantClipForInstance;
+  // Round-23 v3: when this node is an isolation ancestor, drop the clip too
+  // (not just fillPaints). Figma REST API renders the captured node alone,
+  // i.e. without any ancestor's clip-content boundary. Without this, e.g.
+  // dash-board/frame-2320-587_7496 (1380-wide table) sits inside FRAME 2335
+  // (454 wide, frameMaskDisabled=false) and gets visually cropped to 3 of
+  // 6 columns in our capture — figma.png shows all 6 because there's no
+  // grandparent clip in REST-API isolation. The target itself + its
+  // descendants keep their clips so legitimate clip behaviour (e.g.
+  // INSTANCE auto-clip) is unaffected.
+  const wantClip =
+    !isAncestorOfIsolated &&
+    (node.frameMaskDisabled === false || wantClipForInstance);
   // Konva passes a SceneContext (its proxy around the native canvas
   // context). The path-building methods we use exist on both but the
   // Konva-internal type isn't easily reachable, so we type the param as
