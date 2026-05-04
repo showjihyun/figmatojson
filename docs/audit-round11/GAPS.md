@@ -349,6 +349,13 @@ classes from re-appearing in future audit cycles:
    subtrees only; strokes, effects, descendants of the target itself
    are untouched.
 
+**Round-23 audit-data refresh status:** all 5 pages re-captured through
+the v2-isolation harness — design-setting (24 modified), MOBILE (141),
+dash-board (42), WEB (364), right_top × 9 (separate batch). icons page
+has only 1 slug. The audit-round11 baseline is now coherent with the
+current renderer + tooling state; future regression scans can compare
+against it without the leak/clip/bg false-alarm classes from round-22.
+
 **Audit method note:** The "byte-delta + tiny-after" filter found
 30 candidates across 743 pairs. After round-23 investigation, **ZERO are
 real render regressions**:
