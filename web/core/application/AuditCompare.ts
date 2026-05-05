@@ -371,9 +371,16 @@ const COMPARABLE_FIELDS: Array<{
       const gate = (fn: Record<string, unknown>) => fn.type === 'TEXT';
       return [
         {
+          // `_renderTextOverride` is the resolved instance-override value
+          // applied during master expansion (see clientNode.ts §549-552).
+          // Fall back to the master's `textData.characters` when no
+          // override fired.
           field: 'characters',
           pickFigma: (n) => n.characters,
-          pickOurs: (n) => (n.textData as { characters?: string } | undefined)?.characters,
+          pickOurs: (n) =>
+            typeof n._renderTextOverride === 'string'
+              ? n._renderTextOverride
+              : (n.textData as { characters?: string } | undefined)?.characters,
           gate,
         },
         { field: 'fontSize', pickFigma: (n) => n.fontSize, pickOurs: (n) => n.fontSize, gate },

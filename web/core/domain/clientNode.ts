@@ -502,13 +502,26 @@ export function toClientChildForRender(
   if (depth > 8) {
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
   }
-  // Path tracking: append THIS node's guidStr so descendants see their
+  // Path tracking: append THIS node's path-guid so descendants see their
   // chain from the outer instance master root. Override Maps are keyed by
   // the same join scheme. Spec §3.2 I-P3 / I-P4 (round-25 v3): the chain
   // contains *INSTANCE-typed ancestors only* + the current node — FRAME /
   // GROUP / SECTION container ancestors are skipped (Figma's path-key
   // scheme matches its symbolOverrides + derivedSymbolData wire format).
-  const currentPath = n.guidStr ? [...pathFromOuter, n.guidStr] : pathFromOuter;
+  //
+  // Round 32 fix: when a master subtree comes from a *published library*
+  // component, the local copy's nodes carry their library-stable GUID
+  // under `data.overrideKey`, while `guidStr` is the freshly-assigned
+  // local kiwi GUID. Figma's symbolOverrides paths use the library-
+  // stable identity, so override map lookups need that side of the
+  // identity. Use `overrideKey` when present, fall back to `guidStr` for
+  // master subtrees defined locally (where the two were always equal).
+  const dataForKey = (n.data ?? {}) as Record<string, unknown>;
+  const overrideKey = dataForKey.overrideKey as { sessionID?: number; localID?: number } | undefined;
+  const pathGuid = overrideKey && typeof overrideKey.sessionID === 'number' && typeof overrideKey.localID === 'number'
+    ? `${overrideKey.sessionID}:${overrideKey.localID}`
+    : n.guidStr;
+  const currentPath = pathGuid ? [...pathFromOuter, pathGuid] : pathFromOuter;
   const currentKey = currentPath.join('/');
   // For child recursion: only INSTANCE nodes contribute to the ancestor
   // chain. Non-INSTANCE containers pass `pathFromOuter` through unchanged

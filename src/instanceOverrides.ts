@@ -188,7 +188,8 @@ export function collectTextStyleOverridesFromInstance(
  *     fields share one map and one walk-side application point.
  */
 const VISUAL_STYLE_OVERRIDE_FIELDS: ReadonlySet<string> = new Set([
-  'strokePaints', 'opacity',
+  'strokePaints', 'strokeWeight',
+  'opacity',
   'cornerRadius',
   'rectangleTopLeftCornerRadius', 'rectangleTopRightCornerRadius',
   'rectangleBottomLeftCornerRadius', 'rectangleBottomRightCornerRadius',
