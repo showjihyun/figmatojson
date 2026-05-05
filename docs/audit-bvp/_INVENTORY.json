@@ -1,0 +1,691 @@
+{
+  "sessionId": "smosgnunwj2gd",
+  "pages": [
+    {
+      "index": 0,
+      "name": "example page",
+      "slug": "example-page",
+      "pageBox": {
+        "x": 0,
+        "y": 0,
+        "w": 6179,
+        "h": 1431
+      },
+      "children": [
+        {
+          "slug": "01-01-00-0_1158",
+          "name": "01-01-00 오픈 첫 페이지",
+          "type": "FRAME",
+          "id": "0:1158",
+          "depth": 1,
+          "x": 5,
+          "y": 0,
+          "w": 1920,
+          "h": 946
+        },
+        {
+          "slug": "mask-group-0_1159",
+          "name": "Mask group",
+          "type": "FRAME",
+          "id": "0:1159",
+          "depth": 2,
+          "x": 307,
+          "y": 48,
+          "w": 961,
+          "h": 898
+        },
+        {
+          "slug": "right-0_1163",
+          "name": "right",
+          "type": "INSTANCE",
+          "id": "0:1163",
+          "depth": 2,
+          "x": 1268,
+          "y": 0,
+          "w": 657,
+          "h": 946
+        },
+        {
+          "slug": "left-0_1174",
+          "name": "left",
+          "type": "INSTANCE",
+          "id": "0:1174",
+          "depth": 2,
+          "x": 5,
+          "y": 0,
+          "w": 302,
+          "h": 946
+        },
+        {
+          "slug": "modalmap-style-0_1175",
+          "name": "[modal]map style",
+          "type": "FRAME",
+          "id": "0:1175",
+          "depth": 1,
+          "x": 1536,
+          "y": 1011,
+          "w": 310,
+          "h": 169
+        },
+        {
+          "slug": "frame-2254-0_1178",
+          "name": "Frame 2254",
+          "type": "FRAME",
+          "id": "0:1178",
+          "depth": 2,
+          "x": 1548,
+          "y": 1055,
+          "w": 286,
+          "h": 113
+        },
+        {
+          "slug": "frame-2225-0_1179",
+          "name": "Frame 2225",
+          "type": "FRAME",
+          "id": "0:1179",
+          "depth": 3,
+          "x": 1548,
+          "y": 1055,
+          "w": 286,
+          "h": 81
+        },
+        {
+          "slug": "modalprofile-open-0_1198",
+          "name": "[modal]profile open ",
+          "type": "FRAME",
+          "id": "0:1198",
+          "depth": 1,
+          "x": 5,
+          "y": 1015,
+          "w": 285,
+          "h": 165
+        },
+        {
+          "slug": "frame-2269-0_1199",
+          "name": "Frame 2269",
+          "type": "FRAME",
+          "id": "0:1199",
+          "depth": 2,
+          "x": 5,
+          "y": 1015,
+          "w": 285,
+          "h": 68
+        },
+        {
+          "slug": "frame-2271-0_1205",
+          "name": "Frame 2271",
+          "type": "FRAME",
+          "id": "0:1205",
+          "depth": 2,
+          "x": 5,
+          "y": 1091,
+          "w": 285,
+          "h": 81
+        },
+        {
+          "slug": "modalflow-edit-0_1214",
+          "name": "[modal]flow edit",
+          "type": "FRAME",
+          "id": "0:1214",
+          "depth": 1,
+          "x": 322,
+          "y": 1015,
+          "w": 140,
+          "h": 81
+        },
+        {
+          "slug": "modalarea-list-0_1221",
+          "name": "[modal]Area list",
+          "type": "FRAME",
+          "id": "0:1221",
+          "depth": 1,
+          "x": 511,
+          "y": 1015,
+          "w": 340,
+          "h": 416
+        },
+        {
+          "slug": "modalarea-0_1222",
+          "name": "[modal]저장된area",
+          "type": "INSTANCE",
+          "id": "0:1222",
+          "depth": 2,
+          "x": 511,
+          "y": 1015,
+          "w": 340,
+          "h": 416
+        },
+        {
+          "slug": "modalsave-area-0_1223",
+          "name": "[modal]save Area",
+          "type": "FRAME",
+          "id": "0:1223",
+          "depth": 1,
+          "x": 882,
+          "y": 1015,
+          "w": 310,
+          "h": 168
+        },
+        {
+          "slug": "frame-2254-0_1226",
+          "name": "Frame 2254",
+          "type": "FRAME",
+          "id": "0:1226",
+          "depth": 2,
+          "x": 894,
+          "y": 1059,
+          "w": 286,
+          "h": 64
+        },
+        {
+          "slug": "modalplace-search-history-0_1234",
+          "name": "[modal]Place search history",
+          "type": "FRAME",
+          "id": "0:1234",
+          "depth": 1,
+          "x": 1212,
+          "y": 1015,
+          "w": 275,
+          "h": 82
+        },
+        {
+          "slug": "modalplace-search-list-0_1249",
+          "name": "[modal]Place search list",
+          "type": "FRAME",
+          "id": "0:1249",
+          "depth": 1,
+          "x": 1212,
+          "y": 1143,
+          "w": 266,
+          "h": 222
+        },
+        {
+          "slug": "modalservice-guide-0_1272",
+          "name": "[modal]Service Guide",
+          "type": "FRAME",
+          "id": "0:1272",
+          "depth": 1,
+          "x": 0,
+          "y": 1260,
+          "w": 361,
+          "h": 116
+        },
+        {
+          "slug": "01-01-01-flow-1_2877",
+          "name": "01-01-01 Flow 선택",
+          "type": "FRAME",
+          "id": "1:2877",
+          "depth": 1,
+          "x": 2132,
+          "y": 0,
+          "w": 1920,
+          "h": 946
+        },
+        {
+          "slug": "mask-group-1_2878",
+          "name": "Mask group",
+          "type": "FRAME",
+          "id": "1:2878",
+          "depth": 2,
+          "x": 2434,
+          "y": 48,
+          "w": 961,
+          "h": 898
+        },
+        {
+          "slug": "left-1_2892",
+          "name": "left",
+          "type": "INSTANCE",
+          "id": "1:2892",
+          "depth": 2,
+          "x": 2132,
+          "y": 0,
+          "w": 302,
+          "h": 946
+        },
+        {
+          "slug": "frame-2397-1_2895",
+          "name": "Frame 2397",
+          "type": "INSTANCE",
+          "id": "1:2895",
+          "depth": 2,
+          "x": 3395,
+          "y": 0,
+          "w": 657,
+          "h": 946
+        },
+        {
+          "slug": "02-01-00-1_3158",
+          "name": "02-01-00 \b히스토리페이지",
+          "type": "FRAME",
+          "id": "1:3158",
+          "depth": 1,
+          "x": 4259,
+          "y": 0,
+          "w": 1920,
+          "h": 946
+        },
+        {
+          "slug": "mask-group-1_3159",
+          "name": "Mask group",
+          "type": "FRAME",
+          "id": "1:3159",
+          "depth": 2,
+          "x": 4561,
+          "y": 48,
+          "w": 961,
+          "h": 898
+        },
+        {
+          "slug": "left-1_3173",
+          "name": "left",
+          "type": "INSTANCE",
+          "id": "1:3173",
+          "depth": 2,
+          "x": 4259,
+          "y": 0,
+          "w": 302,
+          "h": 946
+        },
+        {
+          "slug": "frame-2448-1_3174",
+          "name": "Frame 2448",
+          "type": "FRAME",
+          "id": "1:3174",
+          "depth": 2,
+          "x": 5329,
+          "y": 0,
+          "w": 850,
+          "h": 1915
+        },
+        {
+          "slug": "frame-2512-1_3175",
+          "name": "Frame 2512",
+          "type": "FRAME",
+          "id": "1:3175",
+          "depth": 3,
+          "x": 5361,
+          "y": 48,
+          "w": 786,
+          "h": 1792.0035400390625
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "name": "design system",
+      "slug": "design-system",
+      "pageBox": {
+        "x": 0,
+        "y": 0,
+        "w": 4776,
+        "h": 4107
+      },
+      "children": [
+        {
+          "slug": "color-reference-1_1297",
+          "name": "Color Reference",
+          "type": "SECTION",
+          "id": "1:1297",
+          "depth": 1,
+          "x": 0,
+          "y": 0,
+          "w": 1852,
+          "h": 1204
+        },
+        {
+          "slug": "blue-1_1298",
+          "name": "Blue",
+          "type": "FRAME",
+          "id": "1:1298",
+          "depth": 2,
+          "x": 123,
+          "y": 169,
+          "w": 364,
+          "h": 824
+        },
+        {
+          "slug": "swatches-1_1300",
+          "name": "Swatches",
+          "type": "FRAME",
+          "id": "1:1300",
+          "depth": 3,
+          "x": 155,
+          "y": 257,
+          "w": 300,
+          "h": 704
+        },
+        {
+          "slug": "violet-1_1351",
+          "name": "Violet",
+          "type": "FRAME",
+          "id": "1:1351",
+          "depth": 2,
+          "x": 537,
+          "y": 169,
+          "w": 364,
+          "h": 824
+        },
+        {
+          "slug": "swatches-1_1353",
+          "name": "Swatches",
+          "type": "FRAME",
+          "id": "1:1353",
+          "depth": 3,
+          "x": 569,
+          "y": 257,
+          "w": 300,
+          "h": 704
+        },
+        {
+          "slug": "green-1_1404",
+          "name": "Green",
+          "type": "FRAME",
+          "id": "1:1404",
+          "depth": 2,
+          "x": 951,
+          "y": 169,
+          "w": 364,
+          "h": 824
+        },
+        {
+          "slug": "swatches-1_1406",
+          "name": "Swatches",
+          "type": "FRAME",
+          "id": "1:1406",
+          "depth": 3,
+          "x": 983,
+          "y": 257,
+          "w": 300,
+          "h": 704
+        },
+        {
+          "slug": "grey-1_1457",
+          "name": "Grey",
+          "type": "FRAME",
+          "id": "1:1457",
+          "depth": 2,
+          "x": 1365,
+          "y": 169,
+          "w": 364,
+          "h": 968
+        },
+        {
+          "slug": "swatches-1_1459",
+          "name": "Swatches",
+          "type": "FRAME",
+          "id": "1:1459",
+          "depth": 3,
+          "x": 1397,
+          "y": 257,
+          "w": 300,
+          "h": 848
+        },
+        {
+          "slug": "typography-system-1_1520",
+          "name": "Typography System",
+          "type": "FRAME",
+          "id": "1:1520",
+          "depth": 1,
+          "x": 1927,
+          "y": 55,
+          "w": 978,
+          "h": 2067
+        },
+        {
+          "slug": "frame-8-1_1521",
+          "name": "Frame 8",
+          "type": "FRAME",
+          "id": "1:1521",
+          "depth": 2,
+          "x": 1959,
+          "y": 87,
+          "w": 914,
+          "h": 256
+        },
+        {
+          "slug": "frame-2-1_1525",
+          "name": "Frame 2",
+          "type": "FRAME",
+          "id": "1:1525",
+          "depth": 2,
+          "x": 1959,
+          "y": 383,
+          "w": 914,
+          "h": 1167
+        },
+        {
+          "slug": "frame-2424-1_1526",
+          "name": "Frame 2424",
+          "type": "FRAME",
+          "id": "1:1526",
+          "depth": 3,
+          "x": 1959,
+          "y": 383,
+          "w": 92,
+          "h": 839
+        },
+        {
+          "slug": "frame-4-1_1550",
+          "name": "Frame 4",
+          "type": "FRAME",
+          "id": "1:1550",
+          "depth": 2,
+          "x": 1959,
+          "y": 1590,
+          "w": 914,
+          "h": 164
+        },
+        {
+          "slug": "frame-5-1_1557",
+          "name": "Frame 5",
+          "type": "FRAME",
+          "id": "1:1557",
+          "depth": 2,
+          "x": 1959,
+          "y": 1794,
+          "w": 914,
+          "h": 160
+        },
+        {
+          "slug": "frame-9-1_1564",
+          "name": "Frame 9",
+          "type": "FRAME",
+          "id": "1:1564",
+          "depth": 2,
+          "x": 1959,
+          "y": 1994,
+          "w": 914,
+          "h": 96
+        },
+        {
+          "slug": "frame-2391-1_1569",
+          "name": "Frame 2391",
+          "type": "FRAME",
+          "id": "1:1569",
+          "depth": 1,
+          "x": 2856,
+          "y": 2599,
+          "w": 1920,
+          "h": 1508
+        },
+        {
+          "slug": "frame-2425-1_1623",
+          "name": "Frame 2425",
+          "type": "FRAME",
+          "id": "1:1623",
+          "depth": 1,
+          "x": 443,
+          "y": 2641,
+          "w": 1870,
+          "h": 1214
+        },
+        {
+          "slug": "frame-2427-1_1624",
+          "name": "Frame 2427",
+          "type": "FRAME",
+          "id": "1:1624",
+          "depth": 2,
+          "x": 478,
+          "y": 2651,
+          "w": 813,
+          "h": 328
+        },
+        {
+          "slug": "frame-2433-1_1655",
+          "name": "Frame 2433",
+          "type": "FRAME",
+          "id": "1:1655",
+          "depth": 2,
+          "x": 488,
+          "y": 3052,
+          "w": 793,
+          "h": 149
+        },
+        {
+          "slug": "btn-1_1673",
+          "name": "btn",
+          "type": "FRAME",
+          "id": "1:1673",
+          "depth": 1,
+          "x": 624,
+          "y": 3299,
+          "w": 1516,
+          "h": 484
+        },
+        {
+          "slug": "buttonb_default-1_1683",
+          "name": "BUTTON=B_default",
+          "type": "SYMBOL",
+          "id": "1:1683",
+          "depth": 2,
+          "x": 1769,
+          "y": 3319,
+          "w": 138,
+          "h": 64
+        },
+        {
+          "slug": "buttonbtxt_default-1_1695",
+          "name": "BUTTON=Btxt_default",
+          "type": "SYMBOL",
+          "id": "1:1695",
+          "depth": 2,
+          "x": 1769,
+          "y": 3547,
+          "w": 122,
+          "h": 64
+        },
+        {
+          "slug": "buttonbn_default-1_1710",
+          "name": "BUTTON=Bn_default",
+          "type": "SYMBOL",
+          "id": "1:1710",
+          "depth": 2,
+          "x": 1946,
+          "y": 3319,
+          "w": 108,
+          "h": 64
+        },
+        {
+          "slug": "buttonbn_txt_default-1_1726",
+          "name": "BUTTON=Bn_txt_default",
+          "type": "SYMBOL",
+          "id": "1:1726",
+          "depth": 2,
+          "x": 1946,
+          "y": 3547,
+          "w": 92,
+          "h": 64
+        },
+        {
+          "slug": "buttonb_disable-1_1739",
+          "name": "BUTTON=B_disable",
+          "type": "SYMBOL",
+          "id": "1:1739",
+          "depth": 2,
+          "x": 1769,
+          "y": 3395,
+          "w": 141,
+          "h": 64
+        },
+        {
+          "slug": "buttonbtxt_disable-1_1751",
+          "name": "BUTTON=Btxt_disable",
+          "type": "SYMBOL",
+          "id": "1:1751",
+          "depth": 2,
+          "x": 1769,
+          "y": 3623,
+          "w": 125,
+          "h": 64
+        },
+        {
+          "slug": "buttonbn_disable-1_1766",
+          "name": "BUTTON=Bn_disable",
+          "type": "SYMBOL",
+          "id": "1:1766",
+          "depth": 2,
+          "x": 1946,
+          "y": 3395,
+          "w": 111,
+          "h": 64
+        },
+        {
+          "slug": "buttonbtxt_disable-1_1782",
+          "name": "BUTTON=Btxt_disable",
+          "type": "SYMBOL",
+          "id": "1:1782",
+          "depth": 2,
+          "x": 1946,
+          "y": 3623,
+          "w": 95,
+          "h": 64
+        },
+        {
+          "slug": "buttonb_hover-1_1795",
+          "name": "BUTTON=B_hover",
+          "type": "SYMBOL",
+          "id": "1:1795",
+          "depth": 2,
+          "x": 1769,
+          "y": 3471,
+          "w": 138,
+          "h": 64
+        },
+        {
+          "slug": "buttonbtxt_hover-1_1807",
+          "name": "BUTTON=Btxt_hover",
+          "type": "SYMBOL",
+          "id": "1:1807",
+          "depth": 2,
+          "x": 1769,
+          "y": 3699,
+          "w": 122,
+          "h": 64
+        },
+        {
+          "slug": "buttonbn_hover-1_1822",
+          "name": "BUTTON=Bn_hover",
+          "type": "SYMBOL",
+          "id": "1:1822",
+          "depth": 2,
+          "x": 1946,
+          "y": 3471,
+          "w": 108,
+          "h": 64
+        },
+        {
+          "slug": "buttonbn_txt_hover-1_1838",
+          "name": "BUTTON=Bn_txt_hover",
+          "type": "SYMBOL",
+          "id": "1:1838",
+          "depth": 2,
+          "x": 1946,
+          "y": 3699,
+          "w": 92,
+          "h": 64
+        }
+      ]
+    }
+  ]
+}

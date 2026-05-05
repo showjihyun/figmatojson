@@ -858,3 +858,61 @@ corpus discovery), not another override-field round.
 
 Round 28 ships clean as foundation. No regressions. 475/475 web +
 126/126 root unit tests pass.
+
+## Round 29 close (2026-05-05)
+
+**Setup-only — non-metarich audit corpus added.**
+
+Round 29 picked the round-28 close candidate "non-metarich audit
+corpus — biggest unknown territory". Setup-only scope (no renderer
+changes, no rounds-style fixes — just the audit harness multi-corpus
+plumbing + new bvp corpus baseline).
+
+### Script refactors (multi-corpus support)
+
+Three audit scripts now accept env-var overrides; defaults preserve
+metarich behavior:
+
+| script | env vars |
+|---|---|
+| `web/scripts/build-audit-inventory.mjs` | `AUDIT_FIG_PATH`, `AUDIT_OUT_ROOT`, `AUDIT_CORPUS_NAME` |
+| `web/scripts/audit-round11-screenshots.mjs` | `AUDIT_FIG_PATH`, `AUDIT_OUT_ROOT` |
+| `web/scripts/figma-fetch.mjs` | `AUDIT_OUT_ROOT`, `AUDIT_FILE_KEY_ENV` |
+
+### bvp corpus added
+
+| 항목 | 값 |
+|---|---|
+| Source | `docs/bvp.fig` (4.95 MB, 3,155 nodes) |
+| Output | `docs/audit-bvp/` |
+| Visible pages | 2 (`example page` 363 descendants, `design system` 665 descendants) |
+| Audit captures | 60 + 2 page overviews = 62 |
+| Status | `ours.png` ✅ captured / `figma.png` ⏳ pending user fetch |
+
+bvp is roughly 9× smaller than metarich (247 INSTANCEs vs ~6,000;
+225 SYMBOLs vs ~600), making it a tractable *generalization probe* —
+edge cases that don't appear in metarich's variant patterns are likely
+to surface as pixel deltas when bvp's `figma.png` arrives.
+
+### What's pending (user action)
+
+User adds `FIGMA_FILE_KEY_BVP=<key>` to `.env.local`, then runs:
+
+```bash
+AUDIT_OUT_ROOT=docs/audit-bvp AUDIT_FILE_KEY_ENV=FIGMA_FILE_KEY_BVP \
+  node web/scripts/figma-fetch.mjs
+```
+
+The Figma file key is the `<KEY>` segment in `https://www.figma.com/file/<KEY>/...`.
+Once `figma.png` files arrive, visual diff is round-30+ work.
+
+### Round 30 candidate (after figma.png arrives)
+
+- Visual diff bvp's 60 captures against figma.png; identify any
+  systematic gaps that don't appear in metarich.
+- File first bvp-specific entries in `docs/audit-bvp/GAPS.md`
+  (created when the first gap is filed).
+- Each bvp gap may exercise a different shape of work than the round-22..28
+  INSTANCE-pipeline cluster — that's the point of adding a second corpus.
+
+Round 29 ships as foundation + ours.png baseline. No regressions.
