@@ -18,6 +18,7 @@ import {
   collectFillOverridesFromInstance,
   collectPropAssignmentsAtPathFromInstance,
   collectPropAssignmentsFromInstance,
+  collectStackOverridesFromInstance,
   collectSwapTargetsAtPathFromInstance,
   collectTextOverridesFromInstance,
   collectTextStyleOverridesFromInstance,
@@ -123,6 +124,11 @@ export function toClientNode(
         // cornerRadius family). Whitelist of 7 fields (spec §3.6 I-V2).
         // Applied to all node types (no TEXT guard) at data spread.
         const visualStyleOverridesByPath = collectVisualStyleOverridesFromInstance(sd?.symbolOverrides);
+        // Round 28: stack subset overrides (stackSpacing / padding).
+        // Whitelist of 8 fields (spec §3.7). Master-root entry is
+        // merged into masterData so applyInstanceReflow uses the
+        // variant-stamped values instead of master defaults.
+        const stackOverridesByPath = collectStackOverridesFromInstance(sd?.symbolOverrides);
         const expanded = master.children.map((c) =>
           toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath, visualStyleOverridesByPath),
         );
@@ -134,6 +140,14 @@ export function toClientNode(
           // children stay at master coords and round-12's INSTANCE clip
           // cuts them (alert/input-box action button text-clip).
           const masterData = (master.data ?? {}) as Record<string, unknown>;
+          // Spec §3.7 I-AL3 (round-28): merge master-root stack* override
+          // into a temporary effectiveMasterData for reflow. Master
+          // TreeNode itself is NOT mutated — only the value passed to
+          // applyInstanceReflow.
+          const stackOvAtRoot = stackOverridesByPath.get(master.guidStr ?? '');
+          const effectiveMasterData = stackOvAtRoot
+            ? { ...masterData, ...stackOvAtRoot }
+            : masterData;
           const masterSize = masterData.size as { x?: number; y?: number } | undefined;
           const origInstSize = data.size as { x?: number; y?: number } | undefined;
           // Round 20: AUTO-grow primarySizing — see detectAutoGrownSize.
@@ -142,7 +156,7 @@ export function toClientNode(
             (out as { _autoGrownSize?: { x?: number; y?: number } })._autoGrownSize = grownSize;
           }
           const instSize = grownSize ?? origInstSize;
-          out._renderChildren = applyInstanceReflow(expanded, masterData, masterSize, instSize);
+          out._renderChildren = applyInstanceReflow(expanded, effectiveMasterData, masterSize, instSize);
         }
       }
     }
@@ -672,6 +686,10 @@ export function toClientChildForRender(
         const mergedVisualStyle = innerVisualStyle.size > 0
           ? mergeOverridesForNested(visualStyleOverridesByPath, innerVisualStyle, currentPath)
           : visualStyleOverridesByPath;
+        // Round 28: stack subset overrides on the inner INSTANCE's own
+        // symbolOverrides. The master-root entry for THIS nested INSTANCE
+        // affects its own reflow below.
+        const innerStackOv = collectStackOverridesFromInstance((data as { symbolData?: { symbolOverrides?: Array<Record<string, unknown>> } }).symbolData?.symbolOverrides);
         const nestedExpanded = master.children.map((c) =>
           toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes, mergedDerivedTransforms, mergedTextStyle, mergedVisualStyle),
         );
@@ -692,8 +710,15 @@ export function toClientChildForRender(
         // derivedSymbolData entry for THIS nested INSTANCE descendant.
         const nestedDerivedSize = derivedSizesByPath.get(currentKey);
         const nestedInstSize = nestedGrownSize ?? nestedDerivedSize ?? nestedOrigInstSize;
+        // Spec §3.7 I-AL3 (round-28): merge inner stack* override at
+        // master root into a temporary effectiveMasterData for nested
+        // reflow. Same pattern as the outer-INSTANCE branch.
+        const nestedStackOvAtRoot = innerStackOv.get(master.guidStr ?? '');
+        const nestedEffectiveMasterData = nestedStackOvAtRoot
+          ? { ...nestedMasterData, ...nestedStackOvAtRoot }
+          : nestedMasterData;
         // Apply auto-layout reflow to the nested INSTANCE expansion too.
-        out._renderChildren = applyInstanceReflow(nestedExpanded, nestedMasterData, nestedMasterSize, nestedInstSize);
+        out._renderChildren = applyInstanceReflow(nestedExpanded, nestedEffectiveMasterData, nestedMasterSize, nestedInstSize);
         // Spec web-instance-variant-swap §3.3 I-V1: when swap is applied
         // and no explicit visibility override exists for this path, treat
         // the swap as implying visible:true. This compensates for Figma's

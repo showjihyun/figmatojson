@@ -13,6 +13,7 @@ import {
   collectFillOverridesFromInstance,
   collectPropAssignmentsAtPathFromInstance,
   collectPropAssignmentsFromInstance,
+  collectStackOverridesFromInstance,
   collectSwapTargetsAtPathFromInstance,
   collectTextOverridesFromInstance,
   collectTextStyleOverridesFromInstance,
@@ -2381,5 +2382,180 @@ describe('toClientChildForRender — visual style override (spec §3.6 I-V4/I-V5
     expect(rectOut.cornerRadius).toBe(12);
   });
 });
+
+// =====================================================================
+// Round 28 — Auto-layout subset override (stackSpacing / padding)
+// (spec web-instance-render-overrides.spec.md §3.7)
+//
+// Round-22 derivedSize + round-24 derivedTransform stamp post-layout
+// results, so stack* override (the *cause*) is theoretically redundant.
+// But applyInstanceReflow at the master-root level reads master's
+// stack* fields directly, so a master-root override would change reflow
+// output. Round-28 is the *empirical try* — visible win 0 ⇒ honest
+// 0 close; visible win ⇒ extend. 8-field whitelist.
+// =====================================================================
+
+describe('collectStackOverridesFromInstance (spec §3.7, round 28)', () => {
+  it('T-st-1: picks up whitelisted stack* fields keyed by slash-joined guidPath', () => {
+    const m = collectStackOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+        stackSpacing: 12,
+        stackHorizontalPadding: 8,
+        stackPaddingRight: 16,
+      },
+    ]);
+    expect(m.size).toBe(1);
+    const o = m.get('0:50')!;
+    expect(o.stackSpacing).toBe(12);
+    expect(o.stackHorizontalPadding).toBe(8);
+    expect(o.stackPaddingRight).toBe(16);
+  });
+
+  it('T-st-2: ignores non-whitelisted fields (other override categories)', () => {
+    const m = collectStackOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+        stackPrimarySizing: 'AUTO',           // explicitly NOT in round-28 subset
+        stackPrimaryAlignItems: 'CENTER',      // also not in subset
+        stackChildPrimaryGrow: 1,              // also not in subset
+        textData: { characters: 'foo' },        // round-4
+        fillPaints: [{ type: 'SOLID' }],        // round-12
+        stackSpacing: 8,                        // ← only this one whitelisted
+      },
+    ]);
+    const o = m.get('0:50')!;
+    expect(o.stackSpacing).toBe(8);
+    // Verify all non-whitelisted fields were dropped:
+    expect((o as Record<string, unknown>).stackPrimarySizing).toBeUndefined();
+    expect((o as Record<string, unknown>).stackPrimaryAlignItems).toBeUndefined();
+    expect((o as Record<string, unknown>).stackChildPrimaryGrow).toBeUndefined();
+    expect((o as Record<string, unknown>).textData).toBeUndefined();
+    expect((o as Record<string, unknown>).fillPaints).toBeUndefined();
+  });
+
+  it('T-st-3: skips entries with no whitelisted stack* fields', () => {
+    const m = collectStackOverridesFromInstance([
+      { guidPath: { guids: [{ sessionID: 0, localID: 50 }] }, textData: { characters: 'foo' } },
+      { guidPath: { guids: [{ sessionID: 0, localID: 51 }] } },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('T-st-4: covers all 8 whitelisted fields', () => {
+    const m = collectStackOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 50 }] },
+        stackSpacing: 1,
+        stackCounterSpacing: 2,
+        stackHorizontalPadding: 3,
+        stackVerticalPadding: 4,
+        stackPaddingLeft: 5,
+        stackPaddingRight: 6,
+        stackPaddingTop: 7,
+        stackPaddingBottom: 8,
+      },
+    ]);
+    const o = m.get('0:50')!;
+    expect(o.stackSpacing).toBe(1);
+    expect(o.stackCounterSpacing).toBe(2);
+    expect(o.stackHorizontalPadding).toBe(3);
+    expect(o.stackVerticalPadding).toBe(4);
+    expect(o.stackPaddingLeft).toBe(5);
+    expect(o.stackPaddingRight).toBe(6);
+    expect(o.stackPaddingTop).toBe(7);
+    expect(o.stackPaddingBottom).toBe(8);
+  });
+
+  it('returns empty map when overrides is undefined or empty', () => {
+    expect(collectStackOverridesFromInstance(undefined).size).toBe(0);
+    expect(collectStackOverridesFromInstance([]).size).toBe(0);
+  });
+});
+
+describe('toClientNode INSTANCE — master-root stackSpacing override patches reflow (spec §3.7 I-AL3)', () => {
+  it('T-st-5: stackSpacing override at master root is applied before applyInstanceReflow runs', () => {
+    // Master: HORIZONTAL CENTER, master stackSpacing=0 (no gap).
+    // Two TEXT children of width 30 each, master positions m02=0 and m02=30.
+    // Override sets stackSpacing=20 at master-root path "0:70".
+    // Instance shrinks primary to 100 → reflow fires (instance < master).
+    // Without override:
+    //   visible width = 30+30 = 60. Start = (100-60)/2 = 20. tx_a=20, tx_b=50.
+    // With override (spacing=20):
+    //   visible width = 30+30+20 = 80. Start = (100-80)/2 = 10. tx_a=10, tx_b=60 (10 + 30 + 20).
+    const text1 = makeNode('TEXT', 71, {
+      textData: { characters: 'a' },
+      size: { x: 30, y: 13 },
+      transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 9.5 },
+    });
+    const text2 = makeNode('TEXT', 72, {
+      textData: { characters: 'b' },
+      size: { x: 30, y: 13 },
+      transform: { m00: 1, m01: 0, m02: 30, m10: 0, m11: 1, m12: 9.5 },
+    });
+    const symMaster = makeNode('SYMBOL', 70, {
+      size: { x: 200, y: 32 },
+      stackMode: 'HORIZONTAL',
+      stackPrimaryAlignItems: 'CENTER',
+      stackCounterAlignItems: 'CENTER',
+      stackSpacing: 0,
+    }, [text1, text2]);
+    const instance = makeNode('INSTANCE', 80, {
+      size: { x: 100, y: 32 }, // shrunk → reflow fires
+      symbolData: {
+        symbolID: { sessionID: 0, localID: 70 },
+        symbolOverrides: [
+          {
+            guidPath: { guids: [{ sessionID: 0, localID: 70 }] }, // master-root path
+            stackSpacing: 20,
+          },
+        ],
+      },
+    });
+    const symbolIndex = buildSymbolIndex([symMaster, instance]);
+    const out = toClientNode(instance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{ id: string; transform?: { m02?: number } }>;
+    expect(renderChildren).toHaveLength(2);
+    const a = renderChildren.find((c) => c.id === '0:71')!;
+    const b = renderChildren.find((c) => c.id === '0:72')!;
+    // With spacing=20 honored: tx_a=10, tx_b=60.
+    expect(a.transform!.m02).toBeCloseTo(10);
+    expect(b.transform!.m02).toBeCloseTo(60);
+  });
+
+  it('T-st-6: no master-root override → master stackSpacing used (regression check)', () => {
+    // Same setup as T-st-5 but no stack* override. Reflow uses master
+    // spacing=0 → start = (100-60)/2 = 20, tx_a=20, tx_b=50.
+    const text1 = makeNode('TEXT', 71, {
+      textData: { characters: 'a' },
+      size: { x: 30, y: 13 },
+      transform: { m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 9.5 },
+    });
+    const text2 = makeNode('TEXT', 72, {
+      textData: { characters: 'b' },
+      size: { x: 30, y: 13 },
+      transform: { m00: 1, m01: 0, m02: 30, m10: 0, m11: 1, m12: 9.5 },
+    });
+    const symMaster = makeNode('SYMBOL', 70, {
+      size: { x: 200, y: 32 },
+      stackMode: 'HORIZONTAL',
+      stackPrimaryAlignItems: 'CENTER',
+      stackCounterAlignItems: 'CENTER',
+      stackSpacing: 0,
+    }, [text1, text2]);
+    const instance = makeNode('INSTANCE', 80, {
+      size: { x: 100, y: 32 },
+      symbolData: { symbolID: { sessionID: 0, localID: 70 } },
+    });
+    const symbolIndex = buildSymbolIndex([symMaster, instance]);
+    const out = toClientNode(instance, [], symbolIndex);
+    const renderChildren = out._renderChildren as Array<{ id: string; transform?: { m02?: number } }>;
+    const a = renderChildren.find((c) => c.id === '0:71')!;
+    const b = renderChildren.find((c) => c.id === '0:72')!;
+    expect(a.transform!.m02).toBeCloseTo(20);
+    expect(b.transform!.m02).toBeCloseTo(50);
+  });
+});
+
 
 

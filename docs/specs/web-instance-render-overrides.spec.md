@@ -135,6 +135,32 @@ Figma 가 만든 .fig 안의 INSTANCE 에는 종종 `symbolData.symbolOverrides[
 
 소스 케이스: 메타리치 일부 INSTANCE 가 stroke 색을 변형(variant)별로 stamp (예: focus state 의 input 박스 stroke 색). round-26 까지는 master 의 stroke 만 렌더 → 시각적으로 figma 와 다름. round-27 부터는 instance 별 stroke / corner / opacity 가 정확히 적용.
 
+### 3.7 Auto-layout subset override — stackSpacing / padding (round-28)
+
+배경 — round-22 derivedSize + round-24 derivedTransform 이 이미 *post-layout 결과* 를 stamp 하므로 이론적으로는 stack* 의 *원인* override 가 redundant. 그러나 (a) 모든 자손이 derivedSymbolData 에 covered 되지 않을 수 있고, (b) `applyInstanceReflow` 가 master root 시점에 master 의 stackSpacing 을 직접 read 한다 — 이 시점에 override 가 적용되어 있으면 reflow 가 다른 결과 produce. round-28 은 8 단순-value-필드만 좁게 처리하는 *empirical 시도* — visible win 0 이면 정직하게 0 으로 close, 나오면 후속 라운드.
+
+- I-AL1 `collectStackOverridesFromInstance(overrides) → Map<pathKey, StackOverride>`. 8개 whitelist:
+  ```
+  stackSpacing, stackCounterSpacing,
+  stackHorizontalPadding, stackVerticalPadding,
+  stackPaddingLeft, stackPaddingRight, stackPaddingTop, stackPaddingBottom
+  ```
+  pathKey scheme 은 §3.1 I-C1 (round-25 v3) 그대로.
+- I-AL2 entry 가 위 필드를 *하나도* 가지지 않으면 map 추가 안 함 (silent skip — round-26/27 와 동일).
+- I-AL3 `toClientNode` INSTANCE 분기에서, master root path-key (`master.guidStr`) 에 매칭되는 override 가 있으면 `applyInstanceReflow` 호출 전에 *masterData 와 merge* 해서 reflow 가 override 값을 사용. 즉:
+  ```ts
+  const overrideAtRoot = stackOverridesByPath.get(master.guidStr);
+  const effectiveMasterData = overrideAtRoot
+    ? { ...masterData, ...overrideAtRoot }
+    : masterData;
+  applyInstanceReflow(expanded, effectiveMasterData, ...);
+  ```
+- I-AL4 descendant FRAME 에서 stack* override 가 매칭되면 `out` 에 spread 적용 (correctness — Canvas 가 직접 읽지 않더라도 데이터 일관성). 단 reflow 는 outer/nested INSTANCE 경계에서만 실행되므로 descendant FRAME 의 override 는 시각적으로 round-22+24 가 이미 baking 한 결과로 redundant 일 가능성 큼.
+- I-AL5 nested INSTANCE prefix-merge — round-25 plumbing 그대로.
+- I-AL6 master immutability — masterData merge 는 reflow 호출 시점의 *임시 객체* 만; master TreeNode 자체는 mutation 없음.
+
+소스 케이스: 메타리치 INSTANCE 중 master FRAME 의 stackSpacing / padding 을 변형별로 stamp 한 케이스 (~1,000 entries 분포). 만약 reflow 가 fire 한 INSTANCE (instance < master shrunk) 에서 spacing/padding override 가 master 와 다르면 자식 위치가 달라짐. fire 안 하면 redundant.
+
 ## 6. 비대상 (v1)
 
 - ~~**stroke / opacity / cornerRadius override** — 같은 패턴으로 `collectStrokeOverridesFromInstance` 등 추가 필요. fillPaints 가 가장 흔한 케이스라 우선 처리. 다음 라운드에서 확장.~~ **(round-27 §3.6 부터 지원 — stroke + corner family + opacity, 7개 필드 whitelist)**

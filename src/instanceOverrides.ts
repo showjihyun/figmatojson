@@ -230,6 +230,59 @@ export function collectVisualStyleOverridesFromInstance(
 }
 
 /**
+ * Auto-layout subset fields that round-28 lets symbolOverrides override
+ * per INSTANCE on a path-keyed basis. Whitelist (spec §3.7 I-AL1).
+ *
+ * Covers spacing + padding only — pure value override, no algorithmic
+ * change to reflow's behavior. The other stack* fields
+ * (`stackPrimarySizing` / `stackPrimaryAlignItems` / `stackChildPrimaryGrow`
+ * / etc.) need reflow rule changes and stay unhandled in round-28.
+ */
+const STACK_SUBSET_OVERRIDE_FIELDS: ReadonlySet<string> = new Set([
+  'stackSpacing', 'stackCounterSpacing',
+  'stackHorizontalPadding', 'stackVerticalPadding',
+  'stackPaddingLeft', 'stackPaddingRight', 'stackPaddingTop', 'stackPaddingBottom',
+]);
+
+/**
+ * Pull stack-subset overrides (spacing + padding) out of an INSTANCE's
+ * symbolOverrides[]. Returns Map<pathKey, Partial<StackSubsetFields>>.
+ * Application: at applyInstanceReflow time, the master-root entry is
+ * merged into masterData so reflow uses the variant-stamped spacing /
+ * padding values instead of master defaults.
+ *
+ * Round-28 is an *empirical try* — most stack* override paths target
+ * descendants rather than master root, and at descendant level
+ * derivedSize (round 22) + derivedTransform (round 24) already capture
+ * the post-layout result, so the override is visually redundant. Only
+ * master-root overrides exercised at reflow time can move pixels.
+ *
+ * Spec: docs/specs/web-instance-render-overrides.spec.md §3.7 I-AL1..I-AL2
+ *       (round-28).
+ */
+export function collectStackOverridesFromInstance(
+  overrides: Array<Record<string, unknown>> | undefined,
+): Map<string, Record<string, unknown>> {
+  const m = new Map<string, Record<string, unknown>>();
+  if (!Array.isArray(overrides)) return m;
+  for (const o of overrides) {
+    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+    const key = pathKeyFromGuids(guids);
+    if (key === null) continue;
+    const subset: Record<string, unknown> = {};
+    let hasAny = false;
+    for (const k of Object.keys(o)) {
+      if (STACK_SUBSET_OVERRIDE_FIELDS.has(k)) {
+        subset[k] = o[k];
+        hasAny = true;
+      }
+    }
+    if (hasAny) m.set(key, subset);
+  }
+  return m;
+}
+
+/**
  * Pull boolean component-property assignments off an INSTANCE node's `data`.
  * Returns Map<defIdKey, boolean> keyed by `${sessionID}:${localID}` of the
  * property's defID. Used by the walk to resolve descendants whose
