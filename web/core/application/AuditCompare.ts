@@ -170,8 +170,61 @@ function isGroupLike(n: Record<string, unknown> | null | undefined): boolean {
   return !Array.isArray(fills) || fills.length === 0;
 }
 
+/**
+ * Build a Plugin-compatible composite ID for a node visited inside an
+ * INSTANCE expansion. Plugin format: `I<instance.guid>;<master.overrideKey>`.
+ * Returns `null` when the node has no `overrideKey` (kiwi doesn't stamp
+ * one — happens on synthetic / non-publishable subtree members).
+ */
+function compositeId(instanceId: string, n: { overrideKey?: { sessionID?: number; localID?: number } }): string | null {
+  const ok = n.overrideKey;
+  if (!ok || typeof ok.sessionID !== 'number' || typeof ok.localID !== 'number') return null;
+  return `I${instanceId};${ok.sessionID}:${ok.localID}`;
+}
+
+/**
+ * Walk an INSTANCE's `_renderChildren` (and any nested children/_renderChildren),
+ * indexing each descendant under both its plain `id` (master GUID, useful
+ * if Plugin ever exposes the master directly) and its instance-scoped
+ * composite ID so Plugin's `I…;…` keys match. The walk passes the
+ * already-flattened groupOffset down so GROUP coord-transparency keeps
+ * working inside instances.
+ */
+function indexInstanceMasters(
+  instanceId: string,
+  children: unknown[] | undefined,
+  out: Map<string, unknown>,
+  groupOffset: { dx: number; dy: number },
+): void {
+  if (!Array.isArray(children)) return;
+  for (const c of children) {
+    if (!c || typeof c !== 'object') continue;
+    const node = c as { id?: string; type?: string; transform?: { m02?: number; m12?: number }; overrideKey?: { sessionID?: number; localID?: number }; children?: unknown[]; _renderChildren?: unknown[] };
+    if (typeof node.type === 'string' && SKIP_TYPES.has(node.type)) continue;
+    let view: unknown = node;
+    if (groupOffset.dx !== 0 || groupOffset.dy !== 0) {
+      const t = node.transform;
+      const m02 = (t?.m02 ?? 0) + groupOffset.dx;
+      const m12 = (t?.m12 ?? 0) + groupOffset.dy;
+      view = { ...node, transform: { ...(t ?? {}), m02, m12 } };
+    }
+    const ck = compositeId(instanceId, node);
+    if (ck) out.set(ck, view);
+    let childOffset = { dx: 0, dy: 0 };
+    if (isGroupLike(node as never)) {
+      const t = node.transform;
+      childOffset = {
+        dx: groupOffset.dx + (t?.m02 ?? 0),
+        dy: groupOffset.dy + (t?.m12 ?? 0),
+      };
+    }
+    if (Array.isArray(node.children)) indexInstanceMasters(instanceId, node.children, out, childOffset);
+    if (Array.isArray(node._renderChildren)) indexInstanceMasters(instanceId, node._renderChildren, out, childOffset);
+  }
+}
+
 function indexById(
-  n: { id?: string; type?: string; transform?: { m02?: number; m12?: number }; children?: Array<{ id?: string; type?: string; children?: unknown }> } | null | undefined,
+  n: { id?: string; type?: string; transform?: { m02?: number; m12?: number }; _renderChildren?: unknown[]; children?: Array<{ id?: string; type?: string; children?: unknown }> } | null | undefined,
   out: Map<string, unknown>,
   flattenGroups: boolean = false,
   groupOffset: { dx: number; dy: number } = { dx: 0, dy: 0 },
@@ -187,6 +240,14 @@ function indexById(
       out.set(n.id, flattened);
     } else {
       out.set(n.id, n);
+    }
+    // INSTANCE side branch: `_renderChildren` carries the master expansion
+    // with each descendant's `overrideKey` stamped. Index those under
+    // composite Plugin keys so `I<instance>;<overrideKey>` resolves on a
+    // plain Map lookup. Only kicks in when `flattenGroups=true` (the kiwi
+    // walk) — plugin trees already carry composite IDs as `id`.
+    if (flattenGroups && n.type === 'INSTANCE' && Array.isArray(n._renderChildren)) {
+      indexInstanceMasters(n.id, n._renderChildren, out, { dx: 0, dy: 0 });
     }
   }
   if (Array.isArray(n.children)) {
@@ -289,7 +350,16 @@ const COMPARABLE_FIELDS: Array<{
     },
     same('opacity', (n) => n.opacity),
     same('cornerRadius', (n) => n.cornerRadius),
-    same('strokeWeight', (n) => n.strokeWeight),
+    {
+      // Plugin/REST emit strokeWeight only when strokes is non-empty
+      // (see figma-plugin/code.js). Kiwi keeps a default 1 on every
+      // shape regardless. Gate on Figma's strokes presence so we don't
+      // light up 500+ false positives on stroke-less FRAMEs.
+      field: 'strokeWeight',
+      pickFigma: (n) => n.strokeWeight,
+      pickOurs: (n) => n.strokeWeight,
+      gate: (figma) => Array.isArray(figma.strokes) && (figma.strokes as unknown[]).length > 0,
+    },
     // fills/strokes — plugin uses `fills`/`strokes`, kiwi uses `fillPaints`/`strokePaints`.
     { field: 'fills.length', pickFigma: arrLen('fills'), pickOurs: arrLen('fillPaints') },
     { field: 'strokes.length', pickFigma: arrLen('strokes'), pickOurs: arrLen('strokePaints') },
