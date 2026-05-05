@@ -36,25 +36,50 @@ Then in Figma Desktop:
 
 ## What gets compared
 
-Phase 2 MVP scope — see `figma-plugin/code.js` `serializeNode` and
-`web/core/application/AuditCompare.ts` `COMPARABLE_FIELDS`:
+See `figma-plugin/code.js` `serializeNode` and `web/core/application/
+AuditCompare.ts` `COMPARABLE_FIELDS` for the source of truth. Field set:
 
 - `type`, `name`, `visible`
-- `size.x`, `size.y`
-- `transform.m02`, `transform.m12`
-- `rotation`, `opacity`, `cornerRadius`, `strokeWeight`
-- `fills.length`, `strokes.length`
-- TEXT: `characters`, `fontSize`, `fontName.family`, `fontName.style`
-- Auto-layout: `stackMode`, `stackSpacing`, `stackPadding{Left,Right,Top,Bottom}`,
+- `size.x`, `size.y`, `transform.m02`, `transform.m12`
+- `rotation` (derived from kiwi transform matrix), `opacity`, `cornerRadius`
+- `strokeWeight` — gated on figma's `strokes.length > 0`
+- `fills.length`, `strokes.length` (paint bodies out of scope)
+- TEXT-gated: `characters`, `fontSize`, `fontName.family`, `fontName.style`
+- autolayout-gated: `stackMode`, `stackSpacing`, `stackPadding{Left,…}`,
   `stackPrimaryAlignItems`, `stackCounterAlignItems`
 
-Float comparisons use a 0.5 px tolerance (sub-pixel differences are
-invisible). NaN === NaN is treated as equal (Figma's kiwi schema emits NaN
-bit-pattern as the default for unset stack* spacing fields).
+### Comparison rules
 
-Out of scope for MVP: paint colors, gradient stops, effect shadows, vector
-geometry, prototyping. Add fields to the COMPARABLE_FIELDS list as we
-expand coverage.
+- Float equality uses a 0.5 px tolerance — sub-pixel differences are
+  invisible.
+- NaN === NaN is equal — kiwi emits NaN bit-pattern as the default for
+  unset stack* spacing fields.
+- Default substitution: `figma=undefined ↔ ours=<default>` is equal.
+  Defaults are registered for representational-omission cases (Plugin
+  emits only non-default values for some fields).
+- Type aliases: `SYMBOL ↔ COMPONENT`, `ROUNDED_RECTANGLE ↔ RECTANGLE`,
+  `CANVAS ↔ PAGE`. `FRAME` with `resizeToFit=true` and empty `fillPaints`
+  reclassifies to `GROUP` (Figma's plugin/REST view).
+- GROUP coordinate transparency: kiwi-side walk pre-adds GROUP-ancestor
+  offsets to descendants' transforms, matching Plugin's "skip GROUP for
+  parent reference" behavior.
+- Composite IDs: nodes inside an INSTANCE arrive as
+  `I<instance.guid>;<master.overrideKey>` from Plugin. Our walk
+  synthesizes the same key by looking up `overrideKey` on each
+  `_renderChildren` descendant — both sides end up indexed under the
+  same key.
+
+### Baseline
+
+bvp.fig current page (round 31): 704 matched / 18,304 field comparisons /
+**99.47% agreement**. 97 remaining diffs split between known noise
+categories (schema enum rename, Plugin Mixed-font omission, etc.) and
+~30 real signals pointing at a round-26/27 follow-up — nested-instance
+text and size overrides not propagating through `_renderChildren`.
+
+Out of scope: paint bodies (rgba, gradient stops, image hash), effect
+shadows, vector geometry, prototyping, multi-page audit. See
+`docs/specs/audit-oracle.spec.md` §7 for the full out-of-scope list.
 
 ## Why a plugin
 
