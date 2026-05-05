@@ -115,7 +115,14 @@ function adaptNode(node, parentAbs = { x: 0, y: 0 }) {
     out.stackCounterAlignItems = node.counterAxisAlignItems;
   }
   if (Array.isArray(node.children) && node.children.length > 0) {
-    const childParentAbs = bbox ? { x: bbox.x, y: bbox.y } : parentAbs;
+    // GROUP transparency — Figma's plugin API treats GROUP as having no
+    // transform space, so children's `node.x/y` are relative to the
+    // closest non-GROUP ancestor. Mirror that here so REST trial signal
+    // matches Plugin trial signal (and our parser's group-flatten in
+    // AuditCompare's `indexById`).
+    const childParentAbs = node.type === 'GROUP'
+      ? parentAbs
+      : (bbox ? { x: bbox.x, y: bbox.y } : parentAbs);
     out.children = node.children.map((c) => adaptNode(c, childParentAbs));
   }
   return out;
