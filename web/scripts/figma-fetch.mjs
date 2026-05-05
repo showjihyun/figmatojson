@@ -4,23 +4,35 @@
  *
  *   node scripts/figma-fetch.mjs [<page-slug>...]
  *
- * Reads .env.local for FIGMA_TOKEN + FIGMA_FILE_KEY. Batches node ids in
- * groups of 50, calls /v1/images, downloads each returned URL into the
- * matching <page>/<component>/figma.png.
+ * Default corpus: metarich (`docs/audit-round11/_INVENTORY.json` +
+ * `FIGMA_FILE_KEY` env var). Override per round-29 multi-corpus support:
+ *   AUDIT_OUT_ROOT      — directory containing _INVENTORY.json
+ *   AUDIT_FILE_KEY_ENV  — name of the env var holding this corpus's Figma
+ *                         file key (default `FIGMA_FILE_KEY`). e.g. set to
+ *                         `FIGMA_FILE_KEY_BVP` to use a separate key.
  *
- * Also fetches a per-page overview by rendering the page CANVAS itself
- * (page node id like "0:1") at scale 1. The page render gives the same
- * canvas-level image Figma uses for the file thumbnail — useful as the
- * page-overview reference.
+ * Reads .env.local for `FIGMA_TOKEN` + the file-key env var. Batches node
+ * ids in groups of 15 (Figma's images endpoint times out around 50 ids
+ * for large frames), calls /v1/images, downloads each URL into the
+ * matching <page>/<component>/figma.png. Also fetches a per-page overview
+ * by rendering the page CANVAS itself.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '..', '..');
-const OUT_ROOT = resolve(REPO_ROOT, 'docs', 'audit-round11');
+
+function repoPath(p) {
+  return isAbsolute(p) ? p : resolve(REPO_ROOT, p);
+}
+
+const OUT_ROOT = process.env.AUDIT_OUT_ROOT
+  ? repoPath(process.env.AUDIT_OUT_ROOT)
+  : resolve(REPO_ROOT, 'docs', 'audit-round11');
+const FILE_KEY_ENV = process.env.AUDIT_FILE_KEY_ENV ?? 'FIGMA_FILE_KEY';
 const INV_PATH = resolve(OUT_ROOT, '_INVENTORY.json');
 
 // Figma's images endpoint times out around 50 ids when many are large
@@ -112,8 +124,8 @@ async function fetchAndSave(token, fileKey, jobs, scale, opts = {}) {
 async function main() {
   const env = loadEnv();
   const token = env.FIGMA_TOKEN;
-  const fileKey = env.FIGMA_FILE_KEY;
-  if (!token || !fileKey) throw new Error('FIGMA_TOKEN / FIGMA_FILE_KEY missing in .env.local');
+  const fileKey = env[FILE_KEY_ENV];
+  if (!token || !fileKey) throw new Error(`FIGMA_TOKEN / ${FILE_KEY_ENV} missing in .env.local`);
   if (!existsSync(INV_PATH)) throw new Error(`run build-audit-inventory.mjs first — no ${INV_PATH}`);
   const inv = JSON.parse(readFileSync(INV_PATH, 'utf-8'));
 

@@ -1,11 +1,18 @@
 /**
- * Phase A — build the deep audit inventory across all 6 pages.
+ * Phase A — build the deep audit inventory for an audit corpus.
  *
  *   node scripts/build-audit-inventory.mjs
  *
- * Reads the metarich .fig via the running backend, walks every page, and
- * emits docs/audit-round11/_INVENTORY.json (machine-readable) plus a
- * human-readable _INVENTORY.md.
+ * Default corpus: metarich (`docs/메타리치 화면 UI Design.fig` →
+ * `docs/audit-round11/`). Override per round-29 multi-corpus support
+ * via env vars:
+ *   AUDIT_FIG_PATH    — absolute or repo-relative path to the .fig file
+ *   AUDIT_OUT_ROOT    — output directory (e.g. `docs/audit-bvp`)
+ *   AUDIT_CORPUS_NAME — short name used in the _INVENTORY.md heading
+ *
+ * Reads the .fig via the running backend (`http://localhost:5274/api/upload`),
+ * walks every visible page, and emits `<OUT_ROOT>/_INVENTORY.json` (machine-
+ * readable) plus a human-readable `<OUT_ROOT>/_INVENTORY.md`.
  *
  * Selection rules:
  *  - capture: page overview + every container-typed node whose size ≥ 50×50
@@ -16,14 +23,24 @@
  *    swatches in `icons` page).
  */
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '..', '..');
-const FIG_PATH = resolve(REPO_ROOT, 'docs', '메타리치 화면 UI Design.fig');
-const OUT_ROOT = resolve(REPO_ROOT, 'docs', 'audit-round11');
+
+function repoPath(p) {
+  return isAbsolute(p) ? p : resolve(REPO_ROOT, p);
+}
+
+const FIG_PATH = process.env.AUDIT_FIG_PATH
+  ? repoPath(process.env.AUDIT_FIG_PATH)
+  : resolve(REPO_ROOT, 'docs', '메타리치 화면 UI Design.fig');
+const OUT_ROOT = process.env.AUDIT_OUT_ROOT
+  ? repoPath(process.env.AUDIT_OUT_ROOT)
+  : resolve(REPO_ROOT, 'docs', 'audit-round11');
+const CORPUS_NAME = process.env.AUDIT_CORPUS_NAME ?? 'Round 11';
 
 const CONTAINER_TYPES = new Set(['FRAME', 'SECTION', 'SYMBOL', 'INSTANCE', 'COMPONENT_SET']);
 // Per-depth size filter — coarser at depth 1, finer-grained allowed deeper.
@@ -215,10 +232,11 @@ async function main() {
   writeFileSync(resolve(OUT_ROOT, '_INVENTORY.json'), JSON.stringify(inv, null, 2));
 
   // Markdown summary
+  const figRel = FIG_PATH.startsWith(REPO_ROOT) ? FIG_PATH.slice(REPO_ROOT.length + 1).replace(/\\/g, '/') : FIG_PATH;
   const lines = [
-    '# Round 11 — full audit inventory',
+    `# ${CORPUS_NAME} — full audit inventory`,
     '',
-    `Source: \`docs/메타리치 화면 UI Design.fig\``,
+    `Source: \`${figRel}\``,
     `Total pages: ${inv.pages.length}`,
     '',
     'Selection rules:',
