@@ -1,0 +1,13 @@
+{
+  "fixture": "docs/bvp.fig",
+  "canvasOrigBytes": 564643,
+  "canvasRtBytes": 676932,
+  "schemaDefsOrig": 576,
+  "schemaDefsRt": 576,
+  "aggregate": {
+    "total": 0,
+    "byKind": {},
+    "topFields": []
+  },
+  "sample": []
+}

@@ -1,0 +1,158 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>figma_reverse audit</title>
+    <style>
+      :root { color-scheme: light dark; font-family: 'Inter', -apple-system, sans-serif; }
+      body { margin: 0; padding: 12px; font-size: 12px; line-height: 1.5; }
+      h2 { margin: 0 0 8px; font-size: 13px; }
+      p { margin: 4px 0; color: #666; }
+      .row { display: flex; gap: 6px; align-items: center; margin: 8px 0; }
+      button {
+        padding: 6px 10px; font-size: 12px; cursor: pointer;
+        border: 1px solid #888; border-radius: 4px; background: white;
+      }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      input[type="file"] { font-size: 11px; }
+      .status { margin: 8px 0; padding: 6px 8px; border-radius: 4px; background: #f4f4f4; font-family: monospace; font-size: 11px; white-space: pre-wrap; }
+      .status.error { background: #fde0e0; color: #800; }
+      .status.success { background: #e0f5e0; color: #060; }
+      .summary { margin-top: 12px; }
+      table { width: 100%; border-collapse: collapse; font-size: 11px; }
+      th, td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #eee; }
+      th { background: #fafafa; }
+      td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    </style>
+  </head>
+  <body>
+    <h2>figma_reverse — audit oracle</h2>
+    <p>
+      Open a .fig file in Figma. Then upload the same file here.
+      We diff Figma's tree vs. our parser's tree.
+    </p>
+
+    <div class="row">
+      <input id="file" type="file" accept=".fig" />
+    </div>
+
+    <div class="row">
+      <button id="run" disabled>Run audit</button>
+      <button id="close">Close</button>
+    </div>
+
+    <div id="status" class="status" hidden></div>
+    <div id="summary" class="summary"></div>
+
+    <script>
+      const BACKEND = 'http://localhost:5274';
+      const $ = (id) => document.getElementById(id);
+      const fileInput = $('file');
+      const runBtn = $('run');
+      const closeBtn = $('close');
+      const statusEl = $('status');
+      const summaryEl = $('summary');
+
+      let pendingFile = null;
+      let sessionId = null;
+
+      fileInput.addEventListener('change', (e) => {
+        pendingFile = e.target.files[0] || null;
+        runBtn.disabled = !pendingFile;
+        showStatus('');
+      });
+
+      closeBtn.addEventListener('click', () => parent.postMessage({ pluginMessage: { type: 'close' } }, '*'));
+
+      function showStatus(text, kind) {
+        statusEl.hidden = !text;
+        statusEl.className = 'status' + (kind ? ' ' + kind : '');
+        statusEl.textContent = text;
+      }
+
+      async function uploadFig(file) {
+        const fd = new FormData();
+        fd.append('file', file);
+        const res = await fetch(BACKEND + '/api/upload', { method: 'POST', body: fd });
+        if (!res.ok) throw new Error('upload ' + res.status);
+        return res.json();
+      }
+
+      async function compare(sessionId, figmaTree) {
+        const res = await fetch(BACKEND + '/api/audit/compare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, figmaTree }),
+        });
+        if (!res.ok) throw new Error('compare ' + res.status);
+        return res.json();
+      }
+
+      runBtn.addEventListener('click', async () => {
+        try {
+          runBtn.disabled = true;
+          summaryEl.innerHTML = '';
+          showStatus('Uploading .fig to backend…');
+          const upload = await uploadFig(pendingFile);
+          sessionId = upload.sessionId;
+          showStatus('Uploaded (session=' + sessionId + ', pages=' + upload.pageCount + ', nodes=' + upload.nodeCount + '). Asking Figma sandbox for current page…');
+          parent.postMessage({ pluginMessage: { type: 'serialize-current-page' } }, '*');
+        } catch (err) {
+          showStatus('ERR: ' + err.message, 'error');
+          runBtn.disabled = false;
+        }
+      });
+
+      window.addEventListener('message', async (e) => {
+        const msg = e.data && e.data.pluginMessage;
+        if (!msg) return;
+        if (msg.type === 'serialize-error') {
+          showStatus('serialize ERR: ' + msg.error, 'error');
+          runBtn.disabled = false;
+          return;
+        }
+        if (msg.type === 'serialize-result') {
+          try {
+            showStatus('Got Figma tree, running compare on backend…');
+            const report = await compare(sessionId, msg.tree);
+            renderReport(report);
+            showStatus('Done.', 'success');
+          } catch (err) {
+            showStatus('compare ERR: ' + err.message, 'error');
+          } finally {
+            runBtn.disabled = false;
+          }
+        }
+      });
+
+      function renderReport(report) {
+        const s = report.summary || {};
+        const rows = [
+          ['Figma nodes', s.figmaNodeCount],
+          ['Our nodes', s.ourNodeCount],
+          ['Total diffs', s.totalDiffs],
+          ['Matched nodes', s.matchedNodes],
+        ];
+        let html = '<table><tbody>';
+        for (const [k, v] of rows) {
+          html += '<tr><td>' + k + '</td><td class="num">' + (v == null ? '-' : Number(v).toLocaleString()) + '</td></tr>';
+        }
+        html += '</tbody></table>';
+
+        if (Array.isArray(report.topFields) && report.topFields.length) {
+          html += '<h3 style="font-size:12px;margin:12px 0 4px">Top differing fields</h3>';
+          html += '<table><thead><tr><th>Field</th><th class="num">Count</th></tr></thead><tbody>';
+          for (const tf of report.topFields.slice(0, 20)) {
+            html += '<tr><td><code>' + escapeHtml(tf.field) + '</code></td><td class="num">' + tf.count + '</td></tr>';
+          }
+          html += '</tbody></table>';
+        }
+        summaryEl.innerHTML = html;
+      }
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      }
+    </script>
+  </body>
+</html>

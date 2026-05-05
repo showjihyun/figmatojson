@@ -1,0 +1,115 @@
+{
+  "fixture": "docs/메타리치 화면 UI Design.fig",
+  "origBytes": 6053077,
+  "rtBytes": 7153356,
+  "upload": {
+    "sessionId": "smosj3m43h4va",
+    "origName": "메타리치 화면 UI Design.fig",
+    "pageCount": 6,
+    "nodeCount": 35660
+  },
+  "summary": {
+    "totalOrigBytes": 6049081,
+    "identicalBytes": 2124479,
+    "identicalRatio": 0.351206902337727,
+    "identicalCount": 14,
+    "differingCount": 1,
+    "missingCount": 0,
+    "extraCount": 0,
+    "totalEntries": 15
+  },
+  "entries": [
+    {
+      "name": "canvas.fig",
+      "status": "differs",
+      "origBytes": 3924602,
+      "rtBytes": 5026523,
+      "deltaBytes": 1101921,
+      "firstDiffOffset": 12
+    },
+    {
+      "name": "images/01953550d5c10ff5aaee77e79c77ce256875bb6b",
+      "status": "identical",
+      "origBytes": 8867,
+      "rtBytes": 8867
+    },
+    {
+      "name": "images/0f14a2f973ae09c67614de33d251fee63977d529",
+      "status": "identical",
+      "origBytes": 20672,
+      "rtBytes": 20672
+    },
+    {
+      "name": "images/37999f9a51cd07291136d98a4c5cdf3deb35c569",
+      "status": "identical",
+      "origBytes": 36519,
+      "rtBytes": 36519
+    },
+    {
+      "name": "images/3c5340b37833183bddfbbed020d2c1c517096d72",
+      "status": "identical",
+      "origBytes": 832,
+      "rtBytes": 832
+    },
+    {
+      "name": "images/3cdf32b76b7dc2f34d36b6ffd6ec2f310593ca7d",
+      "status": "identical",
+      "origBytes": 14275,
+      "rtBytes": 14275
+    },
+    {
+      "name": "images/4a4757f9ef4ccb919c24ecda96db569c4771ef06",
+      "status": "identical",
+      "origBytes": 120773,
+      "rtBytes": 120773
+    },
+    {
+      "name": "images/572c10ead48d1daeab94c46bd7d5a6492e832c15",
+      "status": "identical",
+      "origBytes": 211322,
+      "rtBytes": 211322
+    },
+    {
+      "name": "images/7aced7c8b22bfd0ed1e63e9085f60304e8fec4c3",
+      "status": "identical",
+      "origBytes": 56527,
+      "rtBytes": 56527
+    },
+    {
+      "name": "images/8e7d0ea2af7548818c2bf43848030d79ca5a68d4",
+      "status": "identical",
+      "origBytes": 59197,
+      "rtBytes": 59197
+    },
+    {
+      "name": "images/b1e57e5318be983030969471591b1830b5b9e2da",
+      "status": "identical",
+      "origBytes": 19780,
+      "rtBytes": 19780
+    },
+    {
+      "name": "images/c4ce55427425a55fe65a47f1b26e7c7bfd6aeafa",
+      "status": "identical",
+      "origBytes": 5875,
+      "rtBytes": 5875
+    },
+    {
+      "name": "images/ce4146cfe6b0615539b0dd6418dc93462e7736dd",
+      "status": "identical",
+      "origBytes": 1551378,
+      "rtBytes": 1551378
+    },
+    {
+      "name": "meta.json",
+      "status": "identical",
+      "origBytes": 340,
+      "rtBytes": 340
+    },
+    {
+      "name": "thumbnail.png",
+      "status": "identical",
+      "origBytes": 18122,
+      "rtBytes": 18122
+    }
+  ]
+}

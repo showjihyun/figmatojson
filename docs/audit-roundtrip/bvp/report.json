@@ -1,0 +1,103 @@
+{
+  "fixture": "docs/bvp.fig",
+  "origBytes": 4951778,
+  "rtBytes": 5062660,
+  "upload": {
+    "sessionId": "smosj3klf9zik",
+    "origName": "bvp.fig",
+    "pageCount": 3,
+    "nodeCount": 3155
+  },
+  "summary": {
+    "totalOrigBytes": 4948357,
+    "identicalBytes": 4383714,
+    "identicalRatio": 0.8858928327119486,
+    "identicalCount": 12,
+    "differingCount": 1,
+    "missingCount": 0,
+    "extraCount": 0,
+    "totalEntries": 13
+  },
+  "entries": [
+    {
+      "name": "canvas.fig",
+      "status": "differs",
+      "origBytes": 564643,
+      "rtBytes": 676932,
+      "deltaBytes": 112289,
+      "firstDiffOffset": 8
+    },
+    {
+      "name": "images/289a4da3e5723666778f34213d9c6998673d9c17",
+      "status": "identical",
+      "origBytes": 70358,
+      "rtBytes": 70358
+    },
+    {
+      "name": "images/351456e12f5566afbdbf90c663e30fe7576369b7",
+      "status": "identical",
+      "origBytes": 1435154,
+      "rtBytes": 1435154
+    },
+    {
+      "name": "images/4906cf10510592cbfeb7e63fbb57239f335d0046",
+      "status": "identical",
+      "origBytes": 70234,
+      "rtBytes": 70234
+    },
+    {
+      "name": "images/5b1c8095afb4fabc5ab21e7ed06170b7a6ef00c5",
+      "status": "identical",
+      "origBytes": 1300032,
+      "rtBytes": 1300032
+    },
+    {
+      "name": "images/6c0f7f75fd1606486ebc33acc4f3e3fd42f01b56",
+      "status": "identical",
+      "origBytes": 159448,
+      "rtBytes": 159448
+    },
+    {
+      "name": "images/7a3b1e4476386253951e0ff5b0ba56c940170ef1",
+      "status": "identical",
+      "origBytes": 176071,
+      "rtBytes": 176071
+    },
+    {
+      "name": "images/99378cca4a06c935e9b3a7ca25e89f080f2902cd",
+      "status": "identical",
+      "origBytes": 612434,
+      "rtBytes": 612434
+    },
+    {
+      "name": "images/d2f43d74113a233a685fc06044567d39f5096202",
+      "status": "identical",
+      "origBytes": 195528,
+      "rtBytes": 195528
+    },
+    {
+      "name": "images/d73bd43688fc7303b26aea60df38ab77a83f57ce",
+      "status": "identical",
+      "origBytes": 128238,
+      "rtBytes": 128238
+    },
+    {
+      "name": "images/fb769c6deb853098e94d2e45f9bdd4dc37e36220",
+      "status": "identical",
+      "origBytes": 204889,
+      "rtBytes": 204889
+    },
+    {
+      "name": "meta.json",
+      "status": "identical",
+      "origBytes": 364,
+      "rtBytes": 364
+    },
+    {
+      "name": "thumbnail.png",
+      "status": "identical",
+      "origBytes": 30964,
+      "rtBytes": 30964
+    }
+  ]
+}

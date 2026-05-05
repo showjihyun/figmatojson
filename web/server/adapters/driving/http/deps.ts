@@ -18,6 +18,7 @@ import type { ServeAsset } from '../../../../core/application/ServeAsset.js';
 import type { RunChatTurn } from '../../../../core/application/RunChatTurn.js';
 import type { Undo } from '../../../../core/application/Undo.js';
 import type { Redo } from '../../../../core/application/Redo.js';
+import type { AuditCompare } from '../../../../core/application/AuditCompare.js';
 
 export interface Deps {
   sessionStore: SessionStore;
@@ -32,4 +33,5 @@ export interface Deps {
   runChatTurn: RunChatTurn;
   undo: Undo;
   redo: Redo;
+  auditCompare: AuditCompare;
 }
