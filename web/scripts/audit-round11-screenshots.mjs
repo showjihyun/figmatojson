@@ -1,22 +1,37 @@
 /**
- * Round 11 audit — capture our-side screenshots for every entry in
- * docs/audit-round11/_INVENTORY.json across all 6 metarich pages.
+ * Audit screenshots — capture our-side screenshots for every entry in
+ * `<OUT_ROOT>/_INVENTORY.json`.
  *
  *   node scripts/audit-round11-screenshots.mjs           # all pages
  *   node scripts/audit-round11-screenshots.mjs <slug>... # only matching pages
+ *
+ * Default corpus: metarich (`docs/메타리치 화면 UI Design.fig` →
+ * `docs/audit-round11/`). Override per round-29 multi-corpus support:
+ *   AUDIT_FIG_PATH — repo-relative path to the .fig file
+ *   AUDIT_OUT_ROOT — directory containing _INVENTORY.json + per-slug
+ *                    output folders (e.g. `docs/audit-bvp`)
  *
  * Pre-reqs: web dev server up at :5273 + :5274 (`npm run dev`).
  */
 import { chromium } from 'playwright';
 import { readFileSync, mkdirSync, existsSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '..', '..');
-const FIG_PATH = resolve(REPO_ROOT, 'docs', '메타리치 화면 UI Design.fig');
-const OUT_ROOT = resolve(REPO_ROOT, 'docs', 'audit-round11');
+
+function repoPath(p) {
+  return isAbsolute(p) ? p : resolve(REPO_ROOT, p);
+}
+
+const FIG_PATH = process.env.AUDIT_FIG_PATH
+  ? repoPath(process.env.AUDIT_FIG_PATH)
+  : resolve(REPO_ROOT, 'docs', '메타리치 화면 UI Design.fig');
+const OUT_ROOT = process.env.AUDIT_OUT_ROOT
+  ? repoPath(process.env.AUDIT_OUT_ROOT)
+  : resolve(REPO_ROOT, 'docs', 'audit-round11');
 const INV_PATH = resolve(OUT_ROOT, '_INVENTORY.json');
 
 async function main() {
