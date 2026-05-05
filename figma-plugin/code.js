@@ -35,15 +35,17 @@ function serializeNode(node) {
   if ('fills' in node && Array.isArray(node.fills)) {
     out.fills = node.fills.map(serializeFill);
   }
-  // Always emit strokes / strokeWeight (even when empty / 0). The audit
-  // diff treats undefined as "the field's default" and we want the
-  // distinction between "node really has 0 strokes" and "field omitted"
-  // to be unambiguous on the wire.
+  // strokes — emit empty array when present so the audit `strokes.length`
+  // comparison can disambiguate "field absent" from "0 strokes".
+  // strokeWeight — emit only when strokes are non-empty; the underlying
+  // plugin API still reports the kiwi value (often 1) even on shapes that
+  // have no strokes, but that value is dead data and only churns audit
+  // signal. Pair it with strokes presence to match REST API behavior.
   if ('strokes' in node && Array.isArray(node.strokes)) {
     out.strokes = node.strokes.map(serializeFill);
-  }
-  if ('strokeWeight' in node && typeof node.strokeWeight === 'number') {
-    out.strokeWeight = node.strokeWeight;
+    if (node.strokes.length > 0 && typeof node.strokeWeight === 'number') {
+      out.strokeWeight = node.strokeWeight;
+    }
   }
   if ('cornerRadius' in node && typeof node.cornerRadius === 'number' && node.cornerRadius !== 0) {
     out.cornerRadius = node.cornerRadius;

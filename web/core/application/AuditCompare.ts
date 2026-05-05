@@ -95,6 +95,9 @@ const SKIP_TYPES = new Set(['VARIABLE', 'VARIABLE_SET']);
 const TYPE_ALIASES: Record<string, string> = {
   SYMBOL: 'COMPONENT',
   ROUNDED_RECTANGLE: 'RECTANGLE',
+  // Plugin sandbox returns `figma.currentPage.type === 'PAGE'`. Kiwi calls
+  // the same node type CANVAS (Figma's pre-section internal naming).
+  CANVAS: 'PAGE',
 };
 
 function normalizeType(t: unknown): unknown {
@@ -123,22 +126,86 @@ const FIELD_DEFAULTS: Record<string, unknown> = {
   // every node. Treat undefined-vs-zero as equal so root-only diffs go away.
   'transform.m02': 0,
   'transform.m12': 0,
+  // Auto-layout defaults Figma's plugin API resolves to fixed values when
+  // the field is unset on the source. Without these, Plugin's "always emit"
+  // behavior collides with our parser's "kiwi-stored only" emission.
+  // (Gated by stackMode below — only fire when autolayout is on.)
+  stackSpacing: 0,
+  stackPaddingLeft: 0,
+  stackPaddingRight: 0,
+  stackPaddingTop: 0,
+  stackPaddingBottom: 0,
+  stackPrimaryAlignItems: 'MIN',
+  stackCounterAlignItems: 'MIN',
 };
 
 /**
  * Walk `n` and append (id → node) pairs to `out`, skipping nodes whose
  * type is in `SKIP_TYPES` (and their entire subtree, since variables
  * don't have meaningful descendants for our comparison).
+ *
+ * `groupOffset` flattens GROUP coordinate transparency: in Figma's plugin
+ * API, GROUP nodes don't establish their own transform space — children
+ * report `node.x/y` relative to the closest non-GROUP ancestor. Our kiwi
+ * parser stores transforms parent-relative (group-relative for group
+ * children). We pre-add the accumulated GROUP offset to each non-GROUP
+ * descendant's transform.m02/m12 during indexing, so audit comparisons
+ * see the same effective coordinates as the plugin emits. Plugin trees
+ * arrive already-flattened, so passing offset=0 there is a no-op.
  */
+/**
+ * On the kiwi side (`flattenGroups=true`), classify a node as group-like
+ * if Figma's plugin/REST API would expose it as `GROUP`. The kiwi schema
+ * stores GROUPs as `FRAME` with `resizeToFit=true` and no
+ * `fillPaints`/empty fills — Figma reclassifies them at API boundary.
+ * `n.type === 'GROUP'` covers the rare cases where kiwi exposes the
+ * literal type.
+ */
+function isGroupLike(n: Record<string, unknown> | null | undefined): boolean {
+  if (!n || typeof n !== 'object') return false;
+  if (n.type === 'GROUP') return true;
+  if (n.type !== 'FRAME') return false;
+  if (n.resizeToFit !== true) return false;
+  const fills = n.fillPaints;
+  return !Array.isArray(fills) || fills.length === 0;
+}
+
 function indexById(
-  n: { id?: string; type?: string; children?: Array<{ id?: string; type?: string; children?: unknown }> } | null | undefined,
+  n: { id?: string; type?: string; transform?: { m02?: number; m12?: number }; children?: Array<{ id?: string; type?: string; children?: unknown }> } | null | undefined,
   out: Map<string, unknown>,
+  flattenGroups: boolean = false,
+  groupOffset: { dx: number; dy: number } = { dx: 0, dy: 0 },
 ): void {
   if (!n || typeof n !== 'object') return;
   if (typeof n.type === 'string' && SKIP_TYPES.has(n.type)) return;
-  if (typeof n.id === 'string') out.set(n.id, n);
+  if (typeof n.id === 'string') {
+    if (flattenGroups && (groupOffset.dx !== 0 || groupOffset.dy !== 0)) {
+      const t = n.transform;
+      const m02 = (t?.m02 ?? 0) + groupOffset.dx;
+      const m12 = (t?.m12 ?? 0) + groupOffset.dy;
+      const flattened = { ...n, transform: { ...(t ?? {}), m02, m12 } };
+      out.set(n.id, flattened);
+    } else {
+      out.set(n.id, n);
+    }
+  }
   if (Array.isArray(n.children)) {
-    for (const c of n.children) indexById(c as never, out);
+    // Plugin's GROUP children inherit GROUP's coord space; mirror that on
+    // ours by extending groupOffset down through group-like descendants.
+    // Any non-group container resets the offset. Only applied when
+    // `flattenGroups` is true (the kiwi-side walk) — plugin trees come
+    // already-flattened by Figma's API.
+    let childOffset: { dx: number; dy: number };
+    if (flattenGroups && isGroupLike(n as never)) {
+      const t = n.transform;
+      childOffset = {
+        dx: groupOffset.dx + (t?.m02 ?? 0),
+        dy: groupOffset.dy + (t?.m12 ?? 0),
+      };
+    } else {
+      childOffset = { dx: 0, dy: 0 };
+    }
+    for (const c of n.children) indexById(c as never, out, flattenGroups, childOffset);
   }
 }
 
@@ -203,7 +270,23 @@ const COMPARABLE_FIELDS: Array<{
     same('size.y', (n) => (n.size as { y?: number } | undefined)?.y),
     same('transform.m02', (n) => (n.transform as { m02?: number } | undefined)?.m02),
     same('transform.m12', (n) => (n.transform as { m12?: number } | undefined)?.m12),
-    same('rotation', (n) => n.rotation),
+    {
+      // Plugin returns `node.rotation` in *degrees*; kiwi stores rotation
+      // inside the transform matrix (m00/m01/m10/m11) and doesn't surface
+      // a scalar. Derive it from the matrix on our side. For pure
+      // rotations: m00=cos(θ), m01=-sin(θ); atan2 then radians→deg.
+      field: 'rotation',
+      pickFigma: (n) => n.rotation,
+      pickOurs: (n) => {
+        const t = n.transform as { m00?: number; m01?: number } | undefined;
+        if (!t || typeof t.m00 !== 'number' || typeof t.m01 !== 'number') return undefined;
+        if (Math.abs(t.m01) < 1e-9 && t.m00 > 0) return undefined; // identity → omit
+        // Empirical sign — Figma plugin's `node.rotation` is the
+        // clockwise-from-baseline angle in degrees; atan2(m01, m00) on
+        // the kiwi transform matrix matches that convention directly.
+        return Math.atan2(t.m01, t.m00) * (180 / Math.PI);
+      },
+    },
     same('opacity', (n) => n.opacity),
     same('cornerRadius', (n) => n.cornerRadius),
     same('strokeWeight', (n) => n.strokeWeight),
@@ -275,10 +358,10 @@ export class AuditCompare {
     if (!session) throw new NotFoundError(`session ${sessionId} not found`);
 
     const figmaIdx = new Map<string, FigmaNode>();
-    indexById(figmaTree as never, figmaIdx as never);
+    indexById(figmaTree as never, figmaIdx as never, /*flattenGroups*/ false);
 
     const ourIdx = new Map<string, DocumentNode>();
-    indexById(session.documentJson as never, ourIdx as never);
+    indexById(session.documentJson as never, ourIdx as never, /*flattenGroups*/ true);
 
     const fieldCounts = new Map<string, number>();
     const sample: DiffEntry[] = [];
@@ -294,12 +377,20 @@ export class AuditCompare {
         continue;
       }
       matched++;
+      // For nodes that kiwi stores as FRAME but Figma exposes as GROUP,
+      // normalize ours.type → 'GROUP'. Also drop the kiwi default
+      // `strokeWeight = 1` that Figma's GROUP doesn't carry — plugin/REST
+      // omit strokeWeight on group-like nodes since they can't carry strokes.
+      let oursForCompare = ours as unknown as Record<string, unknown>;
+      if (isGroupLike(oursForCompare)) {
+        oursForCompare = { ...oursForCompare, type: 'GROUP', strokeWeight: undefined };
+      }
       for (const cf of COMPARABLE_FIELDS) {
-        if (cf.gate && !cf.gate(fn as unknown as Record<string, unknown>, ours as unknown as Record<string, unknown>)) {
+        if (cf.gate && !cf.gate(fn as unknown as Record<string, unknown>, oursForCompare)) {
           continue;
         }
         const a = cf.pickFigma(fn as unknown as Record<string, unknown>);
-        const b = cf.pickOurs(ours as unknown as Record<string, unknown>);
+        const b = cf.pickOurs(oursForCompare);
         if (fieldDiffers(cf.field, a, b)) {
           totalDiffs++;
           fieldCounts.set(cf.field, (fieldCounts.get(cf.field) ?? 0) + 1);
