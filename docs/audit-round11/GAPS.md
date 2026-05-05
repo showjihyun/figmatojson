@@ -772,3 +772,89 @@ from SPEC-architecture §13.2 + symbolOverride field-distribution scan:
   cases beyond metarich's variant patterns.
 
 Round 27 ships clean.
+
+## Round 28 close (2026-05-05)
+
+**Empirical try: 0 metarich audit win — hypothesis fully confirmed.**
+
+Round 28 picked the round-27 close candidate "stack* fields (split into
+stackSpacing+padding subset...)" as an empirical experiment with explicit
+0-close acceptance criteria. Spec §3.7 (I-AL1..I-AL6) + impl + 7 unit
+tests landed in dea4acb. Audit refresh on all 4 corpora produced effectively
+zero meaningful visible deltas:
+
+| corpus | modified | meaningful win |
+|---|---:|---|
+| design-setting | 4 (sub-30 B noise — same as rounds 25/26/27) | **0** |
+| dash-board | 0 / 44 | 0 |
+| mobile | 0 / 147 | 0 |
+| WEB | 4 (sub-100 B noise) | **0** |
+
+All 8 modified files reverted as PNG re-encoding noise (no real visual
+changes). No baseline commits.
+
+### Hypothesis confirmation
+
+Pre-flight reasoning before round 28:
+> Round-22 derivedSize + round-24 derivedTransform stamp post-layout
+> *results*, so stack* override (the *cause*) is theoretically redundant
+> for descendants. Only master-root stack* overrides exercised at
+> applyInstanceReflow time can move pixels.
+
+Empirical result: master-root stack* overrides either don't exist in
+metarich's INSTANCE shapes, or fire only in scenarios where reflow
+already produces matching-figma output via the existing rules. The
+descendant-FRAME case (most stack* overrides) is fully redundant with
+rounds 22+24 — Figma already stamped the post-layout positions/sizes
+into derivedSymbolData, and our applyInstanceReflow only runs at
+INSTANCE boundaries (not at descendant FRAMEs anyway).
+
+### What round 28 still adds
+
+Even with 0 metarich audit win, round-28 lands as **foundation work**:
+- spec §3.7 explicitly defines the path-key + master-root-merge contract
+  for stack-subset overrides
+- collector + walk plumbing handle the wire format correctly
+- future `.fig` corpora that use master-root stack* overrides for
+  variants will see correct rendering without further code changes
+
+This is the correct outcome of an empirical try — the user's brief
+("0 면 정직하게 0으로 close, 나오면 확장") is honored: round-28 ships
+as foundation-only, no baselines refreshed (4 corpora untouched).
+
+### Earlier wins preserved
+
+All round-24/25/26/27 audit baselines unchanged (verified by 0
+meaningful diffs after refresh). Both e2e contract gates would still
+pass (not re-run since dev server was up only for capture).
+
+### Round 29 candidate list
+
+After 7 rounds (22-28) of INSTANCE pipeline extension, marginal returns
+on metarich are exhausted in the *override-pipeline* dimension. The
+round-27/28 closes both noted that metarich-corpus saturation is real.
+
+Remaining options for round 29 forward:
+
+- **Non-metarich audit corpus** — biggest unknown territory.
+  Discovers entirely new override patterns / wire-format wrinkles.
+  Cost: requires the user to pre-deploy figma.png caps for the new
+  corpus's slugs.
+- **stackPrimaryAlignItems / stackChildPrimaryGrow / stackPrimarySizing
+  for descendants** — round-28 left these out. Need reflow rule changes,
+  not pure value override. Visual effect on metarich uncertain (same
+  derivedSymbolData redundancy concern).
+- **componentPropNodeField TEXT / INSTANCE_SWAP** — still 0 in metarich
+  (foundation only).
+- **effects / blendMode** — sub-50 entries.
+- **Different work track** — Pencil round-trip strengthening,
+  editable-html UI, LLM agent tools, etc.
+
+Round 28 is round 7 of an INSTANCE-pipeline cluster that started at
+round 22. The cluster cleanly closes here on the override-pipeline
+dimension. The next visible win on metarich likely requires a
+*different shape* of work (algorithmic reflow extension, or new
+corpus discovery), not another override-field round.
+
+Round 28 ships clean as foundation. No regressions. 475/475 web +
+126/126 root unit tests pass.
