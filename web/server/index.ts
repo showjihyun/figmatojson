@@ -39,6 +39,7 @@ import { ServeAsset } from '../core/application/ServeAsset.js';
 import { RunChatTurn } from '../core/application/RunChatTurn.js';
 import { Undo } from '../core/application/Undo.js';
 import { Redo } from '../core/application/Redo.js';
+import { AuditCompare } from '../core/application/AuditCompare.js';
 
 // ─── Composition root: adapters + use cases ──────────────────────────────
 //
@@ -74,6 +75,7 @@ const runChatTurn = new RunChatTurn(sessionStore, tools, {
 });
 const undoUseCase = new Undo(sessionStore, editJournal);
 const redoUseCase = new Redo(sessionStore, editJournal);
+const auditCompareUseCase = new AuditCompare(sessionStore);
 
 // `toHttpError` lives in adapters/driving/http/errors.ts now —
 // each route file imports it locally.
@@ -99,6 +101,7 @@ registerRoutes(app, {
   runChatTurn,
   undo: undoUseCase,
   redo: redoUseCase,
+  auditCompare: auditCompareUseCase,
 });
 
 
