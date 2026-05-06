@@ -1,0 +1,692 @@
+/**
+ * Per-node render plan generator.
+ *
+ * `nodeRender(node, ctx)` returns a Konva-agnostic plan describing one
+ * node's visual decisions. The plan is consumed by Canvas's NodeShape
+ * component, which translates it into Konva elements + handlers.
+ *
+ * Migrated kinds:
+ *   - 'hidden'       — Effective Visibility false / isolation hide. (1A)
+ *   - 'vector'       — VECTOR_TYPES with a precomputed _path string. (1A)
+ *   - 'text-simple'  — TEXT nodes that don't need per-character style runs.
+ *                      Includes auto-resize + center/right overflow math. (1B)
+ *   - 'paint-stack'  — Default kind for FRAME / RECTANGLE / GROUP / INSTANCE
+ *                      / SECTION / SYMBOL: multi-paint stacking, stroke
+ *                      (uniform or per-side), shadow / inner shadow / layer
+ *                      blur, frame clip. (1C)
+ *   - 'text-styled'  — TEXT nodes with per-character styled runs. The plan
+ *                      pre-resolves each run's fill + cumulative x-offset so
+ *                      Canvas just maps runs to KText elements. (1D)
+ *
+ * `'fallthrough'` is still in the union as a defensive escape hatch but the
+ * dispatch below never returns it after 1D. Canvas treats any unrecognised
+ * kind as render-nothing.
+ *
+ * The function is pure — no React, no Konva, no DOM. Callers that need
+ * browser-only operations (text width measurement) inject them via
+ * `RenderContext.measureText`.
+ */
+
+import { rotationDegrees } from '../lib/transform.js';
+import { konvaBlendMode } from '../lib/blendMode.js';
+import { konvaLineCap, konvaLineJoin } from '../lib/strokeCapJoin.js';
+import {
+  applyStrokeAlign,
+  applyStrokeAlignToVectorPath,
+  type CornerRadius,
+  type RectDims,
+} from '../lib/strokeAlign.js';
+import {
+  innerShadowFromEffects,
+  shadowFromEffects,
+  type InnerShadow,
+  type KonvaShadow,
+} from '../lib/shadow.js';
+import { layerBlurFromEffects } from '../lib/blurEffect.js';
+import { cornerRadiusForKonva } from '../lib/cornerRadii.js';
+import { paintLayers, type PaintRender } from '../lib/paintRender.js';
+import {
+  konvaFontStyle,
+  konvaLetterSpacing,
+  konvaLineHeight,
+  konvaTextAlign,
+  konvaVerticalAlign,
+} from '../lib/textStyle.js';
+import { applyTextCase, konvaTextDecoration } from '../lib/textTransform.js';
+import { hasStyledRuns, splitTextRuns } from '../lib/textStyleRuns.js';
+import { solidFillCss, strokeFromPaints } from '@core/domain/color';
+import { imageHashHex } from '@core/domain/image';
+
+/** Vector types that carry a precomputed `_path` SVG string after toClientNode. */
+const VECTOR_TYPES: ReadonlySet<string> = new Set([
+  'VECTOR',
+  'STAR',
+  'LINE',
+  'ELLIPSE',
+  'REGULAR_POLYGON',
+  'BOOLEAN_OPERATION',
+  'ROUNDED_RECTANGLE',
+]);
+
+export interface RenderContext {
+  /**
+   * Round-23 isolation state, or null when the canvas isn't isolating
+   * anything. `hide` lists ids whose subtree must be skipped entirely;
+   * `ancestors` lists ids that lie on the path to the isolated target
+   * (their fills/clips are suppressed but their children still render).
+   */
+  isolation: { hide: Set<string>; ancestors: Set<string> } | null;
+
+  /**
+   * Measure rendered text width in CSS pixels. Browser callers pass a
+   * thin wrapper around canvas 2d `measureText`; tests pass a deterministic
+   * stub. Slice 1A doesn't read this — declared now so 1B can consume it
+   * without changing the signature.
+   */
+  measureText: (
+    text: string,
+    fontSize: number,
+    fontFamily: string,
+    fontStyle: string | undefined,
+    letterSpacing: number | undefined,
+  ) => number;
+}
+
+export interface NodeOuterFrame {
+  bbox: { x: number; y: number; w: number; h: number };
+  rotation: number | undefined;
+  opacity: number | undefined;
+  blendMode: GlobalCompositeOperation | undefined;
+}
+
+export interface NodeHiddenPlan {
+  kind: 'hidden';
+  reason: 'visible-false' | 'isolation-hide';
+}
+
+export interface NodeFallthroughPlan {
+  kind: 'fallthrough';
+  /** For tests / logs — describes why nodeRender punted. */
+  reason: string;
+}
+
+export interface NodeVectorPlan {
+  kind: 'vector';
+  outer: NodeOuterFrame;
+  path: string;
+  pathOffset: { x: number; y: number };
+  pathScale: { x: number; y: number };
+  /** `'transparent'` when there's no SOLID fill paint. */
+  fill: string;
+  /**
+   * Resolved stroke. `null` when no usable stroke. `fillAfterStrokeEnabled`
+   * is set on OUTSIDE strokeAlign emulation; `clipToPath` instructs the
+   * renderer to wrap the Path in a `<Group clipFunc>` for INSIDE
+   * emulation. (round 13 §2)
+   */
+  stroke: { color: string; width: number; fillAfterStrokeEnabled: boolean } | null;
+  /** When true, Canvas wraps the Path in a Group whose clipFunc fills `path`
+   *  (with the same offset+scale) so the doubled stroke's outer half is
+   *  clipped — emulating Figma's `strokeAlign: INSIDE`. */
+  clipToPath: boolean;
+  shadow: KonvaShadow | null;
+  dashPattern: number[] | undefined;
+  lineCap: 'butt' | 'round' | 'square' | undefined;
+  lineJoin: 'miter' | 'round' | 'bevel' | undefined;
+}
+
+export interface NodeTextSimplePlan {
+  kind: 'text-simple';
+  outer: NodeOuterFrame;
+  /**
+   * X used for the KText element (may shift left from `outer.bbox.x` when
+   * align=center/right and the natural text overflows the master width
+   * — see web-canvas-text-frame-fidelity.spec.md §2.1 I-1).
+   */
+  drawX: number;
+  drawY: number;
+  /**
+   * Width passed to KText. `undefined` when the layout shouldn't constrain
+   * width (left/justify with non-fixed auto-resize); set to `outer.bbox.w`
+   * (or the natural text width on overflow) otherwise. Konva omits the prop
+   * when undefined.
+   */
+  drawWidth: number | undefined;
+  /** Height — passes through `outer.bbox.h || undefined`. */
+  drawHeight: number | undefined;
+  text: string;
+  fontSize: number;
+  fontFamily: string;
+  fontStyle: string | undefined;
+  textDecoration: string | undefined;
+  letterSpacing: number | undefined;
+  lineHeight: number | undefined;
+  verticalAlign: 'top' | 'middle' | 'bottom' | undefined;
+  align: 'left' | 'center' | 'right' | 'justify' | undefined;
+  fill: string;
+  shadow: KonvaShadow | null;
+}
+
+export interface PaintStackLayer {
+  /** Resolved render descriptor (solid / linear / radial / image). */
+  render: PaintRender;
+  /** Per-paint blendMode resolved to a Konva globalCompositeOperation. */
+  globalCompositeOperation: GlobalCompositeOperation | undefined;
+  /** For IMAGE paints — value of `imageScaleMode` (FILL / STRETCH / FIT / CROP). */
+  imageScaleMode: string | undefined;
+}
+
+export interface NodePaintStackUniformStroke {
+  kind: 'uniform';
+  rectDims: RectDims;
+  color: string;
+  width: number;
+}
+
+export interface NodePaintStackPerSideStroke {
+  kind: 'per-side';
+  color: string;
+  /** Each side's weight; missing/0 → that side isn't drawn. */
+  sides: {
+    top: number | undefined;
+    right: number | undefined;
+    bottom: number | undefined;
+    left: number | undefined;
+  };
+}
+
+export interface NodePaintStackPlan {
+  kind: 'paint-stack';
+  outer: NodeOuterFrame;
+
+  /** Konva.Rect cornerRadius prop — number when uniform, 4-tuple otherwise. */
+  cornerRadius: CornerRadius;
+  /** Four explicit corner values capped at half(w,h) — used by inner shadow + clipFunc path drawing. */
+  corners: { tl: number; tr: number; br: number; bl: number };
+
+  fillLayers: PaintStackLayer[];
+  /** Lowercase 40-char SHA-1 of the IMAGE paint asset, or `null` when no IMAGE in stack. */
+  imageHashHex: string | null;
+
+  stroke: NodePaintStackUniformStroke | NodePaintStackPerSideStroke | null;
+  /** First visible DROP_SHADOW (Konva paints one shadow per shape). */
+  shadow: KonvaShadow | null;
+  /** First visible INNER_SHADOW (rendered via dedicated overlay). */
+  innerShadow: InnerShadow | null;
+  /** First visible LAYER_BLUR — when set, Canvas wraps the whole tree in a cache+filter Group. */
+  layerBlur: { radius: number } | null;
+  /** dashPattern from `node.dashPattern`; passed through to whichever stroke shape is active. */
+  dashPattern: number[] | undefined;
+  lineCap: 'butt' | 'round' | 'square' | undefined;
+  lineJoin: 'miter' | 'round' | 'bevel' | undefined;
+
+  /**
+   * True when `fillLayers` is empty AND we still need to anchor a drop shadow
+   * or uniform stroke — Canvas inserts an empty-fill Rect with shadow + stroke
+   * props.
+   */
+  needsAnchorRect: boolean;
+  /** True when Canvas should install a clipFunc Group for children. */
+  clipChildren: boolean;
+}
+
+export interface TextStyledRun {
+  /** The substring this run covers. */
+  text: string;
+  /** Cumulative x within the Group (px) — sum of measureText widths of all preceding runs. */
+  offsetX: number;
+  /**
+   * Resolved fill color — `override.fillPaints[0]` (first visible SOLID)
+   * or the node's base fill color when the run carries no usable override.
+   */
+  fill: string;
+}
+
+export interface NodeTextStyledPlan {
+  kind: 'text-styled';
+  outer: NodeOuterFrame;
+  runs: TextStyledRun[];
+  fontSize: number;
+  fontFamily: string;
+  fontStyle: string | undefined;
+  textDecoration: string | undefined;
+  letterSpacing: number | undefined;
+  lineHeight: number | undefined;
+  verticalAlign: 'top' | 'middle' | 'bottom' | undefined;
+}
+
+export type NodeRenderPlan =
+  | NodeHiddenPlan
+  | NodeVectorPlan
+  | NodeTextSimplePlan
+  | NodeTextStyledPlan
+  | NodePaintStackPlan
+  | NodeFallthroughPlan;
+
+/** Resolve outer transform/composite props common to every visible kind. */
+function readOuter(node: Record<string, unknown>): NodeOuterFrame {
+  const transform = node.transform as { m02?: number; m12?: number } | undefined;
+  const size = node.size as { x?: number; y?: number } | undefined;
+  return {
+    bbox: {
+      x: transform?.m02 ?? 0,
+      y: transform?.m12 ?? 0,
+      w: size?.x ?? 0,
+      h: size?.y ?? 0,
+    },
+    rotation: rotationDegrees(node.transform as never),
+    opacity:
+      typeof node.opacity === 'number' && node.opacity !== 1
+        ? (node.opacity as number)
+        : undefined,
+    blendMode: konvaBlendMode(node.blendMode as string | undefined),
+  };
+}
+
+function planVector(node: Record<string, unknown>): NodeVectorPlan {
+  const pathFillRaw = solidFillCss(node as { fillPaints?: unknown });
+  const fill = pathFillRaw === 'transparent' ? 'transparent' : pathFillRaw;
+  const baseStroke = strokeFromPaints(node as { strokeWeight?: unknown; strokePaints?: unknown });
+  // INSIDE strokeAlign emulation needs to know whether we have a visible
+  // fill. With no fill the doubled stroke would just look thicker
+  // (round 13 §3.3 — `pathFill === 'transparent'` ⇒ skip emulation).
+  const align = applyStrokeAlignToVectorPath(
+    baseStroke?.width,
+    node.strokeAlign as 'INSIDE' | 'OUTSIDE' | 'CENTER' | undefined,
+    fill !== 'transparent',
+  );
+  const stroke = baseStroke
+    ? {
+        color: baseStroke.color,
+        width: align.strokeWidth,
+        fillAfterStrokeEnabled: align.fillAfterStrokeEnabled,
+      }
+    : null;
+
+  const offset = node._pathOffset as { x?: number; y?: number } | undefined;
+  const scale = node._pathScale as { x?: number; y?: number } | undefined;
+  const dashPattern =
+    Array.isArray(node.dashPattern) && (node.dashPattern as number[]).length > 0
+      ? (node.dashPattern as number[])
+      : undefined;
+
+  return {
+    kind: 'vector',
+    outer: readOuter(node),
+    path: node._path as string,
+    pathOffset: { x: offset?.x ?? 0, y: offset?.y ?? 0 },
+    pathScale: { x: scale?.x ?? 1, y: scale?.y ?? 1 },
+    fill,
+    stroke,
+    clipToPath: align.clipToPath,
+    shadow: shadowFromEffects(node.effects as never),
+    dashPattern,
+    lineCap: konvaLineCap(node.strokeCap as never),
+    lineJoin: konvaLineJoin(node.strokeJoin as never),
+  };
+}
+
+/**
+ * Resolve the base SOLID fill color for a TEXT node. Falls back to '#ddd'
+ * when no usable SOLID paint exists — the same default Canvas's inline
+ * branch has used since round 1, kept identical so 1B doesn't shift any
+ * pixel that wasn't already shifted in 1A.
+ */
+function textBaseFillColor(node: Record<string, unknown>): string {
+  const fills = node.fillPaints;
+  if (!Array.isArray(fills)) return '#ddd';
+  const first = (fills as Array<Record<string, unknown>>).find(
+    (p) => (p as { type?: string }).type === 'SOLID' && (p as { visible?: boolean }).visible !== false,
+  );
+  if (!first || !first.color) return '#ddd';
+  const c = first.color as { r?: number; g?: number; b?: number; a?: number };
+  const r = Math.round((c.r ?? 0) * 255);
+  const g = Math.round((c.g ?? 0) * 255);
+  const b = Math.round((c.b ?? 0) * 255);
+  const a = c.a ?? 1;
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function planTextSimple(node: Record<string, unknown>, ctx: RenderContext): NodeTextSimplePlan {
+  const outer = readOuter(node);
+  const { x, y, w, h } = outer.bbox;
+
+  const renderOverride = node._renderTextOverride;
+  const textData = node.textData as { characters?: string } | undefined;
+  const rawChars =
+    typeof renderOverride === 'string' ? renderOverride : textData?.characters ?? '';
+  // textCase applies AFTER the per-instance override (round 5 §6 Resolved
+  // questions): override sets the literal string, render-time case shapes it.
+  const text = applyTextCase(rawChars, node.textCase as string | undefined);
+
+  const fontSize = typeof node.fontSize === 'number' ? (node.fontSize as number) : 12;
+  const fontName = node.fontName as { family?: string; style?: string } | undefined;
+  const fontFamily = fontName?.family ?? 'Inter';
+  const fontStyle = konvaFontStyle(fontName?.style);
+  const textDecoration = konvaTextDecoration(node.textDecoration as string | undefined);
+  const letterSpacing = konvaLetterSpacing(
+    node.letterSpacing as never,
+    fontSize,
+  );
+  const lineHeight = konvaLineHeight(node.lineHeight as never, fontSize);
+  const verticalAlign = konvaVerticalAlign(node.textAlignVertical as string | undefined);
+  const align = konvaTextAlign(node.textAlignHorizontal as string | undefined);
+  const fill = textBaseFillColor(node);
+  const shadow = shadowFromEffects(node.effects as never);
+
+  // Auto-resize math (web-canvas-text-frame-fidelity.spec.md §2.1):
+  //  - NONE / TRUNCATE → fixed-width: pass `w` through.
+  //  - center / right with natural-text overflow → grow KText box to `natural`,
+  //    shift `drawX` so the visual position stays anchored where Figma intended.
+  //  - everything else → omit width (KText renders at natural width).
+  const isFixedWidthMode = node.textAutoResize === 'NONE' || node.textAutoResize === 'TRUNCATE';
+  let drawX = x;
+  let drawWidth: number | undefined;
+  if (isFixedWidthMode) {
+    drawWidth = w || undefined;
+  } else if (align === 'center' || align === 'right') {
+    const baseW = w || 0;
+    const natural = ctx.measureText(text, fontSize, fontFamily, fontStyle, letterSpacing);
+    if (natural > baseW && baseW > 0) {
+      const overflow = natural - baseW;
+      drawX = align === 'center' ? x - overflow / 2 : x - overflow;
+      drawWidth = natural;
+    } else {
+      drawWidth = baseW || undefined;
+    }
+  }
+
+  return {
+    kind: 'text-simple',
+    outer,
+    drawX,
+    drawY: y,
+    drawWidth,
+    drawHeight: h || undefined,
+    text,
+    fontSize,
+    fontFamily,
+    fontStyle,
+    textDecoration,
+    letterSpacing,
+    lineHeight,
+    verticalAlign,
+    align,
+    fill,
+    shadow,
+  };
+}
+
+function planPaintStack(node: Record<string, unknown>, ctx: RenderContext): NodePaintStackPlan {
+  const outer = readOuter(node);
+  const { w, h } = outer.bbox;
+  const myId = (node.id as string | undefined) ?? '';
+  const isAncestorOfIsolated = ctx.isolation?.ancestors.has(myId) === true;
+
+  // Round-23: when isolating, suppress fills on ancestors of the target so
+  // captured screenshots compare apples-to-apples with figma.png.
+  const fillsInput = isAncestorOfIsolated
+    ? undefined
+    : (node.fillPaints as Array<{ type?: string; visible?: boolean }> | undefined);
+  const layersRaw = paintLayers(fillsInput, w, h);
+  const fillLayers: PaintStackLayer[] = layersRaw.map((layer) => {
+    const paint = layer.paint as { blendMode?: string; imageScaleMode?: string };
+    return {
+      render: layer.render,
+      globalCompositeOperation: konvaBlendMode(paint.blendMode),
+      imageScaleMode: paint.imageScaleMode,
+    };
+  });
+
+  // Image hash for any IMAGE paint in the stack (Canvas builds the URL by
+  // joining with sessionId). `null` keeps the type discriminated and
+  // round-trip-safe through JSON in tests.
+  const imgHash = imageHashHex(node);
+
+  // Per-corner radii (round 5). cornerRadiusForKonva returns number or
+  // 4-tuple; we then derive 4 explicit values capped at half(w,h) for
+  // inner-shadow + clipFunc path drawing — matches the CTL/CTR/CBR/CBL
+  // locals NodeShapeImpl used to compute inline.
+  const cornerRadius = cornerRadiusForKonva(
+    node as never,
+    typeof node.cornerRadius === 'number' ? (node.cornerRadius as number) : 0,
+  );
+  const cTL0 = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[0];
+  const cTR0 = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[1];
+  const cBR0 = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[2];
+  const cBL0 = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[3];
+  const halfW = w / 2;
+  const halfH = h / 2;
+  const corners = {
+    tl: Math.min(Math.max(0, cTL0), halfW, halfH),
+    tr: Math.min(Math.max(0, cTR0), halfW, halfH),
+    br: Math.min(Math.max(0, cBR0), halfW, halfH),
+    bl: Math.min(Math.max(0, cBL0), halfW, halfH),
+  };
+
+  // Per-side stroke (web-render-fidelity-high.spec.md §3.6) — non-uniform
+  // border{T,R,B,L}Weight values + a base stroke ⇒ render Konva.Line per side
+  // instead of a uniform Rect stroke.
+  const baseStroke = strokeFromPaints(node as never);
+  const bt = node.borderTopWeight as number | undefined;
+  const brW = node.borderRightWeight as number | undefined;
+  const bb = node.borderBottomWeight as number | undefined;
+  const bl = node.borderLeftWeight as number | undefined;
+  const hasPerSideValues = bt != null || brW != null || bb != null || bl != null;
+  const sidesUniform = hasPerSideValues && bt === brW && brW === bb && bb === bl;
+  const wantPerSide = hasPerSideValues && !sidesUniform && !!baseStroke;
+
+  let stroke: NodePaintStackPlan['stroke'];
+  if (wantPerSide && baseStroke) {
+    stroke = {
+      kind: 'per-side',
+      color: baseStroke.color,
+      sides: { top: bt, right: brW, bottom: bb, left: bl },
+    };
+  } else if (baseStroke) {
+    // strokeAlign INSIDE / OUTSIDE: shrink/expand the rect dims so the
+    // stroke sits inside (or outside) the original bbox edges
+    // (web-render-fidelity-round2.spec.md §2).
+    const rectDims = applyStrokeAlign(
+      { x: 0, y: 0, w, h, cornerRadius },
+      baseStroke.width,
+      node.strokeAlign as 'INSIDE' | 'OUTSIDE' | 'CENTER' | undefined,
+    );
+    stroke = {
+      kind: 'uniform',
+      rectDims,
+      color: baseStroke.color,
+      width: baseStroke.width,
+    };
+  } else {
+    stroke = null;
+  }
+
+  const shadow = shadowFromEffects(node.effects as never);
+  const innerShadow = innerShadowFromEffects(node.effects as never);
+  const layerBlur = layerBlurFromEffects(node.effects as never);
+
+  const dashPattern =
+    Array.isArray(node.dashPattern) && (node.dashPattern as number[]).length > 0
+      ? (node.dashPattern as number[])
+      : undefined;
+
+  // Anchor rect: when there's no fill but we still need to draw shadow or
+  // a uniform stroke, Canvas needs a Rect to attach those props to.
+  const needsAnchorRect =
+    fillLayers.length === 0 && (shadow != null || (stroke?.kind === 'uniform'));
+
+  // Frame clip (round 2 §3) + INSTANCE auto-clip (round 12). Round-23 v3
+  // disables both when this node is on the path to an isolated target —
+  // REST API renders the captured node without ancestor clip boundaries.
+  const wantClipForInstance =
+    node.type === 'INSTANCE' &&
+    node.frameMaskDisabled !== true &&
+    Array.isArray(node._renderChildren) &&
+    (node._renderChildren as unknown[]).length > 0;
+  const clipChildren =
+    !isAncestorOfIsolated &&
+    (node.frameMaskDisabled === false || wantClipForInstance);
+
+  return {
+    kind: 'paint-stack',
+    outer,
+    cornerRadius,
+    corners,
+    fillLayers,
+    imageHashHex: imgHash,
+    stroke,
+    shadow,
+    innerShadow,
+    layerBlur,
+    dashPattern,
+    lineCap: konvaLineCap(node.strokeCap as never),
+    lineJoin: konvaLineJoin(node.strokeJoin as never),
+    needsAnchorRect,
+    clipChildren,
+  };
+}
+
+/**
+ * Resolve a styled run's fill color: first SOLID visible paint in
+ * `override.fillPaints`, else fall back to the node's base fill. Same
+ * SOLID-only assumption as the inline path that lived in Canvas.tsx
+ * before slice 1D.
+ */
+function resolveStyledRunFill(
+  run: { override: { fillPaints?: unknown[] } },
+  baseFill: string,
+): string {
+  const fps = run.override.fillPaints;
+  if (!Array.isArray(fps)) return baseFill;
+  const first = (fps as Array<Record<string, unknown>>).find(
+    (p) =>
+      (p as { type?: string }).type === 'SOLID' &&
+      (p as { visible?: boolean }).visible !== false,
+  );
+  if (!first || !first.color) return baseFill;
+  const c = first.color as { r?: number; g?: number; b?: number; a?: number };
+  const r = Math.round((c.r ?? 0) * 255);
+  const g = Math.round((c.g ?? 0) * 255);
+  const b = Math.round((c.b ?? 0) * 255);
+  const a = c.a ?? 1;
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function planTextStyled(node: Record<string, unknown>, ctx: RenderContext): NodeTextStyledPlan {
+  const outer = readOuter(node);
+  const textData = node.textData as {
+    characters?: string;
+    characterStyleIDs: number[];
+    styleOverrideTable: Array<Record<string, unknown>>;
+  };
+
+  // Reachable only when needsStyledTextRuns returned true, which guarantees
+  // textData with both arrays present and no _renderTextOverride.
+  const fontSize = typeof node.fontSize === 'number' ? (node.fontSize as number) : 12;
+  const fontName = node.fontName as { family?: string; style?: string } | undefined;
+  const fontFamily = fontName?.family ?? 'Inter';
+  const fontStyle = konvaFontStyle(fontName?.style);
+  const textDecoration = konvaTextDecoration(node.textDecoration as string | undefined);
+  const letterSpacing = konvaLetterSpacing(
+    node.letterSpacing as never,
+    fontSize,
+  );
+  const lineHeight = konvaLineHeight(node.lineHeight as never, fontSize);
+  const verticalAlign = konvaVerticalAlign(node.textAlignVertical as string | undefined);
+
+  const baseFill = textBaseFillColor(node);
+  const chars = applyTextCase(textData.characters ?? '', node.textCase as string | undefined);
+  const rawRuns = splitTextRuns(
+    chars,
+    textData.characterStyleIDs,
+    textData.styleOverrideTable as never,
+  );
+
+  const runs: TextStyledRun[] = [];
+  let offsetX = 0;
+  for (let i = 0; i < rawRuns.length; i++) {
+    const r = rawRuns[i];
+    runs.push({
+      text: r.text,
+      offsetX,
+      fill: resolveStyledRunFill(r, baseFill),
+    });
+    if (i < rawRuns.length - 1) {
+      offsetX += ctx.measureText(r.text, fontSize, fontFamily, fontStyle, letterSpacing);
+    }
+  }
+
+  return {
+    kind: 'text-styled',
+    outer,
+    runs,
+    fontSize,
+    fontFamily,
+    fontStyle,
+    textDecoration,
+    letterSpacing,
+    lineHeight,
+    verticalAlign,
+  };
+}
+
+/**
+ * True when this TEXT node carries per-character style data AND there's at
+ * least one styled (non-base) run. The multi-run branch in Canvas relies on
+ * exactly this condition, so the predicate must match bit-for-bit.
+ */
+function needsStyledTextRuns(node: Record<string, unknown>): boolean {
+  const renderOverride = node._renderTextOverride;
+  if (typeof renderOverride === 'string') return false;
+  const textData = node.textData as
+    | { characters?: string; characterStyleIDs?: number[]; styleOverrideTable?: unknown[] }
+    | undefined;
+  if (!textData) return false;
+  if (!Array.isArray(textData.characterStyleIDs)) return false;
+  if (!Array.isArray(textData.styleOverrideTable)) return false;
+  const chars = applyTextCase(textData.characters ?? '', node.textCase as string | undefined);
+  const runs = splitTextRuns(
+    chars,
+    textData.characterStyleIDs,
+    textData.styleOverrideTable as never,
+  );
+  return hasStyledRuns(runs);
+}
+
+export function nodeRender(
+  node: Record<string, unknown>,
+  ctx: RenderContext,
+): NodeRenderPlan {
+  const myId = (node.id as string | undefined) ?? '';
+  if (ctx.isolation?.hide.has(myId)) {
+    return { kind: 'hidden', reason: 'isolation-hide' };
+  }
+  if (node.visible === false) {
+    return { kind: 'hidden', reason: 'visible-false' };
+  }
+
+  const type = node.type as string | undefined;
+
+  if (
+    typeof type === 'string' &&
+    VECTOR_TYPES.has(type) &&
+    typeof node._path === 'string' &&
+    (node._path as string).length > 0
+  ) {
+    return planVector(node);
+  }
+
+  if (type === 'TEXT') {
+    if (needsStyledTextRuns(node)) {
+      return planTextStyled(node, ctx);
+    }
+    return planTextSimple(node, ctx);
+  }
+
+  // Catch-all for FRAME / RECTANGLE / GROUP / INSTANCE / SECTION / SYMBOL /
+  // unknown types. paint-stack handles every "rectangular surface with
+  // optional fill stack + stroke + shadow + clip" — i.e. everything that
+  // isn't a vector path or simple text.
+  return planPaintStack(node, ctx);
+}

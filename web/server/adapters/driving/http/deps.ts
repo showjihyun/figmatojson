@@ -16,8 +16,7 @@ import type { SaveSnapshot } from '../../../../core/application/SaveSnapshot.js'
 import type { LoadSnapshot } from '../../../../core/application/LoadSnapshot.js';
 import type { ServeAsset } from '../../../../core/application/ServeAsset.js';
 import type { RunChatTurn } from '../../../../core/application/RunChatTurn.js';
-import type { Undo } from '../../../../core/application/Undo.js';
-import type { Redo } from '../../../../core/application/Redo.js';
+import type { History } from '../../../../core/application/History.js';
 import type { AuditCompare } from '../../../../core/application/AuditCompare.js';
 
 export interface Deps {
@@ -31,7 +30,6 @@ export interface Deps {
   loadSnapshot: LoadSnapshot;
   serveAsset: ServeAsset;
   runChatTurn: RunChatTurn;
-  undo: Undo;
-  redo: Redo;
+  history: History;
   auditCompare: AuditCompare;
 }

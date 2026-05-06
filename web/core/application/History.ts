@@ -1,26 +1,30 @@
 /**
- * Use case: undo the most recent recorded edit.
+ * Use case: apply one step of the per-session edit history in either
+ * direction.
  *
- * Pops the past stack, applies each `before` value to the message.json
- * (and mirrors onto documentJson) in order, then pushes the same entry
- * onto the future stack so a subsequent Redo can replay the `after`s.
+ * Replaces the symmetric pair Undo + Redo (deleted 2026-05-06). The two
+ * differed only in: which stack to pop from, which value to apply
+ * (`before` vs `after`), and which stack to push onto. All three become
+ * functions of the `direction` input.
  *
- * Symmetric with Redo — same body, opposite stack pull/push and opposite
- * value selection (after vs before). Kept as separate classes so route
- * handlers can wire them by name.
+ * Convention (matches `EditJournal` port):
+ *   direction === 'undo' → pop from past, apply `before`, push to future
+ *   direction === 'redo' → pop from future, apply `after`,  push to past
  */
 
+import type { EditJournal, HistoryDirection } from '../ports/EditJournal.js';
 import type { SessionStore } from '../ports/SessionStore.js';
-import type { EditJournal } from '../ports/EditJournal.js';
+import type { Session } from '../domain/entities/Session.js';
 import { NotFoundError } from './errors.js';
 import { tokenizePath, setPath } from '../domain/path.js';
 import { rebuildDocumentFromMessage } from '../domain/messageJson.js';
 
 /**
  * Sentinel guid for full-message-snapshot patches emitted by structural
- * chat tools (today: duplicate). When `applyPatches` sees this guid it
- * replaces the whole `nodeChanges` array and re-derives documentJson —
- * the leaf-level setPath fan-out doesn't apply to tree restructure.
+ * chat tools (today: duplicate, group, ungroup). When `applyPatches`
+ * sees this guid it replaces the whole `nodeChanges` array and re-derives
+ * documentJson — the leaf-level setPath fan-out doesn't apply to tree
+ * restructure.
  */
 const MSG_SENTINEL_GUID = '__msg__';
 
@@ -29,49 +33,68 @@ interface FsLike {
   writeMessage(id: string, json: string): void;
 }
 
-export interface UndoInput {
+export interface HistoryInput {
   sessionId: string;
+  direction: HistoryDirection;
 }
 
-export interface UndoOutput {
+export interface HistoryOutput {
   ok: boolean;
-  /** Label of the entry that was undone, or null if nothing was on the stack. */
-  undoneLabel: string | null;
+  direction: HistoryDirection;
+  /** Label of the entry that was applied, or null if the stack was empty. */
+  appliedLabel: string | null;
   past: number;
   future: number;
 }
 
-export class Undo {
+function opposite(direction: HistoryDirection): HistoryDirection {
+  return direction === 'undo' ? 'redo' : 'undo';
+}
+
+export class History {
   constructor(
     private readonly sessionStore: SessionStore & FsLike,
     private readonly journal: EditJournal,
   ) {}
 
-  async execute({ sessionId }: UndoInput): Promise<UndoOutput> {
+  async execute({ sessionId, direction }: HistoryInput): Promise<HistoryOutput> {
     const session = this.sessionStore.getById(sessionId);
     if (!session) throw new NotFoundError(`session ${sessionId} not found`);
 
-    const entry = this.journal.popUndo(sessionId);
+    const entry = this.journal.popStep(sessionId, direction);
     if (!entry) {
-      return { ok: false, undoneLabel: null, ...this.journal.depths(sessionId) };
+      return {
+        ok: false,
+        direction,
+        appliedLabel: null,
+        ...this.journal.depths(sessionId),
+      };
     }
 
-    applyPatches(this.sessionStore, sessionId, session, entry.patches, 'before');
-    this.journal.pushFuture(sessionId, entry);
-    return { ok: true, undoneLabel: entry.label, ...this.journal.depths(sessionId) };
+    const pick = direction === 'undo' ? 'before' : 'after';
+    applyPatches(this.sessionStore, sessionId, session, entry.patches, pick);
+    this.journal.pushStep(sessionId, opposite(direction), entry);
+
+    return {
+      ok: true,
+      direction,
+      appliedLabel: entry.label,
+      ...this.journal.depths(sessionId),
+    };
   }
 }
 
 /**
  * Apply a journal entry's patches to message.json + documentJson.
  *
- * Shared with Redo — exported only via the Undo module. Kept here so the
- * mutation logic stays in one place.
+ * Exported for the rare caller that needs to apply a synthesized entry
+ * outside the History stack (none in production today; kept exported so
+ * a future test can drive it directly without going through History).
  */
 export function applyPatches(
   store: SessionStore & FsLike,
   sessionId: string,
-  session: import('../domain/entities/Session.js').Session,
+  session: Session,
   patches: import('../ports/EditJournal.js').PatchPair[],
   pick: 'before' | 'after',
 ): void {

@@ -9,6 +9,7 @@ web/node_modules/
 web/test-results/
 web/playwright-report/
 web/e2e/_*.png
+test-results/
 
 # Dependencies
 node_modules/
@@ -25,6 +26,7 @@ node_modules/
 
 # Local Claude permissions (user-specific)
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # Local issue tracker workspace (created by /to-prd, /to-issues, etc.)
 .scratch/

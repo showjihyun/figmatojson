@@ -16,9 +16,10 @@ export interface UploadResult {
 
 export interface HistoryResult {
   ok: boolean;
+  /** Echo of the requested direction. */
+  direction: 'undo' | 'redo';
   /** Label of the entry that was applied (or null if nothing on the stack). */
-  undoneLabel?: string | null;
-  redoneLabel?: string | null;
+  appliedLabel: string | null;
   past: number;
   future: number;
 }

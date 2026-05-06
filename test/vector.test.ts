@@ -300,6 +300,103 @@ describe('vectorNetworkToPath (pencil.dev xQ algorithm)', () => {
     expect((path.match(/Z/g) ?? []).length).toBe(2);
   });
 
+  // Spec: vector-decode.spec.md §I-V7a — region+orphan composition.
+  // Real reproduction: HPAI 700:319 (data-01 / Icon) carries 4 regions
+  // (dots) AND 6 orphan segments (the connecting line). Without this
+  // invariant the line is silently dropped.
+  it('emits orphan stroke-only segments alongside region paths (I-V7a)', () => {
+    // Region: closed triangle on segments[0..2] (vertices 0,1,2).
+    // Orphans: a line on segments[3] (vertices 3→4).
+    const vn = {
+      vertices: [
+        { styleID: 0, x: 0, y: 0 }, { styleID: 0, x: 10, y: 0 }, { styleID: 0, x: 5, y: 8 },
+        { styleID: 0, x: 20, y: 0 }, { styleID: 0, x: 30, y: 0 },
+      ],
+      segments: [
+        { styleID: 0, start: { vertex: 0, dx: 0, dy: 0 }, end: { vertex: 1, dx: 0, dy: 0 } },
+        { styleID: 0, start: { vertex: 1, dx: 0, dy: 0 }, end: { vertex: 2, dx: 0, dy: 0 } },
+        { styleID: 0, start: { vertex: 2, dx: 0, dy: 0 }, end: { vertex: 0, dx: 0, dy: 0 } },
+        // orphan — not referenced by any region
+        { styleID: 1, start: { vertex: 3, dx: 0, dy: 0 }, end: { vertex: 4, dx: 0, dy: 0 } },
+      ],
+      regions: [{
+        styleID: 0,
+        windingRule: 'NONZERO' as const,
+        loops: [{ segments: [0, 1, 2] }],
+      }],
+    };
+    const path = vectorNetworkToPath(vn);
+    // Region path: M0 0 → L10 0 → L5 8 → Z (closed)
+    expect(path).toContain('M0 0');
+    expect(path).toContain('Z');
+    // Orphan line: must include a M-L pair from (20,0) to (30,0)
+    expect(path).toContain('M20 0');
+    expect(path).toContain('L30 0');
+  });
+
+  it('emits multiple disconnected orphan lines as separate subpaths', () => {
+    // Region with one closed loop + 2 disconnected orphan lines.
+    // Both orphan lines must contribute to the output path.
+    const vn = {
+      vertices: [
+        { styleID: 0, x: 0, y: 0 }, { styleID: 0, x: 10, y: 0 }, { styleID: 0, x: 5, y: 8 },
+        { styleID: 0, x: 100, y: 100 }, { styleID: 0, x: 105, y: 100 },
+        { styleID: 0, x: 200, y: 200 }, { styleID: 0, x: 210, y: 200 },
+      ],
+      segments: [
+        // region triangle
+        { styleID: 0, start: { vertex: 0, dx: 0, dy: 0 }, end: { vertex: 1, dx: 0, dy: 0 } },
+        { styleID: 0, start: { vertex: 1, dx: 0, dy: 0 }, end: { vertex: 2, dx: 0, dy: 0 } },
+        { styleID: 0, start: { vertex: 2, dx: 0, dy: 0 }, end: { vertex: 0, dx: 0, dy: 0 } },
+        // orphan line A
+        { styleID: 1, start: { vertex: 3, dx: 0, dy: 0 }, end: { vertex: 4, dx: 0, dy: 0 } },
+        // orphan line B (disconnected from A)
+        { styleID: 1, start: { vertex: 5, dx: 0, dy: 0 }, end: { vertex: 6, dx: 0, dy: 0 } },
+      ],
+      regions: [{
+        styleID: 0,
+        windingRule: 'NONZERO' as const,
+        loops: [{ segments: [0, 1, 2] }],
+      }],
+    };
+    const path = vectorNetworkToPath(vn);
+    // Both orphan lines must show up — the actual move-direction is up to
+    // I-V7a (raw order, no orient): start at v3=(100,100) and v5=(200,200).
+    expect(path).toContain('M100 100');
+    expect(path).toContain('L105 100');
+    expect(path).toContain('M200 200');
+    expect(path).toContain('L210 200');
+  });
+
+  it('skips orient on disconnected orphans (no spurious reversals)', () => {
+    // Region uses segment 0 (closed loop on triangle 0,1,2).
+    // Orphan segment 1 is a directed line v3→v4. orphan must not be
+    // reversed — output must move from v3=(20,0) to v4=(30,0).
+    const vn = {
+      vertices: [
+        { styleID: 0, x: 0, y: 0 }, { styleID: 0, x: 10, y: 0 }, { styleID: 0, x: 5, y: 8 },
+        { styleID: 0, x: 20, y: 0 }, { styleID: 0, x: 30, y: 0 },
+      ],
+      segments: [
+        { styleID: 0, start: { vertex: 0, dx: 0, dy: 0 }, end: { vertex: 1, dx: 0, dy: 0 } },
+        { styleID: 0, start: { vertex: 1, dx: 0, dy: 0 }, end: { vertex: 2, dx: 0, dy: 0 } },
+        { styleID: 0, start: { vertex: 2, dx: 0, dy: 0 }, end: { vertex: 0, dx: 0, dy: 0 } },
+        { styleID: 1, start: { vertex: 3, dx: 0, dy: 0 }, end: { vertex: 4, dx: 0, dy: 0 } },
+      ],
+      regions: [{
+        styleID: 0,
+        windingRule: 'NONZERO' as const,
+        loops: [{ segments: [0, 1, 2] }],
+      }],
+    };
+    const path = vectorNetworkToPath(vn);
+    // direction must be v3 (20,0) → v4 (30,0), not reversed.
+    const idx = path.indexOf('M20 0');
+    const lIdx = path.indexOf('L30 0');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(lIdx).toBeGreaterThan(idx);
+  });
+
   it('orientSegments reverses out-of-order segments to keep continuity (EQ)', () => {
     // segments stored OUT of natural chain order: v1→v0, v1→v2 (first should be reversed to v0→v1)
     const vn = {

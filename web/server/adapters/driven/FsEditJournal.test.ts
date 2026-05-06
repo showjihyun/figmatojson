@@ -65,20 +65,20 @@ describe('FsEditJournal', () => {
     // Simulate a server restart — new journal instance, same dir.
     const journal2 = new FsEditJournal(new StubStore('sid', dir));
     expect(journal2.depths('sid')).toEqual({ past: 2, future: 0 });
-    const popped = journal2.popUndo('sid');
+    const popped = journal2.popStep('sid', 'undo');
     expect(popped?.label).toBe('second');
     expect(journal2.depths('sid')).toEqual({ past: 1, future: 0 });
   });
 
-  it('flush after popUndo persists the new state so a subsequent restart sees the pop', () => {
+  it('flush after popStep persists the new state so a subsequent restart sees the pop', () => {
     const journal = new FsEditJournal(new StubStore('sid', dir));
     journal.record('sid', {
       label: 'only',
       patches: [{ guid: '0:1', field: 'x', before: 1, after: 2 }],
     });
-    journal.popUndo('sid');
-    // future stack moved-to side: caller does pushFuture, not popUndo, so
-    // here the past is empty and future is empty too.
+    journal.popStep('sid', 'undo');
+    // History.execute would also call pushStep('redo', entry) here; we
+    // assert just past=[] to keep the test focused on the popStep persist.
     const parsed = JSON.parse(readFileSync(join(dir, '.history.json'), 'utf8'));
     expect(parsed.past).toEqual([]);
   });
@@ -99,12 +99,12 @@ describe('FsEditJournal', () => {
     }
     expect(journal.depths('sid').past).toBe(100);
     // Top of the stack is the most recent.
-    const top = journal.popUndo('sid');
+    const top = journal.popStep('sid', 'undo');
     expect(top?.label).toBe('e104');
     // Bottom: the first 5 should have been dropped, so #5 is now the oldest.
     let last: string | null = null;
     while (true) {
-      const e = journal.popUndo('sid');
+      const e = journal.popStep('sid', 'undo');
       if (!e) break;
       last = e.label;
     }
