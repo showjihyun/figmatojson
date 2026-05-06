@@ -5,8 +5,8 @@
 | 문서 버전 | v1.0 |
 | 작성일 | 2026-05-05 |
 | 적용 범위 | round 25 종료 시점의 전체 시스템 |
-| 자매 문서 | [SPEC.md](./SPEC.md) (CLI 9단계), [ARCHITECTURE.md](./ARCHITECTURE.md) (Web Phase 0 계획), [SDD.md](./SDD.md), [HARNESS.md](./HARNESS.md) |
-| 위치 | 본 SPEC은 위 두 문서가 분리해 다루던 영역(CLI 파이프라인 + Web Hexagonal 계획)을 *통합 + 현재 구현 상태*로 재기술 |
+| 자매 문서 | [SPEC.md](./SPEC.md) (CLI 9단계), [SDD.md](./SDD.md), [HARNESS.md](./HARNESS.md) |
+| 위치 | 본 SPEC 은 *현재 구현 상태* 의 단일 source. Phase 0~7 마이그레이션 이력은 [§16 Appendix A](#16-appendix-a--phase-07-마이그레이션-이력-2026-05-02--05) 에 흡수됨. |
 
 본 문서는 round 26 진입 전 현재 시스템의 정적 구조 + 실행 파이프라인 + 핵심 계약(invariants)을 한 곳에 정리한다. 새 라운드 작업의 기준선.
 
@@ -876,8 +876,7 @@ figma_reverse/
 │  └─ scripts/audit-round11-*.mjs    Audit harness
 ├─ docs/
 │  ├─ SPEC.md                         CLI 9-stage (§1, §2)
-│  ├─ SPEC-architecture.md            ⭐ 본 문서 (현재 시점 통합)
-│  ├─ ARCHITECTURE.md                 Phase 0 Web 마이그레이션 계획 (현재는 완료)
+│  ├─ SPEC-architecture.md            ⭐ 본 문서 (현재 시점 통합 + Phase 0 이력)
 │  ├─ SDD.md, HARNESS.md, PRD.md
 │  ├─ adr/                            결정 기록 4건
 │  ├─ specs/*.spec.md                 39 spec (§10)
@@ -899,3 +898,111 @@ figma_reverse/
   4. 단위 테스트 + 4 corpus audit baseline 갱신
   5. e2e contract pin (시각 win 이 있다면)
   6. GAPS.md round-N close 섹션 추가
+
+---
+
+## 16. Appendix A — Phase 0~7 마이그레이션 이력 (2026-05-02 ~ 05)
+
+**(구 `docs/ARCHITECTURE.md` 의 흡수본 — 마이그레이션 완료 후 historical reference)**
+
+### 16.1 마이그레이션 개요
+
+| 항목 | 값 |
+|---|---|
+| 시작 | 2026-05-02 (구 `ARCHITECTURE.md` v0.1 — Phase 0 산출물) |
+| 종료 | 2026-05-05 (round 25 cutoff — 본 SPEC 작성 시점) |
+| 적용 대상 | `web/` 서버 + 클라이언트 (`src/` CLI 는 비대상) |
+| 비목표 | 기능 추가 / 동작 변경 / `src/` 재배치 |
+
+> **목표** (당시): 단일 1,234 줄 `server/index.ts` + 비즈 로직이 컴포넌트
+> 안에 산재한 React 클라이언트를, **Clean Architecture × Hexagonal (Ports
+> & Adapters)** 로 재배치. 외부 의존(파일시스템, Anthropic SDK, Hono,
+> React) 을 도메인 코어에서 분리 → 유지보수성·테스트 용이성. SPEC→TEST→IMPL
+> 사이클 ([SDD.md](./SDD.md), [HARNESS.md](./HARNESS.md)) 을 web 레이어에도 일관
+> 적용.
+
+### 16.2 Phase 0 인벤토리 (마이그레이션 직전 LOC 분포)
+
+```
+server/index.ts            1234   ← 모놀리스: 라우팅 + 도메인 + IO + SDK
+client/src/Canvas.tsx       878   ← Konva 렌더 + 이벤트 + 좌표 수학
+client/src/Inspector.tsx    948   ← UI + 패치 + 색/숫자 + 컴포넌트 텍스트 모델
+client/src/ChatPanel.tsx    543   ← UI + fetch + 인증 모드 + 모델 선택
+client/src/App.tsx          344   ← 레이아웃 + onUpload/onSave/onMove*
+client/src/hooks/usePatch.ts 77   ← 디바운스 (이미 추출됨)
+client/src/multiResize.ts   ~80   ← 그룹 리사이즈 (이미 추출됨)
+─────────────────────────────────
+                           ≈4659  (UI 프리미티브 제외)
+```
+
+당시 문제:
+- 라우트 핸들러가 도메인 로직 + IO + 외부 SDK 호출을 한 함수에서 처리 → 단위 테스트 불가
+- React 컴포넌트가 직접 `fetch()` → 컴포넌트 테스트 시 네트워크 모킹 필요
+- 같은 도메인 개념이 클라이언트와 서버 양쪽에 중복 정의
+
+### 16.3 Phase 로드맵 (실제 진행)
+
+| Phase | 산출물 | 결과 |
+|---|---|---|
+| **0** | 본 문서의 전신 (`ARCHITECTURE.md` Phase 0 산출물) | ✅ 2026-05-02 완료 |
+| **1** | `web/core/ports/*.ts` 6개 인터페이스 | ✅ |
+| **2** | `web/core/domain/*.ts` 순수 헬퍼 추출 + shim | ✅ |
+| **3** | `web/server/adapters/driven/*.ts` (FsSessionStore 등) | ✅ |
+| **4** | `web/core/application/*.ts` use case | ✅ |
+| **5** | `web/server/adapters/driving/http/*.ts` Hono 라우트 분할 | ✅ |
+| **6** | `web/client/src/services/*.ts` (네트워크/상태 추상화) | ✅ |
+| **7** | SDD/Harness 정착: `docs/specs/web-*.spec.md` + L0/L1 테스트 | ✅ (본 SPEC §10 Spec 레지스트리 + §9 테스트 레이어 가 결과) |
+
+7 phase 모두 round 25 까지 완료. 본 SPEC §3 (모듈 카탈로그) 가 *결과* 의
+single source — `web/core/domain` zero-deps, `web/core/application` 이 ports
++ domain 만 import, `web/server/adapters/driven` 이 외부 라이브러리 연결.
+
+### 16.4 핵심 마이그레이션 결정 (Phase 0 시점)
+
+| 결정 | 값 | 사유 |
+|---|---|---|
+| 새 코드 위치 | `web/core/` (web 트리 안) | `src/` 는 CLI 전용으로 유지. 추후 통합 검토 |
+| Port 정의 위치 | `web/core/ports/` | application 이 ports 의 owner |
+| Domain 의존성 | 0 (no React, no Node fs, no SDK) | 테스트 격리·재사용성 보장 |
+| Shim 전략 | 기존 import 경로는 re-export 로 유지 | Phase 2 회귀 0 |
+| `src/` 재배치 | 본 마이그레이션 비대상 | 별도 RFC 후 진행 |
+
+마지막 결정 ("`src/` 재배치 비대상") 의 결과: round 18 에서 `masterIndex` /
+`effectiveVisibility` / `instanceOverrides` 를 `src/` 에 둔 채로 web 측이
+import — [ADR-0004](./adr/0004-shared-modules-live-in-src.md) 에서 정식 결정.
+
+### 16.5 회귀 가드 (당시 Phase 0~2 invariant)
+
+- 8 unit + 7 e2e + typecheck + production build 통과 유지
+- `tokenizePath` / `setPath` 등 함수 시그니처 변화 없음 (re-export shim 호환)
+- 외부 동작 (`/api/*` 응답) 변화 없음
+- 의존성 변화는 dev-deps 추가만, 런타임 deps 추가 0
+
+Phase 3 이후의 동작 동등성은 [HARNESS.md](./HARNESS.md) Layer 0~3 가 보증.
+현재는 §9 테스트 레이어 가 evolved — round 25 시점 L0 (450 web + 126 root
+unit) + L1 (~30 e2e) + L2 (749 audit PNG) + L3 (round-trip) + L4 (CLI verify).
+
+### 16.6 모듈 이동 매트릭스 (현재 → 도착, 완료)
+
+| 출처 (당시 server/index.ts 안) | 도착 (현재) |
+|---|---|
+| `tokenizePath`, `setPath` | `web/core/domain/path.ts` |
+| `findById`, `findNode` | `web/core/domain/tree.ts` |
+| `summarizeDoc` | `web/core/domain/summary.ts` |
+| `sniffImageMime` | `web/core/domain/image.ts` |
+| `repack` / `decode` 호출 | `web/server/adapters/driven/KiwiCodec.ts` |
+| `mkdtemp` / `readFile` / `save` 흐름 | `web/server/adapters/driven/FsSessionStore.ts` |
+| `GET /api/asset` 핸들러 | `web/core/application/ServeAsset.ts` + `adapters/driving/http/assetRoute.ts` |
+| `POST /api/chat` (subscription) | `RunChatTurn` + `AgentSdkChat` |
+| `POST /api/chat` (api-key) | `RunChatTurn` + `AnthropicChat` |
+| `applyTool` | `InProcessTools` (구현) + `core/ports/ToolDispatcher.ts` (계약) |
+| `Inspector.tsx:rgbaToHex/hexToRgb01` | `web/core/domain/color.ts` (Canvas 와 단일화) |
+| `Canvas.tsx:imageHashHex` | `web/core/domain/image.ts` |
+| `Canvas.tsx:colorOf/strokeOf/guidStr` | `web/core/domain/color.ts` + `web/core/domain/tree.ts` |
+| `client/src/api.ts` (fetch wrapper) | `client/src/services/*Service.ts` |
+| `client/src/hooks/usePatch.ts` | (그대로 — 이미 적합 위치) |
+| `client/src/multiResize.ts` | (그대로) |
+| Hono routes (모든 `app.get/post/patch`) | `adapters/driving/http/*Route.ts` 로 분할 |
+
+이 매트릭스는 *완료된 작업의 archeology* — 새 코드는 본 SPEC §3 의 카탈로그
+를 reference. 이 표는 git blame / 마이그레이션 PR 추적 시에만 의미 있음.

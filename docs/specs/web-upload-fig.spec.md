@@ -5,7 +5,7 @@
 | 상태 | Approved (Phase 7) |
 | 구현 | `web/core/application/UploadFig.ts` |
 | 테스트 | `web/core/application/UploadFig.test.ts` |
-| 부모 | [docs/ARCHITECTURE.md](../ARCHITECTURE.md), [SDD.md](../SDD.md) |
+| 부모 | [docs/SPEC-architecture.md](../SPEC-architecture.md), [SDD.md](../SDD.md) |
 
 ## 1. 목적
 

@@ -6,7 +6,7 @@
  * data transformation; both the FsSessionStore (when creating a session from
  * fresh .fig bytes) and the snapshot-load path call into here.
  *
- * Lifted from server/index.ts as part of Phase 3 — see docs/ARCHITECTURE.md.
+ * Lifted from server/index.ts as part of Phase 3 — see docs/SPEC-architecture.md §16.
  */
 
 import { parseVectorNetworkBlob, vectorNetworkToPath } from '../../../src/vector.js';

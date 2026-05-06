@@ -10,7 +10,7 @@
  * thing.
  *
  * No IO, no framework — moved here from server/index.ts as part of the
- * Phase 2 domain extraction (see docs/ARCHITECTURE.md §3.1).
+ * Phase 2 domain extraction (see docs/SPEC-architecture.md §16.6).
  */
 
 export type PathToken = string | number;
