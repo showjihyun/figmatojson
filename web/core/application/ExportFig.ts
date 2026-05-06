@@ -30,6 +30,12 @@ export class ExportFig {
   async execute({ sessionId }: ExportFigInput): Promise<ExportFigOutput> {
     const session = this.sessionStore.getById(sessionId);
     if (!session) throw new NotFoundError(`session ${sessionId} not found`);
+    // Flush any pending in-memory mutations to disk BEFORE repack reads
+    // message.json. Today's PATCH paths (EditNode / ResizeNode / OverrideInstanceText
+    // / chat tools) already write inline, so flush is typically a no-op —
+    // but the explicit call here is the contract: Export .fig is "save +
+    // export" in one step. No separate Save button click required.
+    await this.sessionStore.flush(sessionId);
     const result = await this.repacker.repack(sessionId);
     return {
       bytes: result.bytes,
