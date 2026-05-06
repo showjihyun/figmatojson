@@ -18,7 +18,7 @@ import { documentService } from '@/services';
 import { usePatch } from './hooks/usePatch';
 import { rgbaToHex, hexToRgb01 } from '@core/domain/color';
 import { findById } from '@core/domain/tree';
-import { colorVarName, textStyleName, effectiveTextStyle } from '@core/domain/colorStyleRef';
+import { colorVarName, textStyleName, effectiveTextStyle, colorVarTrail, type ColorVarTrailResult } from '@core/domain/colorStyleRef';
 import { variantLabelText } from './lib/variantLabel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -53,6 +53,23 @@ interface InspectorProps {
 // Inspector reads always has `id = guidStr(guid)` set during decode, so the
 // two are equivalent in practice — alias kept for callers below.
 const findByGuid = findById;
+
+/**
+ * Round 18-B — render a colorVar alias trail as "A → B → C" with a small
+ * end-state marker (cycle ⟲ / dead-end ⚠ / depth-cap …). Returns null
+ * when the trail is empty (caller skips rendering the row entirely).
+ *
+ * Spec: docs/specs/web-render-fidelity-round18-B.spec.md §I-8.
+ */
+function formatAliasTrail(trail: ColorVarTrailResult | null): string | null {
+  if (!trail || trail.entries.length === 0) return null;
+  const names = trail.entries.map((e) => e.name ?? '<unnamed>');
+  let text = names.join(' → ');
+  if (trail.end.kind === 'cycle') text += ' ⟲';
+  else if (trail.end.kind === 'dead-end') text += ' ⚠';
+  else if (trail.end.kind === 'depth-cap') text += ' …';
+  return text;
+}
 
 // `rgbaToHex` and `hexToRgb01` live in `@core/domain/color.ts` now.
 
@@ -583,9 +600,14 @@ function FillSection({ node, sessionId, guid, onChange, root }: SectionProps) {
       </Row>
     );
   }
-  // Round 15 — surface the Figma library color variable name when the
-  // fill carries a colorVar alias. Helper returns null for plain SOLIDs.
-  const styleName = root ? colorVarName(first, root) : null;
+  // Round 15 + Round 18-B — surface the Figma library color trail
+  // ("A → B → C") when the fill carries a colorVar alias. Falls back to
+  // the round-15 single-hop name when the helper hasn't been wired up
+  // (e.g. older callers without root). Helper returns null for plain
+  // SOLIDs without colorVar.
+  const trail = root ? colorVarTrail(first, root) : null;
+  const trailText = formatAliasTrail(trail);
+  const styleName = trailText ?? (root ? colorVarName(first, root) : null);
   return (
     <>
       <Row label="Color">
@@ -602,7 +624,7 @@ function FillSection({ node, sessionId, guid, onChange, root }: SectionProps) {
       </Row>
       {styleName && (
         <Row label="Style">
-          <span className="text-xs text-muted-foreground" title={styleName}>{styleName}</span>
+          <span className="text-xs text-muted-foreground break-all" title={styleName}>{styleName}</span>
         </Row>
       )}
       <Row label="Layer α">
@@ -621,8 +643,10 @@ function StrokeSection({ node, sessionId, guid, onChange, root }: SectionProps) 
   const first = (node.strokePaints?.[0] ?? null) as
     | { type?: string; color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number; colorVar?: unknown }
     | null;
-  // Round 15 — same Figma library color label as FillSection.
-  const styleName = first?.type === 'SOLID' && root ? colorVarName(first, root) : null;
+  // Round 15 + 18-B — same alias trail as FillSection.
+  const trail = first?.type === 'SOLID' && root ? colorVarTrail(first, root) : null;
+  const trailText = formatAliasTrail(trail);
+  const styleName = trailText ?? (first?.type === 'SOLID' && root ? colorVarName(first, root) : null);
   return (
     <>
       <Row label="Weight">
@@ -658,7 +682,7 @@ function StrokeSection({ node, sessionId, guid, onChange, root }: SectionProps) 
       )}
       {styleName && (
         <Row label="Style">
-          <span className="text-xs text-muted-foreground" title={styleName}>{styleName}</span>
+          <span className="text-xs text-muted-foreground break-all" title={styleName}>{styleName}</span>
         </Row>
       )}
     </>
