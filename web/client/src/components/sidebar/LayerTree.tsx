@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { countVariantChildren } from '@/lib/variants';
+import { variantLabelText } from '@/lib/variantLabel';
 
 interface DocNode {
   guid?: { sessionID?: number; localID?: number };
@@ -101,8 +102,12 @@ const LayerRow = memo(function LayerRow({
     if (guid) toggleExpand(guid);
   };
 
-  const displayName = node.name && node.name.length > 0
-    ? node.name
+  // Round 14 — strip variant `prop=` prefixes (e.g. "size=XL, State=default,
+  // Type=primary" → "XL, default, primary"). variantLabelText is a no-op
+  // for non-variant names; returns null only when name is missing/blank.
+  const prettyName = variantLabelText(node.name);
+  const displayName = prettyName && prettyName.length > 0
+    ? prettyName
     : <span className="italic text-muted-foreground">{'<unnamed>'}</span>;
 
   // Spec I-F3.5: variant containers (COMPONENT_SET or legacy FRAME-with-

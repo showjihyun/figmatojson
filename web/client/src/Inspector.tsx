@@ -18,6 +18,7 @@ import { documentService } from '@/services';
 import { usePatch } from './hooks/usePatch';
 import { rgbaToHex, hexToRgb01 } from '@core/domain/color';
 import { findById } from '@core/domain/tree';
+import { variantLabelText } from './lib/variantLabel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -185,7 +186,10 @@ function Header({ node, guid }: { node: any; guid: string }) {
         {node.type} <span className="opacity-60">· {guid}</span>
       </div>
       <div className="mt-1 text-sm font-semibold text-foreground">
-        {node.name ?? <span className="text-muted-foreground">(unnamed)</span>}
+        {/* Round 14 — strip variant `prop=` prefixes (e.g. "size=XL, State=default,
+            Type=primary" → "XL, default, primary"). variantLabelText is a
+            no-op for non-variant names; null only when name is missing. */}
+        {variantLabelText(node.name) ?? <span className="text-muted-foreground">(unnamed)</span>}
       </div>
     </div>
   );
