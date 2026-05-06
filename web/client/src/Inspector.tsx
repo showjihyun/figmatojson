@@ -110,7 +110,7 @@ export function Inspector({ page, root, sessionId, selectedGuid, selectedCount, 
   return (
     <div className="flex h-full min-h-0 flex-col text-sm">
       <Header node={node} guid={selectedGuid!} />
-      <TabbedBody node={node} sessionId={sessionId} guid={selectedGuid!} onChange={onChange} />
+      <TabbedBody node={node} sessionId={sessionId} guid={selectedGuid!} onChange={onChange} root={root} />
     </div>
   );
 }
@@ -120,11 +120,21 @@ function TabbedBody({
   sessionId,
   guid,
   onChange,
+  root,
 }: {
   node: any;
   sessionId: string;
   guid: string;
   onChange: () => void;
+  /**
+   * Round 16 — must thread root through to FillSection / StrokeSection /
+   * TextSection so their `colorVarName` / `effectiveTextStyle` lookups
+   * have the document tree. Without this prop the bare `root` identifier
+   * inside TabbedBody resolves up the scope chain to `window.root` —
+   * which the browser auto-creates from the `<div id="root">` mount
+   * point — yielding a DOM element that fails every alias lookup.
+   */
+  root?: any;
 }) {
   return (
     <Tabs defaultValue="properties" className="flex min-h-0 flex-1 flex-col">
