@@ -23,8 +23,6 @@ import {
 import { Stage, Layer, Rect, Text as KText, Group, Path, Image as KImage, Line } from 'react-konva';
 import type Konva from 'konva';
 import { cornerDrag, groupBbox, projectMembers, type Corner } from './multiResize';
-import { solidFillCss, strokeFromPaints } from '@core/domain/color';
-import { imageHashHex } from '@core/domain/image';
 import { guidStr } from '@core/domain/tree';
 import type { DocumentNode } from '@core/domain/entities/Document';
 import {
@@ -46,22 +44,17 @@ import {
   konvaTextAlign,
   konvaVerticalAlign,
 } from './lib/textStyle';
-import { applyStrokeAlign } from './lib/strokeAlign';
 import { nodeRender, type RenderContext } from './render/nodeRender';
-import { shadowFromEffects, innerShadowFromEffects } from './lib/shadow';
-import { paintLayers } from './lib/paintRender';
+import { shadowFromEffects } from './lib/shadow';
 import { InnerShadowOverlay } from './components/canvas/InnerShadowOverlay';
 import { konvaBlendMode } from './lib/blendMode';
 import { computeImageCrop } from './lib/imageScale';
-import { layerBlurFromEffects } from './lib/blurEffect';
 import { LayerBlurWrapper } from './components/canvas/LayerBlurWrapper';
 import { variantLabelText } from './lib/variantLabel';
 import { VariantLabel } from './components/canvas/VariantLabel';
 import { rotationDegrees } from './lib/transform';
-import { konvaLineCap, konvaLineJoin } from './lib/strokeCapJoin';
 import { firstStopRgba, gradientFromPaint, type KonvaGradient } from './lib/gradient';
 import { pickTopPaint } from './lib/paint';
-import { cornerRadiusForKonva } from './lib/cornerRadii';
 import { applyTextCase, konvaTextDecoration } from './lib/textTransform';
 import { splitTextRuns, hasStyledRuns, type StyleRun } from './lib/textStyleRuns';
 
@@ -293,22 +286,6 @@ function ImageFill({
   return imageEl;
 }
 
-// `guidStr`, `solidFillCss` (was `colorOf`), `strokeFromPaints` (was `solidStrokeCss`/`strokeOf`)
-// live in `@core/domain/color.ts` and `@core/domain/tree.ts` now.
-// Local aliases preserve the old call sites' names without further churn.
-const colorOf = solidFillCss;
-const strokeOf = strokeFromPaints;
-
-const VECTOR_TYPES = new Set([
-  'VECTOR',
-  'STAR',
-  'LINE',
-  'ELLIPSE',
-  'REGULAR_POLYGON',
-  'BOOLEAN_OPERATION',
-  'ROUNDED_RECTANGLE',
-]);
-
 interface NodeShapeProps {
   node: any;
   onSelect: (g: string | null, mode?: 'replace' | 'toggle') => void;
@@ -344,16 +321,13 @@ function NodeShapeImpl({
   const plan = nodeRender(node as Record<string, unknown>, renderCtx);
   if (plan.kind === 'hidden') return null;
 
-  const isAncestorOfIsolated = isolation?.ancestors.has(myId) === true;
   const x = node.transform?.m02 ?? 0;
   const y = node.transform?.m12 ?? 0;
+  // w/h are still consumed by the inline TEXT single-KText defensive
+  // fallback (slice 1D will remove it). All other paint-stack locals
+  // (stroke / cornerR / isAncestorOfIsolated) moved into nodeRender's plan.
   const w = node.size?.x ?? 0;
   const h = node.size?.y ?? 0;
-  const stroke = strokeOf(node);
-  // Resolve per-corner radii (spec round5 §2). When all four corners
-  // share the same value, returns a number → number; asymmetric
-  // returns a [tl, tr, br, bl] tuple Konva.Rect accepts directly.
-  const cornerR = cornerRadiusForKonva(node, node.cornerRadius ?? 0);
 
   // Universal Figma props (round 3):
   //   - rotation: pure-rotation matrices → degrees; skew falls through to
@@ -660,9 +634,17 @@ function NodeShapeImpl({
       />
     );
     // Round 13 — INSIDE strokeAlign emulation: wrap the Path in a Group
-    // whose clipFunc fills the same path (with the same x/y/scale) so
-    // the doubled stroke's outer half gets clipped. Only inner half remains
-    // visible — visually identical to Figma's INSIDE.
+    // whose clipFunc *returns* a Path2D so Konva calls `ctx.clip(path2d)`.
+    // The doubled stroke's outer half is clipped, leaving only the inner
+    // half — visually identical to Figma's INSIDE.
+    //
+    // Konva's _drawChildren spreads the return value into `ctx.clip(...)`:
+    //   clipArgs = clipFunc(ctx, this);
+    //   ctx.clip.apply(ctx, clipArgs);
+    // Returning `[path2d]` means `ctx.clip(path2d)`. The previous round
+    // 13.1 attempt called `ctx.fill(p)` which actually painted the path
+    // (default fillStyle = black) — that produced the black-filled ellipses
+    // the user reported. clipFunc must build/return a sub-path, not paint.
     const inner = plan.clipToPath ? (
       <Group
         clipFunc={(ctx) => {
@@ -671,9 +653,7 @@ function NodeShapeImpl({
           // Path2D parses SVG path strings (modern browsers). jsdom (test
           // env) can't reach this code — Konva.Layer.draw() is never called
           // in component unit tests.
-          const p = new Path2D(plan.path);
-          ctx.beginPath();
-          ctx.fill(p);
+          return [new Path2D(plan.path)];
         }}
       >
         {pathEl}
@@ -699,314 +679,227 @@ function NodeShapeImpl({
     );
   }
 
-  // Multi-paint stacking (round 6 §2). fillPaints[0] is bottom-most;
-  // every visible paint becomes its own Konva element. SOLID and
-  // gradient paints render as Rects; IMAGE renders as ImageFill.
-  // Round-23: when isolating, suppress fills on ancestors of the target so
-  // captured screenshots compare apples-to-apples with figma.png.
-  const layers = paintLayers(
-    isAncestorOfIsolated
-      ? undefined
-      : (node.fillPaints as Array<{ type?: string; visible?: boolean }> | undefined),
-    w,
-    h,
-  );
-  // Per-stroke dash array (Figma stores [dash, gap, ...]); pass through
-  // to Konva's `dash` prop on stroke-bearing elements only.
-  const dash = Array.isArray(node.dashPattern) && node.dashPattern.length > 0
-    ? (node.dashPattern as number[])
-    : undefined;
+  // Slice 1C of #1 — paint-stack rendering driven by the nodeRender plan.
+  // Every paint/stroke/shadow/blur/clip decision now lives in
+  // web/client/src/render/nodeRender.ts; NodeShapeImpl just maps the plan
+  // into Konva elements + handlers + children + variant labels.
+  if (plan.kind === 'paint-stack') {
+    const planW = plan.outer.bbox.w;
+    const planH = plan.outer.bbox.h;
+    const imgSrc =
+      plan.imageHashHex && sessionId
+        ? `/api/asset/${sessionId}/${plan.imageHashHex}`
+        : null;
 
-  // Children to render: native children (FRAME etc.) OR an INSTANCE's
-  // expanded master tree (`_renderChildren`). The latter lets buttons /
-  // icons / labels actually appear inside an instance — without it,
-  // INSTANCE shows as a bare colored rect.
-  const renderableChildren =
-    Array.isArray(node.children) && node.children.length > 0
-      ? node.children
-      : (node._renderChildren as any[] | undefined) ?? [];
-  const hasChildren = renderableChildren.length > 0;
+    // Children to render: native children (FRAME etc.) OR an INSTANCE's
+    // expanded master tree (_renderChildren). The latter lets buttons /
+    // icons / labels actually appear inside an instance — without it,
+    // INSTANCE shows as a bare colored rect.
+    const renderableChildren =
+      Array.isArray(node.children) && node.children.length > 0
+        ? node.children
+        : (node._renderChildren as any[] | undefined) ?? [];
+    const hasChildren = renderableChildren.length > 0;
 
-  const imgHash = imageHashHex(node);
-  const imgSrc = imgHash && sessionId ? `/api/asset/${sessionId}/${imgHash}` : null;
+    // Konva passes a SceneContext (its proxy around the native canvas
+    // context). The path-building methods we use exist on both but the
+    // Konva-internal type isn't easily reachable.
+    type PathCtx = Pick<
+      CanvasRenderingContext2D,
+      'moveTo' | 'lineTo' | 'quadraticCurveTo' | 'rect' | 'closePath'
+    >;
+    const c = plan.corners;
+    const anyCorner = c.tl > 0 || c.tr > 0 || c.br > 0 || c.bl > 0;
+    const clipFunc = plan.clipChildren
+      ? ((ctx: PathCtx): void => {
+          if (anyCorner) {
+            ctx.moveTo(c.tl, 0);
+            ctx.lineTo(planW - c.tr, 0);
+            ctx.quadraticCurveTo(planW, 0, planW, c.tr);
+            ctx.lineTo(planW, planH - c.br);
+            ctx.quadraticCurveTo(planW, planH, planW - c.br, planH);
+            ctx.lineTo(c.bl, planH);
+            ctx.quadraticCurveTo(0, planH, 0, planH - c.bl);
+            ctx.lineTo(0, c.tl);
+            ctx.quadraticCurveTo(0, 0, c.tl, 0);
+            ctx.closePath();
+          } else {
+            ctx.rect(0, 0, planW, planH);
+          }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any
+      : undefined;
 
-  // Per-side stroke (spec web-render-fidelity-high.spec.md §3.6) — when
-  // border{Top,Right,Bottom,Left}Weight values differ AND strokePaints is
-  // non-empty, draw individual Konva.Line segments instead of letting the
-  // background Rect carry a uniform stroke. Common Figma pattern: a row
-  // with only a 1px bottom border (table cell, calendar grid).
-  const bt = node.borderTopWeight as number | undefined;
-  const br = node.borderRightWeight as number | undefined;
-  const bb = node.borderBottomWeight as number | undefined;
-  const bl = node.borderLeftWeight as number | undefined;
-  const hasPerSideValues = bt != null || br != null || bb != null || bl != null;
-  const sidesUniform = hasPerSideValues && bt === br && br === bb && bb === bl;
-  const wantPerSide = hasPerSideValues && !sidesUniform && !!stroke;
+    const groupTree = (
+      <Group
+        x={plan.outer.bbox.x}
+        y={plan.outer.bbox.y}
+        rotation={plan.outer.rotation}
+        opacity={plan.outer.opacity}
+        globalCompositeOperation={plan.outer.blendMode as never}
+        draggable={isSelected}
+        onClick={onShapeClick}
+        onTap={onShapeClick}
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        onMouseEnter={onMouseEnter}
+        onMouseLeave={onMouseLeave}
+        clipFunc={clipFunc}
+      >
+        {/* Anchor Rect for shadow / uniform stroke when there's no fill. */}
+        {plan.needsAnchorRect && (
+          <Rect
+            x={plan.stroke?.kind === 'uniform' ? plan.stroke.rectDims.x : 0}
+            y={plan.stroke?.kind === 'uniform' ? plan.stroke.rectDims.y : 0}
+            width={plan.stroke?.kind === 'uniform' ? plan.stroke.rectDims.w : planW}
+            height={plan.stroke?.kind === 'uniform' ? plan.stroke.rectDims.h : planH}
+            fill={undefined}
+            stroke={plan.stroke?.kind === 'uniform' ? plan.stroke.color : undefined}
+            strokeWidth={plan.stroke?.kind === 'uniform' ? plan.stroke.width : undefined}
+            dash={plan.stroke?.kind === 'uniform' ? plan.dashPattern : undefined}
+            lineJoin={plan.lineJoin}
+            cornerRadius={
+              plan.stroke?.kind === 'uniform'
+                ? plan.stroke.rectDims.cornerRadius
+                : plan.cornerRadius
+            }
+            shadowEnabled={plan.shadow != null}
+            shadowOffsetX={plan.shadow?.shadowOffsetX}
+            shadowOffsetY={plan.shadow?.shadowOffsetY}
+            shadowBlur={plan.shadow?.shadowBlur}
+            shadowColor={plan.shadow?.shadowColor}
+            shadowOpacity={plan.shadow?.shadowOpacity}
+            listening
+          />
+        )}
+        {plan.fillLayers.map((layer, i) => {
+          // Drop shadow rides on the BOTTOM paint (i === 0); higher layers
+          // skip shadow so the silhouette doesn't double-shadow itself
+          // (round 6 I-MP4).
+          const shadowProps =
+            i === 0 && plan.shadow
+              ? {
+                  shadowEnabled: true,
+                  shadowOffsetX: plan.shadow.shadowOffsetX,
+                  shadowOffsetY: plan.shadow.shadowOffsetY,
+                  shadowBlur: plan.shadow.shadowBlur,
+                  shadowColor: plan.shadow.shadowColor,
+                  shadowOpacity: plan.shadow.shadowOpacity,
+                }
+              : undefined;
 
-  // strokeAlign INSIDE / OUTSIDE — adjust the background Rect's geometry
-  // so the stroke sits inside (or outside) the original bbox edges
-  // (spec web-render-fidelity-round2.spec.md §2). Per-side stroke uses
-  // Konva.Line segments and isn't affected.
-  const rectDims = !wantPerSide && stroke
-    ? applyStrokeAlign(
-        { x: 0, y: 0, w, h, cornerRadius: cornerR },
-        stroke.width,
-        node.strokeAlign as 'INSIDE' | 'OUTSIDE' | 'CENTER' | undefined,
-      )
-    : { x: 0, y: 0, w, h, cornerRadius: cornerR };
-
-  // Drop shadow (spec round2 §4) — first visible DROP_SHADOW from
-  // effects[]. Multiple shadows / blur fall through to v2.
-  const shadow = shadowFromEffects(node.effects);
-  // Inner shadow (round 6 §3) — first visible INNER_SHADOW; rendered
-  // by a dedicated Konva.Shape with custom sceneFunc.
-  const innerShadow = innerShadowFromEffects(node.effects);
-  // Layer blur (round 9 §2) — Konva caches the group bitmap and
-  // applies its built-in Blur filter. BACKGROUND_BLUR not yet handled.
-  const layerBlur = layerBlurFromEffects(node.effects);
-
-  // Frame clip (spec round2 §3) — when frameMaskDisabled === false,
-  // clip children to the frame's rounded-rect bounds. Konva clipFunc
-  // receives a 2D context; we draw the path the renderer should clip to.
-  //
-  // Round 12 (web-canvas-instance-clip.spec.md): also auto-clip INSTANCE
-  // groups whose master expansion produced _renderChildren — Figma's
-  // default is to clip instance content to its bbox, and skipping this
-  // lets master-tree TEXT/icon nodes leak outside size-overridden
-  // instances (the `Defa진행상태` table mojibake).
-  const wantClipForInstance =
-    node.type === 'INSTANCE' &&
-    node.frameMaskDisabled !== true &&
-    Array.isArray(node._renderChildren) && node._renderChildren.length > 0;
-  // Round-23 v3: when this node is an isolation ancestor, drop the clip too
-  // (not just fillPaints). Figma REST API renders the captured node alone,
-  // i.e. without any ancestor's clip-content boundary. Without this, e.g.
-  // dash-board/frame-2320-587_7496 (1380-wide table) sits inside FRAME 2335
-  // (454 wide, frameMaskDisabled=false) and gets visually cropped to 3 of
-  // 6 columns in our capture — figma.png shows all 6 because there's no
-  // grandparent clip in REST-API isolation. The target itself + its
-  // descendants keep their clips so legitimate clip behaviour (e.g.
-  // INSTANCE auto-clip) is unaffected.
-  const wantClip =
-    !isAncestorOfIsolated &&
-    (node.frameMaskDisabled === false || wantClipForInstance);
-  // Konva passes a SceneContext (its proxy around the native canvas
-  // context). The path-building methods we use exist on both but the
-  // Konva-internal type isn't easily reachable, so we type the param as
-  // the structural subset we actually call.
-  type PathCtx = Pick<CanvasRenderingContext2D, 'moveTo' | 'lineTo' | 'quadraticCurveTo' | 'rect' | 'closePath'>;
-  // Per-corner radii are accepted now (round5) — pull out the four
-  // values regardless of cornerR being number or [tl, tr, br, bl]
-  // tuple. Each side capped at half of the rect's relevant dimension
-  // so we never produce overlapping arcs. Variable names use `c` prefix
-  // to avoid collision with the border{T,R,B,L}Weight scalars above.
-  const cTL0 = typeof cornerR === 'number' ? cornerR : cornerR[0];
-  const cTR0 = typeof cornerR === 'number' ? cornerR : cornerR[1];
-  const cBR0 = typeof cornerR === 'number' ? cornerR : cornerR[2];
-  const cBL0 = typeof cornerR === 'number' ? cornerR : cornerR[3];
-  const halfW = w / 2;
-  const halfH = h / 2;
-  const cTL = Math.min(Math.max(0, cTL0), halfW, halfH);
-  const cTR = Math.min(Math.max(0, cTR0), halfW, halfH);
-  const cBR = Math.min(Math.max(0, cBR0), halfW, halfH);
-  const cBL = Math.min(Math.max(0, cBL0), halfW, halfH);
-  const anyCorner = cTL > 0 || cTR > 0 || cBR > 0 || cBL > 0;
-
-  const clipFunc = wantClip
-    ? ((ctx: PathCtx): void => {
-        if (anyCorner) {
-          ctx.moveTo(cTL, 0);
-          ctx.lineTo(w - cTR, 0);
-          ctx.quadraticCurveTo(w, 0, w, cTR);
-          ctx.lineTo(w, h - cBR);
-          ctx.quadraticCurveTo(w, h, w - cBR, h);
-          ctx.lineTo(cBL, h);
-          ctx.quadraticCurveTo(0, h, 0, h - cBL);
-          ctx.lineTo(0, cTL);
-          ctx.quadraticCurveTo(0, 0, cTL, 0);
-          ctx.closePath();
-        } else {
-          ctx.rect(0, 0, w, h);
-        }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      }) as any
-    : undefined;
-
-  const lineCap = konvaLineCap(node.strokeCap);
-  const lineJoin = konvaLineJoin(node.strokeJoin);
-
-  const groupTree = (
-    <Group
-      x={x}
-      y={y}
-      rotation={rotation}
-      opacity={opacity}
-      globalCompositeOperation={nodeBlend as never}
-      draggable={isSelected}
-      onClick={onShapeClick}
-      onTap={onShapeClick}
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
-      clipFunc={clipFunc}
-    >
-      {/* Multi-paint background stack (round 6 §2). One Konva element
-          per visible paint, in z-order — fillPaints[0] is bottom. The
-          bottom paint carries the drop shadow so the silhouette casts
-          correctly. The stroke is rendered as a separate Rect ABOVE
-          all fills with strokeAlign-adjusted dims. */}
-      {layers.length === 0 && (shadow != null || (!wantPerSide && stroke != null)) && (
-        // No fill paints, but we still want to anchor drop shadow / stroke.
-        <Rect
-          x={rectDims.x}
-          y={rectDims.y}
-          width={rectDims.w}
-          height={rectDims.h}
-          fill={undefined}
-          stroke={wantPerSide ? undefined : stroke?.color}
-          strokeWidth={wantPerSide ? undefined : stroke?.width}
-          dash={wantPerSide ? undefined : dash}
-          lineJoin={lineJoin}
-          cornerRadius={rectDims.cornerRadius}
-          shadowEnabled={shadow != null}
-          shadowOffsetX={shadow?.shadowOffsetX}
-          shadowOffsetY={shadow?.shadowOffsetY}
-          shadowBlur={shadow?.shadowBlur}
-          shadowColor={shadow?.shadowColor}
-          shadowOpacity={shadow?.shadowOpacity}
-          listening
-        />
-      )}
-      {layers.map((layer, i) => {
-        // Drop shadow rides on the BOTTOM paint (i === 0); pass empty
-        // shadow props to the rest so their silhouettes don't double-
-        // shadow the same node (round 6 I-MP4).
-        const shadowProps = i === 0 && shadow ? {
-          shadowEnabled: true,
-          shadowOffsetX: shadow.shadowOffsetX,
-          shadowOffsetY: shadow.shadowOffsetY,
-          shadowBlur: shadow.shadowBlur,
-          shadowColor: shadow.shadowColor,
-          shadowOpacity: shadow.shadowOpacity,
-        } : undefined;
-        // Per-paint blendMode (round 7 §3) — undefined for NORMAL /
-        // missing; mapped CSS composite name for everything else.
-        const gco = konvaBlendMode((layer.paint as { blendMode?: string }).blendMode);
-
-        if (layer.render.kind === 'image') {
-          // Pull scaleMode off the paint so each IMAGE paint object-
-          // fits its own way (round 8 §2). Default = STRETCH for
-          // legacy compat; metarich's 86 image fills are all FILL.
-          const scaleMode = (layer.paint as { imageScaleMode?: string }).imageScaleMode;
-          return (
-            <ImageFill
-              key={i}
-              src={imgSrc}
-              width={w}
-              height={h}
-              cornerRadius={cornerR}
-              scaleMode={scaleMode}
-              globalCompositeOperation={gco as never}
-            />
-          );
-        }
-        if (layer.render.kind === 'solid') {
+          if (layer.render.kind === 'image') {
+            return (
+              <ImageFill
+                key={i}
+                src={imgSrc}
+                width={planW}
+                height={planH}
+                cornerRadius={plan.cornerRadius}
+                scaleMode={layer.imageScaleMode}
+                globalCompositeOperation={layer.globalCompositeOperation as never}
+              />
+            );
+          }
+          if (layer.render.kind === 'solid') {
+            return (
+              <Rect
+                key={i}
+                x={0}
+                y={0}
+                width={planW}
+                height={planH}
+                fill={layer.render.fill}
+                cornerRadius={plan.cornerRadius}
+                globalCompositeOperation={layer.globalCompositeOperation as never}
+                {...(shadowProps ?? {})}
+                listening
+              />
+            );
+          }
+          // Gradient (linear / radial)
+          const g = layer.render;
           return (
             <Rect
               key={i}
               x={0}
               y={0}
-              width={w}
-              height={h}
-              fill={layer.render.fill}
-              cornerRadius={cornerR}
-              globalCompositeOperation={gco as never}
+              width={planW}
+              height={planH}
+              fillLinearGradientStartPoint={g.kind === 'linear' ? g.fillLinearGradientStartPoint : undefined}
+              fillLinearGradientEndPoint={g.kind === 'linear' ? g.fillLinearGradientEndPoint : undefined}
+              fillLinearGradientColorStops={g.kind === 'linear' ? g.fillLinearGradientColorStops : undefined}
+              fillRadialGradientStartPoint={g.kind === 'radial' ? g.fillRadialGradientStartPoint : undefined}
+              fillRadialGradientEndPoint={g.kind === 'radial' ? g.fillRadialGradientEndPoint : undefined}
+              fillRadialGradientStartRadius={g.kind === 'radial' ? g.fillRadialGradientStartRadius : undefined}
+              fillRadialGradientEndRadius={g.kind === 'radial' ? g.fillRadialGradientEndRadius : undefined}
+              fillRadialGradientColorStops={g.kind === 'radial' ? g.fillRadialGradientColorStops : undefined}
+              cornerRadius={plan.cornerRadius}
+              globalCompositeOperation={layer.globalCompositeOperation as never}
               {...(shadowProps ?? {})}
               listening
             />
           );
-        }
-        // gradient (linear / radial)
-        const g = layer.render;
-        return (
-          <Rect
-            key={i}
-            x={0}
-            y={0}
-            width={w}
-            height={h}
-            fillLinearGradientStartPoint={g.kind === 'linear' ? g.fillLinearGradientStartPoint : undefined}
-            fillLinearGradientEndPoint={g.kind === 'linear' ? g.fillLinearGradientEndPoint : undefined}
-            fillLinearGradientColorStops={g.kind === 'linear' ? g.fillLinearGradientColorStops : undefined}
-            fillRadialGradientStartPoint={g.kind === 'radial' ? g.fillRadialGradientStartPoint : undefined}
-            fillRadialGradientEndPoint={g.kind === 'radial' ? g.fillRadialGradientEndPoint : undefined}
-            fillRadialGradientStartRadius={g.kind === 'radial' ? g.fillRadialGradientStartRadius : undefined}
-            fillRadialGradientEndRadius={g.kind === 'radial' ? g.fillRadialGradientEndRadius : undefined}
-            fillRadialGradientColorStops={g.kind === 'radial' ? g.fillRadialGradientColorStops : undefined}
-            cornerRadius={cornerR}
-            globalCompositeOperation={gco as never}
-            {...(shadowProps ?? {})}
-            listening
+        })}
+        {/* Inner shadow (round 6 §3) — drawn after fills, before stroke. */}
+        {plan.innerShadow && (
+          <InnerShadowOverlay
+            width={planW}
+            height={planH}
+            corners={plan.corners}
+            offsetX={plan.innerShadow.offsetX}
+            offsetY={plan.innerShadow.offsetY}
+            blur={plan.innerShadow.blur}
+            color={plan.innerShadow.color}
           />
-        );
-      })}
-      {/* Inner shadow (round 6 §3) — drawn after fills, before stroke,
-          using a custom sceneFunc that emulates inner-shadow via clip
-          + even-odd outer-with-hole fill. */}
-      {innerShadow && (
-        <InnerShadowOverlay
-          width={w}
-          height={h}
-          corners={{ tl: cTL, tr: cTR, br: cBR, bl: cBL }}
-          offsetX={innerShadow.offsetX}
-          offsetY={innerShadow.offsetY}
-          blur={innerShadow.blur}
-          color={innerShadow.color}
-        />
-      )}
-      {/* Stroke as a separate Rect ABOVE the paint stack. Fill is
-          undefined so the layered paints below stay visible. */}
-      {layers.length > 0 && !wantPerSide && stroke && (
-        <Rect
-          x={rectDims.x}
-          y={rectDims.y}
-          width={rectDims.w}
-          height={rectDims.h}
-          fill={undefined}
-          stroke={stroke.color}
-          strokeWidth={stroke.width}
-          dash={dash}
-          lineJoin={lineJoin}
-          cornerRadius={rectDims.cornerRadius}
-          listening={false}
-        />
-      )}
-      {wantPerSide && bt && bt > 0 && (
-        <Line points={[0, 0, w, 0]} stroke={stroke!.color} strokeWidth={bt} lineCap={lineCap} dash={dash} listening={false} />
-      )}
-      {wantPerSide && br && br > 0 && (
-        <Line points={[w, 0, w, h]} stroke={stroke!.color} strokeWidth={br} lineCap={lineCap} dash={dash} listening={false} />
-      )}
-      {wantPerSide && bb && bb > 0 && (
-        <Line points={[0, h, w, h]} stroke={stroke!.color} strokeWidth={bb} lineCap={lineCap} dash={dash} listening={false} />
-      )}
-      {wantPerSide && bl && bl > 0 && (
-        <Line points={[0, 0, 0, h]} stroke={stroke!.color} strokeWidth={bl} lineCap={lineCap} dash={dash} listening={false} />
-      )}
-      {hasChildren && renderMaskedChildren(renderableChildren, onSelect, onDragGroup, sessionId)}
-      {/* Variant property labels (round 10 §5) — Component Set / state
-          group children get a small Figma-style label above each variant.
-          Rendered AFTER children so labels paint on top. */}
-      {hasChildren && isVariantContainer(node) && renderVariantLabels(renderableChildren)}
-    </Group>
-  );
+        )}
+        {/* Uniform stroke as a separate Rect ABOVE the paint stack. */}
+        {plan.fillLayers.length > 0 && plan.stroke?.kind === 'uniform' && (
+          <Rect
+            x={plan.stroke.rectDims.x}
+            y={plan.stroke.rectDims.y}
+            width={plan.stroke.rectDims.w}
+            height={plan.stroke.rectDims.h}
+            fill={undefined}
+            stroke={plan.stroke.color}
+            strokeWidth={plan.stroke.width}
+            dash={plan.dashPattern}
+            lineJoin={plan.lineJoin}
+            cornerRadius={plan.stroke.rectDims.cornerRadius}
+            listening={false}
+          />
+        )}
+        {/* Per-side borders — one Konva.Line per side that has a non-zero weight. */}
+        {plan.stroke?.kind === 'per-side' && plan.stroke.sides.top && plan.stroke.sides.top > 0 && (
+          <Line points={[0, 0, planW, 0]} stroke={plan.stroke.color} strokeWidth={plan.stroke.sides.top} lineCap={plan.lineCap} dash={plan.dashPattern} listening={false} />
+        )}
+        {plan.stroke?.kind === 'per-side' && plan.stroke.sides.right && plan.stroke.sides.right > 0 && (
+          <Line points={[planW, 0, planW, planH]} stroke={plan.stroke.color} strokeWidth={plan.stroke.sides.right} lineCap={plan.lineCap} dash={plan.dashPattern} listening={false} />
+        )}
+        {plan.stroke?.kind === 'per-side' && plan.stroke.sides.bottom && plan.stroke.sides.bottom > 0 && (
+          <Line points={[0, planH, planW, planH]} stroke={plan.stroke.color} strokeWidth={plan.stroke.sides.bottom} lineCap={plan.lineCap} dash={plan.dashPattern} listening={false} />
+        )}
+        {plan.stroke?.kind === 'per-side' && plan.stroke.sides.left && plan.stroke.sides.left > 0 && (
+          <Line points={[0, 0, 0, planH]} stroke={plan.stroke.color} strokeWidth={plan.stroke.sides.left} lineCap={plan.lineCap} dash={plan.dashPattern} listening={false} />
+        )}
+        {hasChildren && renderMaskedChildren(renderableChildren, onSelect, onDragGroup, sessionId)}
+        {/* Variant property labels (round 10 §5) — Component Set / state group
+            children get a small Figma-style label above each variant. */}
+        {hasChildren && isVariantContainer(node) && renderVariantLabels(renderableChildren)}
+      </Group>
+    );
 
-  // Round 9 §2 I-LB2: when LAYER_BLUR is active, wrap the whole tree in a
-  // cache+filter Group so the blur applies to the entire node bitmap.
-  return layerBlur
-    ? <LayerBlurWrapper radius={layerBlur.radius}>{groupTree}</LayerBlurWrapper>
-    : groupTree;
+    // Round 9 §2 I-LB2: when LAYER_BLUR is active, wrap in a cache+filter Group.
+    return plan.layerBlur ? (
+      <LayerBlurWrapper radius={plan.layerBlur.radius}>{groupTree}</LayerBlurWrapper>
+    ) : groupTree;
+  }
+
+  // Unreachable in practice — nodeRender always returns paint-stack as the
+  // catch-all when nothing else matched. The early returns for hidden /
+  // text-simple / vector and the inline TEXT block above cover every other
+  // plan.kind; render nothing rather than letting React see `undefined`.
+  return null;
 }
 
 /**
@@ -1210,11 +1103,6 @@ function renderVariantLabels(children: any[]): React.ReactNode {
 // state for THIS node comes from `useIsSelected` (subscription), not props,
 // so a click that flips one guid only re-renders the affected nodes.
 const NodeShape = memo(NodeShapeImpl);
-
-function colorOfWithDefault(node: any, fallback: string): string {
-  const c = colorOf(node);
-  return c === 'transparent' ? fallback : c;
-}
 
 /** Compute the absolute bounds of the selected node by walking the tree.
  *  Returns null if not found. Accumulates parent translations.

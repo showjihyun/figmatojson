@@ -6,16 +6,16 @@
  * component, which translates it into Konva elements + handlers.
  *
  * Migrated kinds so far:
- *   - 'hidden'      — Effective Visibility false / isolation hide. (1A)
- *   - 'vector'      — VECTOR_TYPES with a precomputed _path string. (1A)
- *   - 'text-simple' — TEXT nodes that don't need per-character style runs.
- *                     Includes auto-resize + center/right overflow math. (1B)
- *   - 'fallthrough' — anything else (NodeShape uses the legacy inline path);
- *                     in particular text-styled (multi-run) for now. (1B)
- *
- * Slice 1C will extend the plan with 'paint-stack' (FRAME / RECTANGLE / GROUP /
- * INSTANCE — paint stack + stroke + shadow + clip). Slice 1D will migrate
- * 'text-styled' (multi-run) so the inline TEXT block can be deleted.
+ *   - 'hidden'       — Effective Visibility false / isolation hide. (1A)
+ *   - 'vector'       — VECTOR_TYPES with a precomputed _path string. (1A)
+ *   - 'text-simple'  — TEXT nodes that don't need per-character style runs.
+ *                      Includes auto-resize + center/right overflow math. (1B)
+ *   - 'paint-stack'  — Default kind for FRAME / RECTANGLE / GROUP / INSTANCE
+ *                      / SECTION / SYMBOL: multi-paint stacking, stroke
+ *                      (uniform or per-side), shadow / inner shadow / layer
+ *                      blur, frame clip. (1C)
+ *   - 'fallthrough'  — text-styled (multi-run TEXT) only; the inline branch
+ *                      in Canvas.tsx handles it until 1D.
  *
  * The function is pure — no React, no Konva, no DOM. Callers that need
  * browser-only operations (text width measurement) inject them via
@@ -25,8 +25,21 @@
 import { rotationDegrees } from '../lib/transform.js';
 import { konvaBlendMode } from '../lib/blendMode.js';
 import { konvaLineCap, konvaLineJoin } from '../lib/strokeCapJoin.js';
-import { applyStrokeAlignToVectorPath } from '../lib/strokeAlign.js';
-import { shadowFromEffects, type KonvaShadow } from '../lib/shadow.js';
+import {
+  applyStrokeAlign,
+  applyStrokeAlignToVectorPath,
+  type CornerRadius,
+  type RectDims,
+} from '../lib/strokeAlign.js';
+import {
+  innerShadowFromEffects,
+  shadowFromEffects,
+  type InnerShadow,
+  type KonvaShadow,
+} from '../lib/shadow.js';
+import { layerBlurFromEffects } from '../lib/blurEffect.js';
+import { cornerRadiusForKonva } from '../lib/cornerRadii.js';
+import { paintLayers, type PaintRender } from '../lib/paintRender.js';
 import {
   konvaFontStyle,
   konvaLetterSpacing,
@@ -37,6 +50,7 @@ import {
 import { applyTextCase, konvaTextDecoration } from '../lib/textTransform.js';
 import { hasStyledRuns, splitTextRuns } from '../lib/textStyleRuns.js';
 import { solidFillCss, strokeFromPaints } from '@core/domain/color';
+import { imageHashHex } from '@core/domain/image';
 
 /** Vector types that carry a precomputed `_path` SVG string after toClientNode. */
 const VECTOR_TYPES: ReadonlySet<string> = new Set([
@@ -148,10 +162,74 @@ export interface NodeTextSimplePlan {
   shadow: KonvaShadow | null;
 }
 
+export interface PaintStackLayer {
+  /** Resolved render descriptor (solid / linear / radial / image). */
+  render: PaintRender;
+  /** Per-paint blendMode resolved to a Konva globalCompositeOperation. */
+  globalCompositeOperation: GlobalCompositeOperation | undefined;
+  /** For IMAGE paints — value of `imageScaleMode` (FILL / STRETCH / FIT / CROP). */
+  imageScaleMode: string | undefined;
+}
+
+export interface NodePaintStackUniformStroke {
+  kind: 'uniform';
+  rectDims: RectDims;
+  color: string;
+  width: number;
+}
+
+export interface NodePaintStackPerSideStroke {
+  kind: 'per-side';
+  color: string;
+  /** Each side's weight; missing/0 → that side isn't drawn. */
+  sides: {
+    top: number | undefined;
+    right: number | undefined;
+    bottom: number | undefined;
+    left: number | undefined;
+  };
+}
+
+export interface NodePaintStackPlan {
+  kind: 'paint-stack';
+  outer: NodeOuterFrame;
+
+  /** Konva.Rect cornerRadius prop — number when uniform, 4-tuple otherwise. */
+  cornerRadius: CornerRadius;
+  /** Four explicit corner values capped at half(w,h) — used by inner shadow + clipFunc path drawing. */
+  corners: { tl: number; tr: number; br: number; bl: number };
+
+  fillLayers: PaintStackLayer[];
+  /** Lowercase 40-char SHA-1 of the IMAGE paint asset, or `null` when no IMAGE in stack. */
+  imageHashHex: string | null;
+
+  stroke: NodePaintStackUniformStroke | NodePaintStackPerSideStroke | null;
+  /** First visible DROP_SHADOW (Konva paints one shadow per shape). */
+  shadow: KonvaShadow | null;
+  /** First visible INNER_SHADOW (rendered via dedicated overlay). */
+  innerShadow: InnerShadow | null;
+  /** First visible LAYER_BLUR — when set, Canvas wraps the whole tree in a cache+filter Group. */
+  layerBlur: { radius: number } | null;
+  /** dashPattern from `node.dashPattern`; passed through to whichever stroke shape is active. */
+  dashPattern: number[] | undefined;
+  lineCap: 'butt' | 'round' | 'square' | undefined;
+  lineJoin: 'miter' | 'round' | 'bevel' | undefined;
+
+  /**
+   * True when `fillLayers` is empty AND we still need to anchor a drop shadow
+   * or uniform stroke — Canvas inserts an empty-fill Rect with shadow + stroke
+   * props.
+   */
+  needsAnchorRect: boolean;
+  /** True when Canvas should install a clipFunc Group for children. */
+  clipChildren: boolean;
+}
+
 export type NodeRenderPlan =
   | NodeHiddenPlan
   | NodeVectorPlan
   | NodeTextSimplePlan
+  | NodePaintStackPlan
   | NodeFallthroughPlan;
 
 /** Resolve outer transform/composite props common to every visible kind. */
@@ -308,6 +386,136 @@ function planTextSimple(node: Record<string, unknown>, ctx: RenderContext): Node
   };
 }
 
+function planPaintStack(node: Record<string, unknown>, ctx: RenderContext): NodePaintStackPlan {
+  const outer = readOuter(node);
+  const { w, h } = outer.bbox;
+  const myId = (node.id as string | undefined) ?? '';
+  const isAncestorOfIsolated = ctx.isolation?.ancestors.has(myId) === true;
+
+  // Round-23: when isolating, suppress fills on ancestors of the target so
+  // captured screenshots compare apples-to-apples with figma.png.
+  const fillsInput = isAncestorOfIsolated
+    ? undefined
+    : (node.fillPaints as Array<{ type?: string; visible?: boolean }> | undefined);
+  const layersRaw = paintLayers(fillsInput, w, h);
+  const fillLayers: PaintStackLayer[] = layersRaw.map((layer) => {
+    const paint = layer.paint as { blendMode?: string; imageScaleMode?: string };
+    return {
+      render: layer.render,
+      globalCompositeOperation: konvaBlendMode(paint.blendMode),
+      imageScaleMode: paint.imageScaleMode,
+    };
+  });
+
+  // Image hash for any IMAGE paint in the stack (Canvas builds the URL by
+  // joining with sessionId). `null` keeps the type discriminated and
+  // round-trip-safe through JSON in tests.
+  const imgHash = imageHashHex(node);
+
+  // Per-corner radii (round 5). cornerRadiusForKonva returns number or
+  // 4-tuple; we then derive 4 explicit values capped at half(w,h) for
+  // inner-shadow + clipFunc path drawing — matches the CTL/CTR/CBR/CBL
+  // locals NodeShapeImpl used to compute inline.
+  const cornerRadius = cornerRadiusForKonva(
+    node as never,
+    typeof node.cornerRadius === 'number' ? (node.cornerRadius as number) : 0,
+  );
+  const cTL0 = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[0];
+  const cTR0 = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[1];
+  const cBR0 = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[2];
+  const cBL0 = typeof cornerRadius === 'number' ? cornerRadius : cornerRadius[3];
+  const halfW = w / 2;
+  const halfH = h / 2;
+  const corners = {
+    tl: Math.min(Math.max(0, cTL0), halfW, halfH),
+    tr: Math.min(Math.max(0, cTR0), halfW, halfH),
+    br: Math.min(Math.max(0, cBR0), halfW, halfH),
+    bl: Math.min(Math.max(0, cBL0), halfW, halfH),
+  };
+
+  // Per-side stroke (web-render-fidelity-high.spec.md §3.6) — non-uniform
+  // border{T,R,B,L}Weight values + a base stroke ⇒ render Konva.Line per side
+  // instead of a uniform Rect stroke.
+  const baseStroke = strokeFromPaints(node as never);
+  const bt = node.borderTopWeight as number | undefined;
+  const brW = node.borderRightWeight as number | undefined;
+  const bb = node.borderBottomWeight as number | undefined;
+  const bl = node.borderLeftWeight as number | undefined;
+  const hasPerSideValues = bt != null || brW != null || bb != null || bl != null;
+  const sidesUniform = hasPerSideValues && bt === brW && brW === bb && bb === bl;
+  const wantPerSide = hasPerSideValues && !sidesUniform && !!baseStroke;
+
+  let stroke: NodePaintStackPlan['stroke'];
+  if (wantPerSide && baseStroke) {
+    stroke = {
+      kind: 'per-side',
+      color: baseStroke.color,
+      sides: { top: bt, right: brW, bottom: bb, left: bl },
+    };
+  } else if (baseStroke) {
+    // strokeAlign INSIDE / OUTSIDE: shrink/expand the rect dims so the
+    // stroke sits inside (or outside) the original bbox edges
+    // (web-render-fidelity-round2.spec.md §2).
+    const rectDims = applyStrokeAlign(
+      { x: 0, y: 0, w, h, cornerRadius },
+      baseStroke.width,
+      node.strokeAlign as 'INSIDE' | 'OUTSIDE' | 'CENTER' | undefined,
+    );
+    stroke = {
+      kind: 'uniform',
+      rectDims,
+      color: baseStroke.color,
+      width: baseStroke.width,
+    };
+  } else {
+    stroke = null;
+  }
+
+  const shadow = shadowFromEffects(node.effects as never);
+  const innerShadow = innerShadowFromEffects(node.effects as never);
+  const layerBlur = layerBlurFromEffects(node.effects as never);
+
+  const dashPattern =
+    Array.isArray(node.dashPattern) && (node.dashPattern as number[]).length > 0
+      ? (node.dashPattern as number[])
+      : undefined;
+
+  // Anchor rect: when there's no fill but we still need to draw shadow or
+  // a uniform stroke, Canvas needs a Rect to attach those props to.
+  const needsAnchorRect =
+    fillLayers.length === 0 && (shadow != null || (stroke?.kind === 'uniform'));
+
+  // Frame clip (round 2 §3) + INSTANCE auto-clip (round 12). Round-23 v3
+  // disables both when this node is on the path to an isolated target —
+  // REST API renders the captured node without ancestor clip boundaries.
+  const wantClipForInstance =
+    node.type === 'INSTANCE' &&
+    node.frameMaskDisabled !== true &&
+    Array.isArray(node._renderChildren) &&
+    (node._renderChildren as unknown[]).length > 0;
+  const clipChildren =
+    !isAncestorOfIsolated &&
+    (node.frameMaskDisabled === false || wantClipForInstance);
+
+  return {
+    kind: 'paint-stack',
+    outer,
+    cornerRadius,
+    corners,
+    fillLayers,
+    imageHashHex: imgHash,
+    stroke,
+    shadow,
+    innerShadow,
+    layerBlur,
+    dashPattern,
+    lineCap: konvaLineCap(node.strokeCap as never),
+    lineJoin: konvaLineJoin(node.strokeJoin as never),
+    needsAnchorRect,
+    clipChildren,
+  };
+}
+
 /**
  * True when this TEXT node carries per-character style data AND there's at
  * least one styled (non-base) run. The multi-run branch in Canvas relies on
@@ -361,5 +569,9 @@ export function nodeRender(
     return planTextSimple(node, ctx);
   }
 
-  return { kind: 'fallthrough', reason: 'paint-stack-pending-1c' };
+  // Catch-all for FRAME / RECTANGLE / GROUP / INSTANCE / SECTION / SYMBOL /
+  // unknown types. paint-stack handles every "rectangular surface with
+  // optional fill stack + stroke + shadow + clip" — i.e. everything that
+  // isn't a vector path or simple text.
+  return planPaintStack(node, ctx);
 }
