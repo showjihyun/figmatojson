@@ -18,6 +18,7 @@ import { documentService } from '@/services';
 import { usePatch } from './hooks/usePatch';
 import { rgbaToHex, hexToRgb01 } from '@core/domain/color';
 import { findById } from '@core/domain/tree';
+import { colorVarName, textStyleName } from '@core/domain/colorStyleRef';
 import { variantLabelText } from './lib/variantLabel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -34,6 +35,13 @@ import { cn } from '@/lib/utils';
 
 interface InspectorProps {
   page: any;
+  /**
+   * Document root — needed for colorVar/styleIdForText alias lookups
+   * (round 15). VARIABLE / text-style asset nodes live outside the
+   * current page tree (in `Internal Only Canvas`), so `page` alone is
+   * insufficient. Optional for backwards-compat with older callers.
+   */
+  root?: any;
   sessionId: string;
   selectedGuid: string | null;
   selectedCount?: number;
@@ -59,7 +67,7 @@ const FONT_WEIGHT_STYLES = [
   { label: 'Black', value: 'Black' },
 ];
 
-export function Inspector({ page, sessionId, selectedGuid, selectedCount, onChange }: InspectorProps) {
+export function Inspector({ page, root, sessionId, selectedGuid, selectedCount, onChange }: InspectorProps) {
   const node = useMemo(
     () => (selectedGuid ? findByGuid(page, selectedGuid) : null),
     [page, selectedGuid],
@@ -156,17 +164,17 @@ function TabbedBody({
         )}
         {Array.isArray(node.fillPaints) && node.fillPaints.length > 0 && (
           <Section title="Fill">
-            <FillSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
+            <FillSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} root={root} />
           </Section>
         )}
         {typeof node.strokeWeight === 'number' && node.strokeWeight > 0 && (
           <Section title="Stroke">
-            <StrokeSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
+            <StrokeSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} root={root} />
           </Section>
         )}
         {node.type === 'TEXT' && (
           <Section title="Text">
-            <TextSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} />
+            <TextSection node={node} sessionId={sessionId} guid={guid} onChange={onChange} root={root} />
           </Section>
         )}
       </TabsContent>
@@ -429,6 +437,8 @@ interface SectionProps {
   sessionId: string;
   guid: string;
   onChange: () => void;
+  /** Document root for color/text-style alias lookups (round 15). */
+  root?: any;
 }
 
 function LayerSection({ node, sessionId, guid, onChange }: SectionProps) {
@@ -550,10 +560,10 @@ function AutoLayoutSection({ node, sessionId, guid, onChange }: SectionProps) {
   );
 }
 
-function FillSection({ node, sessionId, guid, onChange }: SectionProps) {
+function FillSection({ node, sessionId, guid, onChange, root }: SectionProps) {
   const patch = usePatch(sessionId, guid, onChange);
   const first = (node.fillPaints?.[0] ?? null) as
-    | { type?: string; color?: { r?: number; g?: number; b?: number; a?: number }; visible?: boolean; opacity?: number }
+    | { type?: string; color?: { r?: number; g?: number; b?: number; a?: number }; visible?: boolean; opacity?: number; colorVar?: unknown }
     | null;
   if (!first) return null;
   if (first.type !== 'SOLID') {
@@ -563,6 +573,9 @@ function FillSection({ node, sessionId, guid, onChange }: SectionProps) {
       </Row>
     );
   }
+  // Round 15 — surface the Figma library color variable name when the
+  // fill carries a colorVar alias. Helper returns null for plain SOLIDs.
+  const styleName = root ? colorVarName(first, root) : null;
   return (
     <>
       <Row label="Color">
@@ -577,6 +590,11 @@ function FillSection({ node, sessionId, guid, onChange }: SectionProps) {
           }}
         />
       </Row>
+      {styleName && (
+        <Row label="Style">
+          <span className="text-xs text-muted-foreground" title={styleName}>{styleName}</span>
+        </Row>
+      )}
       <Row label="Layer α">
         <NumberInput
           value={Math.round((first.opacity ?? 1) * 100)}
@@ -588,11 +606,13 @@ function FillSection({ node, sessionId, guid, onChange }: SectionProps) {
   );
 }
 
-function StrokeSection({ node, sessionId, guid, onChange }: SectionProps) {
+function StrokeSection({ node, sessionId, guid, onChange, root }: SectionProps) {
   const patch = usePatch(sessionId, guid, onChange);
   const first = (node.strokePaints?.[0] ?? null) as
-    | { type?: string; color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number }
+    | { type?: string; color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number; colorVar?: unknown }
     | null;
+  // Round 15 — same Figma library color label as FillSection.
+  const styleName = first?.type === 'SOLID' && root ? colorVarName(first, root) : null;
   return (
     <>
       <Row label="Weight">
@@ -624,6 +644,11 @@ function StrokeSection({ node, sessionId, guid, onChange }: SectionProps) {
               patch('strokePaints[0].color.a', c.a);
             }}
           />
+        </Row>
+      )}
+      {styleName && (
+        <Row label="Style">
+          <span className="text-xs text-muted-foreground" title={styleName}>{styleName}</span>
         </Row>
       )}
     </>
@@ -780,10 +805,13 @@ export function ComponentTextRow({
   );
 }
 
-function TextSection({ node, sessionId, guid, onChange }: SectionProps) {
+function TextSection({ node, sessionId, guid, onChange, root }: SectionProps) {
   const patch = usePatch(sessionId, guid, onChange);
   const family = node.fontName?.family ?? '';
   const style = node.fontName?.style ?? 'Regular';
+  // Round 15 — surface the Figma text-style asset name when the node
+  // carries `styleIdForText`. Helper returns null otherwise.
+  const tsName = root ? textStyleName(node, root) : null;
   return (
     <>
       <Row label="Content" align="top">
@@ -793,6 +821,11 @@ function TextSection({ node, sessionId, guid, onChange }: SectionProps) {
           onCommit={(v) => patch('textData.characters', v)}
         />
       </Row>
+      {tsName && (
+        <Row label="Style">
+          <span className="text-xs text-muted-foreground" title={tsName}>{tsName}</span>
+        </Row>
+      )}
       <Row label="Family">
         <TextInput value={family} onCommit={(v) => patch('fontName.family', v)} />
       </Row>
