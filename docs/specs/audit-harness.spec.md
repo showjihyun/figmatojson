@@ -21,6 +21,8 @@
 | `audit-roundtrip.mjs` | ZIP entry byte-compare | container 레이어 (canvas.fig / images / meta.json) |
 | `audit-roundtrip-canvas-diff.mjs` | Kiwi message field walk | canvas.fig 의 의미 변화 |
 | `audit-rest-as-plugin.mjs` | `audit-oracle` 프로토콜 | Figma REST → 우리 parser 의 차이 |
+| `audit-raw-coverage.mjs` (round 17) | raw vs documentJson field walk | wire-format 필드 중 client 에 안 도달 / 직렬화 손실 측정 |
+| `audit-properties-coverage.mjs` (round 17) | componentPropDefs / Assignments / VARIABLE 정합성 | broken / orphan property metadata 측정 |
 
 본 spec 은 3 스크립트의 *공통 calling convention, 입출력, 분류 룰* 을
 source of truth 로 둔다.

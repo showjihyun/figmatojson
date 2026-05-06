@@ -58,3 +58,7 @@ _tmp_*
 
 # Audit-round11 LLM-context tiles (regenerable via crop-audit-tiles.mjs)
 docs/audit-round11/**/_tiles/
+
+# Round 17 raw-coverage / properties-coverage outputs (measurement only,
+# regenerable via audit-raw-coverage.mjs + audit-properties-coverage.mjs).
+docs/audit-raw-coverage/
