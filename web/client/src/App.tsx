@@ -18,6 +18,11 @@ import {
 
 export function App() {
   const [session, setSession] = useState<UploadResult | null>(null);
+  // Keep the original uploaded File so we can transparently re-upload
+  // when the backend evicts the session (TTL 1 h, or process restart).
+  // Without this, a save attempt after eviction errors out with
+  // "session not found" and the user has to manually re-pick the file.
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [doc, setDoc] = useState<any>(null);
   const [pageIdx, setPageIdx] = useState(0);
   // Multi-select: Set of node GUIDs. When size === 1, behaves like single
@@ -64,6 +69,7 @@ export function App() {
     try {
       const result = await documentService.upload(f);
       setSession(result);
+      setUploadedFile(f);
       const d = await documentService.fetch(result.sessionId);
       setDoc(d);
       setPageIdx(0);
@@ -82,7 +88,23 @@ export function App() {
     if (!session) return;
     setBusy(true);
     try {
-      await sessionService.downloadExportedFig(session.sessionId, session.origName);
+      try {
+        await sessionService.downloadExportedFig(session.sessionId, session.origName);
+      } catch (err) {
+        // Session evicted (backend GC after 1 h of inactivity, or restart).
+        // Transparently re-upload the original File and retry once. Any
+        // unsaved edits are lost — there's no edit log to replay against
+        // the new session — but the user can immediately save again,
+        // which is strictly better than a hard error.
+        const msg = (err as Error).message;
+        const isExpired = /\b404\b/.test(msg) || /not found/i.test(msg);
+        if (!isExpired || !uploadedFile) throw err;
+        const fresh = await documentService.upload(uploadedFile);
+        setSession(fresh);
+        const d = await documentService.fetch(fresh.sessionId);
+        setDoc(d);
+        await sessionService.downloadExportedFig(fresh.sessionId, fresh.origName);
+      }
     } catch (err) {
       alert(`Save error: ${(err as Error).message}`);
     } finally {
@@ -94,7 +116,18 @@ export function App() {
     if (!session) return;
     setBusy(true);
     try {
-      await sessionService.downloadSnapshot(session.sessionId, session.origName);
+      try {
+        await sessionService.downloadSnapshot(session.sessionId, session.origName);
+      } catch (err) {
+        const msg = (err as Error).message;
+        const isExpired = /\b404\b/.test(msg) || /not found/i.test(msg);
+        if (!isExpired || !uploadedFile) throw err;
+        const fresh = await documentService.upload(uploadedFile);
+        setSession(fresh);
+        const d = await documentService.fetch(fresh.sessionId);
+        setDoc(d);
+        await sessionService.downloadSnapshot(fresh.sessionId, fresh.origName);
+      }
     } catch (err) {
       alert(`Snapshot error: ${(err as Error).message}`);
     } finally {
@@ -110,6 +143,10 @@ export function App() {
     try {
       const result = await sessionService.loadSnapshot(f);
       setSession(result);
+      // Snapshot load doesn't carry a backing .fig File — clear the auto-
+      // recovery handle so save fall-through doesn't try to re-upload a
+      // stale File from a previous fig-pick.
+      setUploadedFile(null);
       const d = await documentService.fetch(result.sessionId);
       setDoc(d);
       setPageIdx(0);
