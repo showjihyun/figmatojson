@@ -47,16 +47,19 @@ describe('nodeRender', () => {
       expect(plan.kind).toBe('vector');
     });
 
-    it('falls through when _path is missing or empty', () => {
+    it('a VECTOR type without _path falls through to paint-stack catch-all', () => {
+      // Without a precomputed _path the vector path can't render; the
+      // node's bbox + fills still describe a rectangular surface, so
+      // paint-stack is the correct fallback.
       const noPath = nodeRender({ ...baseVector, _path: '' }, emptyCtx());
-      expect(noPath.kind).toBe('fallthrough');
+      expect(noPath.kind).toBe('paint-stack');
       const undef = nodeRender({ ...baseVector, _path: undefined }, emptyCtx());
-      expect(undef.kind).toBe('fallthrough');
+      expect(undef.kind).toBe('paint-stack');
     });
 
-    it('falls through for non-vector types', () => {
+    it('non-VECTOR type with the same data falls into paint-stack', () => {
       const plan = nodeRender({ ...baseVector, type: 'FRAME' }, emptyCtx());
-      expect(plan.kind).toBe('fallthrough');
+      expect(plan.kind).toBe('paint-stack');
     });
 
     it('reads outer bbox from transform.m02/m12 + size', () => {
@@ -470,15 +473,275 @@ describe('nodeRender', () => {
     });
   });
 
-  describe('fallthrough', () => {
-    it('returns fallthrough for FRAME / RECTANGLE / INSTANCE / SYMBOL (paint-stack pending 1C)', () => {
-      for (const type of ['FRAME', 'RECTANGLE', 'INSTANCE', 'SYMBOL']) {
-        const plan = nodeRender(
-          { id: 'x', type, transform: { m02: 0, m12: 0 }, size: { x: 1, y: 1 } },
-          emptyCtx(),
-        );
-        expect(plan.kind).toBe('fallthrough');
+  describe('paint-stack', () => {
+    const baseFrame = {
+      id: '1:50',
+      type: 'FRAME',
+      transform: { m02: 5, m12: 7 },
+      size: { x: 100, y: 60 },
+    };
+
+    it('emits a paint-stack plan for FRAME / RECTANGLE / INSTANCE / SYMBOL', () => {
+      for (const type of ['FRAME', 'RECTANGLE', 'INSTANCE', 'SYMBOL', 'SECTION']) {
+        const plan = nodeRender({ ...baseFrame, type }, emptyCtx());
+        expect(plan.kind).toBe('paint-stack');
       }
+    });
+
+    it('reads outer bbox + cornerRadius from node fields', () => {
+      const plan = nodeRender({ ...baseFrame, cornerRadius: 8 }, emptyCtx());
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.outer.bbox).toEqual({ x: 5, y: 7, w: 100, h: 60 });
+      expect(plan.cornerRadius).toBe(8);
+      expect(plan.corners).toEqual({ tl: 8, tr: 8, br: 8, bl: 8 });
+    });
+
+    it('per-corner radii produce a 4-tuple cornerRadius and matching capped corners', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          cornerRadius: 0,
+          rectangleTopLeftCornerRadius: 10,
+          rectangleTopRightCornerRadius: 0,
+          rectangleBottomRightCornerRadius: 80,        // > h/2 = 30 → capped
+          rectangleBottomLeftCornerRadius: 4,
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.cornerRadius).toEqual([10, 0, 80, 4]);
+      expect(plan.corners).toEqual({ tl: 10, tr: 0, br: 30, bl: 4 });
+    });
+
+    it('empty fillPaints + no shadow/stroke ⇒ no anchor rect, fillLayers empty', () => {
+      const plan = nodeRender(baseFrame, emptyCtx());
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.fillLayers).toEqual([]);
+      expect(plan.needsAnchorRect).toBe(false);
+      expect(plan.stroke).toBeNull();
+      expect(plan.shadow).toBeNull();
+    });
+
+    it('empty fillPaints + shadow ⇒ needsAnchorRect=true', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          effects: [{
+            type: 'DROP_SHADOW',
+            offset: { x: 0, y: 1 },
+            radius: 2,
+            color: { r: 0, g: 0, b: 0, a: 0.5 },
+          }],
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.needsAnchorRect).toBe(true);
+      expect(plan.shadow).not.toBeNull();
+    });
+
+    it('empty fillPaints + uniform stroke ⇒ needsAnchorRect=true', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          strokeWeight: 2,
+          strokePaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }],
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.needsAnchorRect).toBe(true);
+      expect(plan.stroke?.kind).toBe('uniform');
+    });
+
+    it('empty fillPaints + per-side stroke ⇒ needsAnchorRect=false (per-side draws Lines, not anchor)', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          strokeWeight: 2,
+          strokePaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }],
+          borderTopWeight: 0,
+          borderRightWeight: 0,
+          borderBottomWeight: 1,        // only bottom → non-uniform
+          borderLeftWeight: 0,
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.stroke?.kind).toBe('per-side');
+      expect(plan.needsAnchorRect).toBe(false);
+    });
+
+    it('multi-paint stack preserves order with per-paint blendMode + imageScaleMode', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          fillPaints: [
+            { type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 }, blendMode: 'NORMAL' },
+            { type: 'SOLID', color: { r: 0, g: 1, b: 0, a: 1 }, blendMode: 'MULTIPLY' },
+            { type: 'IMAGE', imageScaleMode: 'FILL', image: { hash: new Uint8Array(20).fill(0xab) } },
+          ],
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.fillLayers).toHaveLength(3);
+      expect(plan.fillLayers[0].globalCompositeOperation).toBeUndefined(); // NORMAL → undefined
+      expect(plan.fillLayers[1].globalCompositeOperation).toBe('multiply');
+      expect(plan.fillLayers[2].imageScaleMode).toBe('FILL');
+      expect(plan.imageHashHex).toBe('abababababababababababababababababababab');
+    });
+
+    it('uniform stroke INSIDE applies applyStrokeAlign to rectDims', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          cornerRadius: 4,
+          strokeWeight: 2,
+          strokePaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }],
+          strokeAlign: 'INSIDE',
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      if (plan.stroke?.kind !== 'uniform') throw new Error('expected uniform stroke');
+      // INSIDE: shrink by stroke/2 on each side.
+      expect(plan.stroke.rectDims).toEqual({
+        x: 1, y: 1, w: 98, h: 58, cornerRadius: 3,
+      });
+      expect(plan.stroke.width).toBe(2);
+    });
+
+    it('per-side stroke surfaces all four side weights (including 0/undefined)', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          strokeWeight: 2,
+          strokePaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }],
+          borderTopWeight: 1,
+          borderRightWeight: 0,
+          borderBottomWeight: 3,
+          borderLeftWeight: undefined,
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      if (plan.stroke?.kind !== 'per-side') throw new Error('expected per-side');
+      expect(plan.stroke.sides).toEqual({
+        top: 1, right: 0, bottom: 3, left: undefined,
+      });
+    });
+
+    it('per-side values that are uniform fall back to uniform stroke', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          strokeWeight: 1,
+          strokePaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }],
+          borderTopWeight: 1,
+          borderRightWeight: 1,
+          borderBottomWeight: 1,
+          borderLeftWeight: 1,
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.stroke?.kind).toBe('uniform');
+    });
+
+    it('per-side values without a base stroke ⇒ stroke null (color comes from baseStroke)', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          // no strokeWeight / strokePaints
+          borderBottomWeight: 1,
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.stroke).toBeNull();
+    });
+
+    it('isAncestorOfIsolated suppresses fills + clip', () => {
+      const ctx: RenderContext = {
+        isolation: { hide: new Set(), ancestors: new Set(['1:50']) },
+        measureText: noopMeasure,
+      };
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }],
+          frameMaskDisabled: false,
+        },
+        ctx,
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.fillLayers).toEqual([]);
+      expect(plan.clipChildren).toBe(false);
+    });
+
+    it('frameMaskDisabled=false ⇒ clipChildren=true (round-2 frame clip)', () => {
+      const plan = nodeRender({ ...baseFrame, frameMaskDisabled: false }, emptyCtx());
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.clipChildren).toBe(true);
+    });
+
+    it('INSTANCE with _renderChildren auto-clips even when frameMaskDisabled is missing', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          type: 'INSTANCE',
+          _renderChildren: [{ id: 'c', type: 'TEXT' }],
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.clipChildren).toBe(true);
+    });
+
+    it('INSTANCE with explicit frameMaskDisabled=true skips auto-clip', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          type: 'INSTANCE',
+          frameMaskDisabled: true,
+          _renderChildren: [{ id: 'c', type: 'TEXT' }],
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.clipChildren).toBe(false);
+    });
+
+    it('inner shadow + layer blur are surfaced from effects[]', () => {
+      const plan = nodeRender(
+        {
+          ...baseFrame,
+          effects: [
+            {
+              type: 'INNER_SHADOW',
+              offset: { x: 1, y: 2 },
+              radius: 3,
+              color: { r: 0, g: 0, b: 0, a: 0.4 },
+            },
+            { type: 'LAYER_BLUR', radius: 6 },
+          ],
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(plan.innerShadow?.offsetX).toBe(1);
+      expect(plan.innerShadow?.blur).toBe(3);
+      expect(plan.layerBlur).toEqual({ radius: 6 });
+    });
+
+    it('dashPattern non-empty passes through; empty array → undefined', () => {
+      const dashed = nodeRender({ ...baseFrame, dashPattern: [4, 2] }, emptyCtx());
+      if (dashed.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(dashed.dashPattern).toEqual([4, 2]);
+      const empty = nodeRender({ ...baseFrame, dashPattern: [] }, emptyCtx());
+      if (empty.kind !== 'paint-stack') throw new Error('expected paint-stack');
+      expect(empty.dashPattern).toBeUndefined();
     });
   });
 });
