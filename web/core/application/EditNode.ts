@@ -13,6 +13,7 @@ import type { ComponentTextRef } from '../domain/entities/Document.js';
 import type { EditJournal } from '../ports/EditJournal.js';
 import { NotFoundError, ValidationError } from './errors.js';
 import { tokenizePath, setPath, getPath } from '../domain/path.js';
+import { invalidateTextLayoutCache, pruneInstanceDerivedTextData } from '../domain/textInvalidation.js';
 
 interface FsLike {
   readMessage(id: string): string;
@@ -54,6 +55,17 @@ export class EditNode {
     // Capture pre-mutation value for the journal — undo writes this back.
     const before = getPath(node, tokens);
     setPath(node, tokens, value);
+
+    // When the user changes textData.characters on a master TEXT, Figma's
+    // pre-computed layout cache (glyphs, baselines, derivedLines, ...) on
+    // both this node and every INSTANCE referencing it goes stale. Without
+    // invalidation Figma reads the cache on import and silently shows the
+    // OLD text. See web/core/domain/textInvalidation.ts.
+    if (field === 'textData.characters' && typeof value === 'string') {
+      invalidateTextLayoutCache(node, value);
+      pruneInstanceDerivedTextData(msg, nodeGuid);
+    }
+
     this.sessionStore.writeMessage(sessionId, JSON.stringify(msg));
 
     // Mirror onto the in-memory documentJson so subsequent /doc fetches
