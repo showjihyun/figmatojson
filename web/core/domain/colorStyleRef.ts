@@ -59,3 +59,62 @@ export function textStyleName(node: unknown, root: unknown): string | null {
   if (!target || target.type !== 'TEXT' || target.styleType !== 'TEXT') return null;
   return typeof target.name === 'string' ? target.name : null;
 }
+
+/**
+ * Round 16 — `effectiveTextStyle(node, root)` resolves the typography
+ * Figma actually applies, by overlaying a referenced text-style asset
+ * (when `node.styleIdForText` resolves) onto the node's raw fields.
+ *
+ * Per-field fallback: any field the asset doesn't define falls back to
+ * the node's raw value. styleIdForText absent / unresolvable → all
+ * fields come from node raw (= pre-round-16 behavior).
+ *
+ * The set of overlaid fields covers the typography that style assets in
+ * `.fig` carry: fontName, fontSize, lineHeight, letterSpacing,
+ * textCase, textDecoration, paragraphSpacing, paragraphIndent.
+ * Caller may consult more raw fields directly when not in this set.
+ */
+export interface EffectiveTextStyle {
+  fontName?: { family?: string; style?: string; postscript?: string };
+  fontSize?: number;
+  lineHeight?: { value?: number; units?: string };
+  letterSpacing?: { value?: number; units?: string };
+  textCase?: string;
+  textDecoration?: string;
+  paragraphSpacing?: number;
+  paragraphIndent?: number;
+}
+
+const EFFECTIVE_FIELDS = [
+  'fontName',
+  'fontSize',
+  'lineHeight',
+  'letterSpacing',
+  'textCase',
+  'textDecoration',
+  'paragraphSpacing',
+  'paragraphIndent',
+] as const;
+
+function resolveStyleAsset(node: unknown, root: unknown): Record<string, unknown> | null {
+  if (!node || typeof node !== 'object' || !root) return null;
+  const n = node as { styleIdForText?: { guid?: AliasGuid } };
+  const id = readGuid(n.styleIdForText?.guid);
+  if (!id) return null;
+  const target = findById(root, id) as Record<string, unknown> | null;
+  if (!target || target.type !== 'TEXT' || target.styleType !== 'TEXT') return null;
+  return target;
+}
+
+export function effectiveTextStyle(node: unknown, root: unknown): EffectiveTextStyle {
+  if (!node || typeof node !== 'object') return {};
+  const raw = node as Record<string, unknown>;
+  const asset = resolveStyleAsset(node, root);
+  const out: EffectiveTextStyle = {};
+  for (const k of EFFECTIVE_FIELDS) {
+    const fromAsset = asset ? asset[k] : undefined;
+    const v = fromAsset !== undefined ? fromAsset : raw[k];
+    if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+  }
+  return out;
+}
