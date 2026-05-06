@@ -43,6 +43,23 @@ export interface DocumentNode {
   /** Pre-decoded SVG path for VECTOR-family nodes. */
   _path?: string;
 
+  /**
+   * Inset for the SVG path inside the node's `size` box.
+   * `(size − vectorData.normalizedSize) / 2`. Set only when both are present,
+   * the diff is non-zero, AND size ≥ normalizedSize on both axes.
+   * See `web-render-fidelity-round11.spec.md`.
+   */
+  _pathOffset?: { x: number; y: number };
+
+  /**
+   * Scale factor for the SVG path inside the node's `size` box.
+   * `size / normalizedSize`. Set when path bbox (normalizedSize) is larger
+   * than node size on at least one axis (e.g. ELLIPSE 1440:621 in HPAI:
+   * size 80×80, normalizedSize 120×120). Mutually exclusive with
+   * `_pathOffset`. See `web-render-fidelity-round12.spec.md`.
+   */
+  _pathScale?: { x: number; y: number };
+
   /** Editable text refs for INSTANCE nodes (component master text). */
   _componentTexts?: ComponentTextRef[];
 
