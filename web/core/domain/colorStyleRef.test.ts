@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { colorVarName, textStyleName } from './colorStyleRef.js';
+import { colorVarName, textStyleName, effectiveTextStyle } from './colorStyleRef.js';
 
 /**
  * Spec: docs/specs/web-render-fidelity-round15.spec.md
@@ -128,5 +128,159 @@ describe('textStyleName', () => {
   it('returns null when node or root is missing', () => {
     expect(textStyleName(null, root([]))).toBeNull();
     expect(textStyleName({}, null)).toBeNull();
+  });
+});
+
+/**
+ * Spec round 16 — `effectiveTextStyle` resolves the active typography
+ * by overlaying the style asset (when styleIdForText resolves) onto
+ * the node's raw fields. Field-by-field fallback: any field missing on
+ * the asset falls back to the node's raw value.
+ */
+describe('effectiveTextStyle (round 16)', () => {
+  // Real metarich reproduction: 53:303 + 53:349 both reference 16:727
+  // "Body/L_sb" (Pretendard SemiBold 16). Their raw fontName/fontSize
+  // are stale (Inter 12 / Pretendard SemiBold 18) — Figma renders both
+  // as Pretendard SemiBold 16.
+  const BODY_L_SB = {
+    id: '16:727',
+    type: 'TEXT',
+    styleType: 'TEXT',
+    name: 'Body/L_sb',
+    fontName: { family: 'Pretendard', style: 'SemiBold', postscript: 'Pretendard-SemiBold' },
+    fontSize: 16,
+    children: [],
+  };
+
+  it('node with styleIdForText → asset fields win', () => {
+    const r = root([BODY_L_SB]);
+    const node = {
+      type: 'TEXT',
+      fontName: { family: 'Inter', style: 'Regular', postscript: '' },
+      fontSize: 12,
+      styleIdForText: { guid: { sessionID: 16, localID: 727 } },
+    };
+    const eff = effectiveTextStyle(node, r);
+    expect(eff.fontName).toEqual(BODY_L_SB.fontName);
+    expect(eff.fontSize).toBe(16);
+  });
+
+  it('asset missing a field → that field falls back to node raw', () => {
+    const r = root([{
+      id: '16:728',
+      type: 'TEXT',
+      styleType: 'TEXT',
+      name: 'PartialStyle',
+      fontSize: 24,
+      children: [],
+    }]);
+    const node = {
+      type: 'TEXT',
+      fontName: { family: 'Roboto', style: 'Bold' },
+      fontSize: 10,
+      lineHeight: { value: 120, units: 'PERCENT' },
+      styleIdForText: { guid: { sessionID: 16, localID: 728 } },
+    };
+    const eff = effectiveTextStyle(node, r);
+    expect(eff.fontSize).toBe(24);
+    expect(eff.fontName).toEqual({ family: 'Roboto', style: 'Bold' });
+    expect(eff.lineHeight).toEqual({ value: 120, units: 'PERCENT' });
+  });
+
+  it('no styleIdForText → all fields are node raw', () => {
+    const r = root([BODY_L_SB]);
+    const node = {
+      type: 'TEXT',
+      fontName: { family: 'Inter', style: 'Regular' },
+      fontSize: 12,
+      lineHeight: { value: 18, units: 'PIXELS' },
+      letterSpacing: { value: -2, units: 'PERCENT' },
+      textCase: 'UPPER',
+      textDecoration: 'UNDERLINE',
+    };
+    const eff = effectiveTextStyle(node, r);
+    expect(eff.fontName).toEqual({ family: 'Inter', style: 'Regular' });
+    expect(eff.fontSize).toBe(12);
+    expect(eff.lineHeight).toEqual({ value: 18, units: 'PIXELS' });
+    expect(eff.letterSpacing).toEqual({ value: -2, units: 'PERCENT' });
+    expect(eff.textCase).toBe('UPPER');
+    expect(eff.textDecoration).toBe('UNDERLINE');
+  });
+
+  it('styleIdForText pointing at non-style TEXT node → falls back to raw', () => {
+    const r = root([{ id: '5:5', type: 'TEXT', name: 'body', children: [] }]);
+    const node = {
+      fontName: { family: 'A', style: 'B' },
+      fontSize: 10,
+      styleIdForText: { guid: { sessionID: 5, localID: 5 } },
+    };
+    const eff = effectiveTextStyle(node, r);
+    expect(eff.fontSize).toBe(10);
+    expect(eff.fontName).toEqual({ family: 'A', style: 'B' });
+  });
+
+  it('root null → falls back to raw', () => {
+    const node = { fontName: { family: 'A' }, fontSize: 9 };
+    const eff = effectiveTextStyle(node, null);
+    expect(eff.fontSize).toBe(9);
+    expect(eff.fontName).toEqual({ family: 'A' });
+  });
+
+  it('node null → empty effective', () => {
+    expect(effectiveTextStyle(null, root([]))).toEqual({});
+  });
+
+  it('preserves textCase/textDecoration/paragraph fields from asset', () => {
+    const r = root([{
+      id: '20:1',
+      type: 'TEXT',
+      styleType: 'TEXT',
+      name: 'Heading',
+      fontName: { family: 'X', style: 'Bold' },
+      fontSize: 32,
+      lineHeight: { value: 40, units: 'PIXELS' },
+      letterSpacing: { value: -1, units: 'PERCENT' },
+      textCase: 'TITLE',
+      textDecoration: 'NONE',
+      paragraphSpacing: 8,
+      paragraphIndent: 0,
+      children: [],
+    }]);
+    const node = {
+      fontName: { family: 'Y' },
+      fontSize: 12,
+      styleIdForText: { guid: { sessionID: 20, localID: 1 } },
+    };
+    const eff = effectiveTextStyle(node, r);
+    expect(eff.fontSize).toBe(32);
+    expect(eff.lineHeight).toEqual({ value: 40, units: 'PIXELS' });
+    expect(eff.letterSpacing).toEqual({ value: -1, units: 'PERCENT' });
+    expect(eff.textCase).toBe('TITLE');
+    expect(eff.paragraphSpacing).toBe(8);
+  });
+
+  it('metarich 53:303 reproduction (alias to 16:727)', () => {
+    const r = root([BODY_L_SB]);
+    const node = {
+      type: 'TEXT',
+      fontName: { family: 'Inter', style: 'Regular', postscript: '' },
+      fontSize: 12,
+      styleIdForText: { guid: { sessionID: 16, localID: 727 } },
+    };
+    const eff = effectiveTextStyle(node, r);
+    expect(eff.fontName).toEqual({ family: 'Pretendard', style: 'SemiBold', postscript: 'Pretendard-SemiBold' });
+    expect(eff.fontSize).toBe(16);
+  });
+
+  it('metarich 53:349 reproduction (same alias, different raw → same effective)', () => {
+    const r = root([BODY_L_SB]);
+    const node = {
+      type: 'TEXT',
+      fontName: { family: 'Pretendard', style: 'SemiBold', postscript: 'Pretendard-SemiBold' },
+      fontSize: 18,
+      styleIdForText: { guid: { sessionID: 16, localID: 727 } },
+    };
+    const eff = effectiveTextStyle(node, r);
+    expect(eff.fontSize).toBe(16);
   });
 });

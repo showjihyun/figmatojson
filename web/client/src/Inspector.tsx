@@ -18,7 +18,7 @@ import { documentService } from '@/services';
 import { usePatch } from './hooks/usePatch';
 import { rgbaToHex, hexToRgb01 } from '@core/domain/color';
 import { findById } from '@core/domain/tree';
-import { colorVarName, textStyleName } from '@core/domain/colorStyleRef';
+import { colorVarName, textStyleName, effectiveTextStyle } from '@core/domain/colorStyleRef';
 import { variantLabelText } from './lib/variantLabel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -807,8 +807,18 @@ export function ComponentTextRow({
 
 function TextSection({ node, sessionId, guid, onChange, root }: SectionProps) {
   const patch = usePatch(sessionId, guid, onChange);
-  const family = node.fontName?.family ?? '';
-  const style = node.fontName?.style ?? 'Regular';
+  // Round 16 — display values are *effective* (style asset overlay on raw).
+  // Edits still patch the raw fields; round 16 documents this as a known
+  // limitation (style-applied edits won't visibly take effect until the
+  // detach UX of a future round).
+  const eff = root ? effectiveTextStyle(node, root) : {};
+  const family = eff.fontName?.family ?? node.fontName?.family ?? '';
+  const style = eff.fontName?.style ?? node.fontName?.style ?? 'Regular';
+  const fontSize = eff.fontSize ?? node.fontSize ?? 12;
+  const lineHeightVal = eff.lineHeight?.value ?? node.lineHeight?.value ?? 0;
+  const lineHeightUnits = eff.lineHeight?.units ?? node.lineHeight?.units ?? 'PERCENT';
+  const letterSpacingVal = eff.letterSpacing?.value ?? node.letterSpacing?.value ?? 0;
+  const letterSpacingUnits = eff.letterSpacing?.units ?? node.letterSpacing?.units ?? 'PERCENT';
   // Round 15 — surface the Figma text-style asset name when the node
   // carries `styleIdForText`. Helper returns null otherwise.
   const tsName = root ? textStyleName(node, root) : null;
@@ -837,16 +847,16 @@ function TextSection({ node, sessionId, guid, onChange, root }: SectionProps) {
         />
       </Row>
       <Row label="Size">
-        <NumberInput value={node.fontSize ?? 12} step={1} onCommit={(v) => patch('fontSize', v)} />
+        <NumberInput value={fontSize} step={1} onCommit={(v) => patch('fontSize', v)} />
       </Row>
       <Row label="L Height">
         <NumberInput
-          value={node.lineHeight?.value ?? 0}
+          value={lineHeightVal}
           step={1}
           onCommit={(v) => patch('lineHeight.value', v)}
         />
         <Dropdown<string>
-          value={node.lineHeight?.units ?? 'PERCENT'}
+          value={lineHeightUnits}
           options={[
             { label: '%', value: 'PERCENT' },
             { label: 'px', value: 'PIXELS' },
@@ -857,12 +867,12 @@ function TextSection({ node, sessionId, guid, onChange, root }: SectionProps) {
       </Row>
       <Row label="Letter">
         <NumberInput
-          value={node.letterSpacing?.value ?? 0}
+          value={letterSpacingVal}
           step={0.1}
           onCommit={(v) => patch('letterSpacing.value', v)}
         />
         <Dropdown<string>
-          value={node.letterSpacing?.units ?? 'PERCENT'}
+          value={letterSpacingUnits}
           options={[
             { label: '%', value: 'PERCENT' },
             { label: 'px', value: 'PIXELS' },

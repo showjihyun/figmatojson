@@ -413,6 +413,7 @@ export function App() {
             >
               <Canvas
                 page={currentPage}
+                root={doc}
                 selectedGuids={selectedGuids}
                 onSelect={handleSelect}
                 onMoveMany={onMoveMany}
