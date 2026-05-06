@@ -5,7 +5,7 @@ TypeScript / Node.js 20+ / vitest.
 
 ## Architecture (web subtree)
 
-`web/` follows Clean + Hexagonal layers — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md):
+`web/` follows Clean + Hexagonal layers — see [docs/SPEC-architecture.md](docs/SPEC-architecture.md):
 
 ```
 web/core/                      framework-free
