@@ -437,6 +437,7 @@ export function App() {
           {session && currentPage ? (
             <Inspector
               page={currentPage}
+              root={doc}
               sessionId={session.sessionId}
               selectedGuid={selectedGuid}
               selectedCount={selectedGuids.size}
