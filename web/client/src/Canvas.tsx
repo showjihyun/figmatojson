@@ -47,6 +47,7 @@ import {
   konvaVerticalAlign,
 } from './lib/textStyle';
 import { applyStrokeAlign } from './lib/strokeAlign';
+import { nodeRender, type RenderContext } from './render/nodeRender';
 import { shadowFromEffects, innerShadowFromEffects } from './lib/shadow';
 import { paintLayers } from './lib/paintRender';
 import { InnerShadowOverlay } from './components/canvas/InnerShadowOverlay';
@@ -329,10 +330,21 @@ function NodeShapeImpl({
   // so they don't leak into the captured area through z-order overlap.)
   const isolation = useContext(IsolationContext);
   const myId = (node as { id?: string }).id ?? '';
-  if (isolation?.hide.has(myId)) return null;
-  const isAncestorOfIsolated = isolation?.ancestors.has(myId) === true;
 
-  if (node.visible === false) return null;
+  // Slice 1A of the render-module deepening (#1): hidden + vector kinds
+  // are produced by the pure `nodeRender` plan generator; remaining branches
+  // (TEXT / paint-stack) still run inline below. See web/client/src/render/.
+  const renderCtx = useMemo<RenderContext>(
+    () => ({
+      isolation: isolation ?? null,
+      measureText: measureRunWidth,
+    }),
+    [isolation],
+  );
+  const plan = nodeRender(node as Record<string, unknown>, renderCtx);
+  if (plan.kind === 'hidden') return null;
+
+  const isAncestorOfIsolated = isolation?.ancestors.has(myId) === true;
   const x = node.transform?.m02 ?? 0;
   const y = node.transform?.m12 ?? 0;
   const w = node.size?.x ?? 0;
@@ -582,21 +594,14 @@ function NodeShapeImpl({
     );
   }
 
-  if (VECTOR_TYPES.has(node.type) && typeof node._path === 'string' && node._path.length > 0) {
-    const pathFill = colorOfWithDefault(node, 'transparent');
-    const vectorShadow = shadowFromEffects(node.effects);
-    const lineCap = konvaLineCap(node.strokeCap);
-    const lineJoin = konvaLineJoin(node.strokeJoin);
-    const vectorDash = Array.isArray(node.dashPattern) && node.dashPattern.length > 0
-      ? (node.dashPattern as number[])
-      : undefined;
+  if (plan.kind === 'vector') {
     return (
       <Group
-        x={x}
-        y={y}
-        rotation={rotation}
-        opacity={opacity}
-        globalCompositeOperation={nodeBlend as never}
+        x={plan.outer.bbox.x}
+        y={plan.outer.bbox.y}
+        rotation={plan.outer.rotation}
+        opacity={plan.outer.opacity}
+        globalCompositeOperation={plan.outer.blendMode as never}
         draggable={isSelected}
         onClick={onShapeClick}
         onTap={onShapeClick}
@@ -606,19 +611,24 @@ function NodeShapeImpl({
         onMouseLeave={onMouseLeave}
       >
         <Path
-          data={node._path}
-          fill={pathFill}
-          stroke={stroke?.color}
-          strokeWidth={stroke?.width}
-          dash={vectorDash}
-          lineCap={lineCap}
-          lineJoin={lineJoin}
-          shadowEnabled={vectorShadow != null}
-          shadowOffsetX={vectorShadow?.shadowOffsetX}
-          shadowOffsetY={vectorShadow?.shadowOffsetY}
-          shadowBlur={vectorShadow?.shadowBlur}
-          shadowColor={vectorShadow?.shadowColor}
-          shadowOpacity={vectorShadow?.shadowOpacity}
+          data={plan.path}
+          x={plan.pathOffset.x}
+          y={plan.pathOffset.y}
+          scaleX={plan.pathScale.x}
+          scaleY={plan.pathScale.y}
+          fill={plan.fill}
+          stroke={plan.stroke?.color}
+          strokeWidth={plan.stroke?.width || undefined}
+          fillAfterStrokeEnabled={plan.stroke?.fillAfterStrokeEnabled}
+          dash={plan.dashPattern}
+          lineCap={plan.lineCap}
+          lineJoin={plan.lineJoin}
+          shadowEnabled={plan.shadow != null}
+          shadowOffsetX={plan.shadow?.shadowOffsetX}
+          shadowOffsetY={plan.shadow?.shadowOffsetY}
+          shadowBlur={plan.shadow?.shadowBlur}
+          shadowColor={plan.shadow?.shadowColor}
+          shadowOpacity={plan.shadow?.shadowOpacity}
           listening
         />
       </Group>
