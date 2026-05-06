@@ -1,0 +1,784 @@
+<!doctype html>
+<html lang="ko" data-lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>figma-reverse — Developer Guide</title>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral', flowchart: { curve: 'basis' } });
+</script>
+<style>
+  :root {
+    --fg: #1f2329;
+    --muted: #6b7280;
+    --bg: #ffffff;
+    --card: #f7f8fa;
+    --border: #e5e7eb;
+    --accent: #2563eb;
+    --accent-soft: #dbeafe;
+    --code-bg: #1f2937;
+    --code-fg: #e5e7eb;
+    --max: 920px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Pretendard', 'Segoe UI', Roboto, system-ui, sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.6;
+    font-size: 15px;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    max-width: 1240px;
+    margin: 0 auto;
+    gap: 32px;
+    padding: 0 24px;
+  }
+  nav.toc {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 24px 8px 24px 0;
+    border-right: 1px solid var(--border);
+    font-size: 13px;
+  }
+  nav.toc h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 16px 0 8px 4px; }
+  nav.toc ol { list-style: none; padding: 0; margin: 0 0 16px 0; }
+  nav.toc li { padding: 3px 4px; }
+  nav.toc a { color: var(--fg); text-decoration: none; display: block; padding: 4px 8px; border-radius: 6px; }
+  nav.toc a:hover { background: var(--card); color: var(--accent); }
+  nav.toc ol ol { padding-left: 12px; font-size: 12px; color: var(--muted); }
+  main { max-width: var(--max); padding: 24px 8px 80px; }
+  header.hero { padding: 28px 0 8px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+  header.hero h1 { font-size: 32px; margin: 0 0 8px; letter-spacing: -0.02em; }
+  header.hero .subtitle { color: var(--muted); margin: 0 0 16px; }
+  .lang-toggle { position: fixed; top: 16px; right: 16px; display: inline-flex; gap: 4px; padding: 4px; background: var(--card); border: 1px solid var(--border); border-radius: 999px; z-index: 100; }
+  .lang-toggle button { background: none; border: none; padding: 4px 12px; font-size: 12px; font-weight: 600; cursor: pointer; border-radius: 999px; color: var(--muted); }
+  .lang-toggle button.active { background: var(--accent); color: white; }
+  section { margin: 40px 0; }
+  h2 { font-size: 22px; margin: 0 0 8px; padding-top: 24px; border-top: 1px solid var(--border); }
+  h2:first-of-type { border-top: 0; padding-top: 0; }
+  h3 { font-size: 17px; margin: 20px 0 6px; color: var(--fg); }
+  h4 { font-size: 14px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  p { margin: 8px 0; }
+  ul, ol { margin: 6px 0 12px; padding-left: 22px; }
+  li { margin: 3px 0; }
+  code { background: var(--card); padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  pre { background: var(--code-bg); color: var(--code-fg); padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: 12.5px; line-height: 1.55; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { border-collapse: collapse; margin: 12px 0; font-size: 13px; width: 100%; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--card); font-weight: 600; }
+  td code { font-size: 12px; }
+  blockquote { border-left: 3px solid var(--accent); margin: 12px 0; padding: 4px 14px; color: var(--muted); background: var(--accent-soft); border-radius: 0 6px 6px 0; }
+  .badge { display: inline-block; padding: 2px 10px; background: var(--accent-soft); color: var(--accent); border-radius: 999px; font-size: 12px; font-weight: 600; margin-right: 6px; }
+  .mermaid { background: var(--card); padding: 16px; border-radius: 8px; margin: 14px 0; text-align: center; overflow-x: auto; }
+  .footnote { color: var(--muted); font-size: 13px; }
+
+  /* Bilingual switching */
+  html[data-lang="ko"] .en { display: none; }
+  html[data-lang="en"] .ko { display: none; }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; padding: 0 16px; }
+    nav.toc { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border); padding: 16px 0; }
+  }
+</style>
+</head>
+<body>
+
+<div class="lang-toggle">
+  <button id="btn-ko" class="active" onclick="setLang('ko')">한국어</button>
+  <button id="btn-en" onclick="setLang('en')">English</button>
+</div>
+
+<div class="layout">
+
+<nav class="toc">
+  <h2 class="ko">목차</h2><h2 class="en">Contents</h2>
+  <ol>
+    <li><a href="#overview"><span class="ko">1. 개요</span><span class="en">1. Overview</span></a></li>
+    <li><a href="#architecture"><span class="ko">2. 아키텍처</span><span class="en">2. Architecture</span></a></li>
+    <li><a href="#reverse-pipeline"><span class="ko">3. 역공학 파이프라인</span><span class="en">3. Reverse-engineering pipeline</span></a>
+      <ol>
+        <li><a href="#stage-container">3.1 Container</a></li>
+        <li><a href="#stage-archive">3.2 Archive + Kiwi</a></li>
+        <li><a href="#stage-tree">3.3 Tree</a></li>
+        <li><a href="#stage-assets">3.4 Assets + Vectors</a></li>
+      </ol>
+    </li>
+    <li><a href="#web-pipeline"><span class="ko">4. Web 파이프라인</span><span class="en">4. Web pipeline</span></a></li>
+    <li><a href="#sdd"><span class="ko">5. SDD + 하네스</span><span class="en">5. SDD + Harness</span></a></li>
+    <li><a href="#rounds"><span class="ko">6. 라운드 히스토리</span><span class="en">6. Round history</span></a></li>
+    <li><a href="#glossary"><span class="ko">7. 용어집</span><span class="en">7. Glossary</span></a></li>
+    <li><a href="#refs"><span class="ko">8. 참고 자료</span><span class="en">8. References</span></a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="hero">
+  <h1>figma-reverse — Developer Guide</h1>
+  <p class="subtitle ko">Figma <code>.fig</code> 바이너리를 구조화된 JSON / Pencil <code>.pen</code> / 편집 가능한 HTML 로 무손실 변환하는 파이프라인의 기술 문서.</p>
+  <p class="subtitle en">Technical guide for the lossless pipeline that reverse-engineers Figma <code>.fig</code> binaries into structured JSON, Pencil <code>.pen</code>, and editable HTML.</p>
+  <p class="footnote ko">생성일 2026-05-07 · main 브랜치 기준 (round 16.1 + round 17 머지) · 기존 <code>docs/SPEC*.md</code>, <code>CONTEXT.md</code>, <code>SDD.md</code>, <code>HARNESS.md</code> 자료를 종합·요약.</p>
+  <p class="footnote en">Generated 2026-05-07 · based on <code>main</code> after round 16.1 + round 17 · synthesized from existing <code>docs/SPEC*.md</code>, <code>CONTEXT.md</code>, <code>SDD.md</code>, <code>HARNESS.md</code>.</p>
+</header>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     1. OVERVIEW
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="overview">
+<h2><span class="ko">1. 개요</span><span class="en">1. Overview</span></h2>
+
+<div class="ko">
+<p><strong>figma-reverse</strong> 는 Figma 의 <code>.fig</code> 바이너리를 <em>오프라인에서, API 없이, 계정 없이</em> 무손실 분해하는 도구체인이다. 두 개의 출력 그룹과 한 개의 편집기를 동시에 제공한다:</p>
+<ul>
+  <li><strong>구조화 JSON + 에셋</strong> — 사람이 읽을 수 있는 page-level JSON, SHA-256 manifest 가 동봉된 image / SVG 디렉토리</li>
+  <li><strong>Pencil <code>.pen</code> + <code>.pen.json</code></strong> — pencil.dev 호환 디자인 파일 + provenance trail</li>
+  <li><strong>편집 가능한 단일 HTML 파일</strong> — 원본 <code>.fig</code> 가 base64 로 embed 된 자체 완결 dashboard</li>
+  <li><strong>Web 편집기</strong> — Konva canvas + Inspector + chat agent 가 떠있는 React 클라이언트 (<code>web/</code>)</li>
+</ul>
+<p>핵심 가치는 <strong>round-trip 보장</strong>: <code>.fig → extracted/ → .fig</code> 가 byte-identical (Byte Repack) 또는 의미 동등 (Kiwi/JSON Repack) 으로 다시 만들어진다. CLI 9 단계 파이프라인 + Web 편집기가 같은 도메인 모듈 (<code>src/</code>) 위에 얹혀 있어 한쪽 변경이 다른 쪽에도 전파된다.</p>
+</div>
+
+<div class="en">
+<p><strong>figma-reverse</strong> is an <em>offline, no-API, no-account</em> toolchain that losslessly decomposes Figma <code>.fig</code> binaries. It produces two output groups plus a web editor:</p>
+<ul>
+  <li><strong>Structured JSON + assets</strong> — human-readable per-page JSON, image / SVG directories with SHA-256 manifests</li>
+  <li><strong>Pencil <code>.pen</code> + <code>.pen.json</code></strong> — pencil.dev-compatible design file + provenance trail</li>
+  <li><strong>Single editable HTML</strong> — self-contained dashboard with the original <code>.fig</code> base64-embedded</li>
+  <li><strong>Web editor</strong> — React client (<code>web/</code>) with Konva canvas, Inspector, and a chat agent</li>
+</ul>
+<p>The core value claim is <strong>round-trip integrity</strong>: <code>.fig → extracted/ → .fig</code> reproduces byte-identical (Byte Repack) or semantically equivalent (Kiwi / JSON Repack) output. The CLI 9-stage pipeline and the Web editor sit on top of the same domain modules under <code>src/</code>, so a change on one side propagates to the other.</p>
+</div>
+
+<h3 class="ko">기술 스택</h3>
+<h3 class="en">Stack</h3>
+<table>
+  <tr><th class="ko">레이어</th><th class="en">Layer</th><th class="ko">기술</th><th class="en">Technology</th></tr>
+  <tr><td>Runtime</td><td>Node.js 20+ / TypeScript 5.7</td></tr>
+  <tr><td><span class="ko">바이너리 처리</span><span class="en">Binary</span></td><td><code>kiwi-schema</code>, <code>fzstd</code> (zstd decode), <code>pako</code> (deflate), <code>adm-zip</code></td></tr>
+  <tr><td><span class="ko">테스트</span><span class="en">Test</span></td><td>vitest (unit + integration), Playwright (e2e)</td></tr>
+  <tr><td><span class="ko">웹 편집기</span><span class="en">Web editor</span></td><td>React 19, Konva, Vite, Hono (backend)</td></tr>
+</table>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     2. ARCHITECTURE
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="architecture">
+<h2><span class="ko">2. 아키텍처</span><span class="en">2. Architecture</span></h2>
+
+<div class="ko">
+<p>figma-reverse 는 <strong>두 개의 분리된 파이프라인</strong> (CLI + Web) 이 <strong>공유 도메인 모듈 위에 얹힌 모놀리포</strong> 다. <code>web/</code> 서브트리는 추가로 Clean + Hexagonal 레이어를 따른다 — 의존 방향은 항상 안쪽 (<code>core/domain</code>) 으로.</p>
+</div>
+<div class="en">
+<p>figma-reverse is a <strong>monorepo with two distinct pipelines</strong> (CLI + Web) sitting on <strong>shared domain modules</strong>. The <code>web/</code> subtree additionally follows Clean + Hexagonal layering — dependency direction always points inward toward <code>core/domain</code>.</p>
+</div>
+
+<div class="mermaid">
+graph TB
+  subgraph shared["src/ (shared domain)"]
+    direction LR
+    A1[loadContainer]
+    A2[decodeFigCanvas]
+    A3[buildTree]
+    A4[vector / instanceOverrides /<br/>masterIndex / expansion]
+  end
+
+  subgraph cli["CLI pipeline"]
+    direction TB
+    C1[extract<br/>9 stages]
+    C2[repack<br/>byte/kiwi/json]
+    C3[pen-export]
+    C4[editable-html]
+  end
+
+  subgraph web["web/ pipeline (Clean + Hexagonal)"]
+    direction TB
+    W1["core/domain<br/>(framework-free)"]
+    W2["core/ports<br/>(interfaces)"]
+    W3["core/application<br/>(use cases)"]
+    W4["server/adapters/driven<br/>(Fs, Kiwi, SDK)"]
+    W5["server/adapters/driving<br/>(Hono HTTP routes)"]
+    W6["client/src<br/>(React + Konva)"]
+    W3 --> W2
+    W2 --> W1
+    W4 --> W2
+    W5 --> W3
+    W6 -. HTTP .-> W5
+  end
+
+  shared --> cli
+  shared --> web
+
+  style shared fill:#eef6ff,stroke:#2563eb
+  style cli fill:#fef3c7,stroke:#d97706
+  style web fill:#dcfce7,stroke:#16a34a
+</div>
+
+<h3 class="ko">디렉토리 구조</h3>
+<h3 class="en">Directory layout</h3>
+
+<pre><code>figma_reverse/
+├── src/                          # shared domain (CLI + Web 둘 다 사용)
+│   ├── container.ts              # Stage 1
+│   ├── archive.ts decompress.ts  # Stage 2-3
+│   ├── decoder.ts                # Stage 4
+│   ├── tree.ts                   # Stage 5
+│   ├── assets.ts vector.ts       # Stage 6-7
+│   ├── normalize.ts export.ts    # Stage 8
+│   ├── verify.ts                 # Stage 9
+│   ├── repack.ts                 # 역방향 / reverse pipeline
+│   ├── pen-export.ts             # .pen 출력 / Pencil emitter
+│   ├── editable-html.ts          # 단일 HTML 출력
+│   ├── instanceOverrides.ts masterIndex.ts expansion.ts
+│   └── cli.ts                    # CLI entry
+├── web/
+│   ├── core/
+│   │   ├── domain/               # entities, pure helpers (no IO)
+│   │   ├── ports/                # SessionStore, FsLike, ...
+│   │   └── application/          # EditNode, UploadFig, AuditCompare, ...
+│   ├── server/
+│   │   └── adapters/
+│   │       ├── driven/           # FsSessionStore, KiwiCodec, ...
+│   │       └── driving/http/     # Hono routes (uploadRoute, docRoute, ...)
+│   └── client/src/               # React + Konva canvas
+├── test/                         # CLI vitest (162 tests)
+├── docs/specs/                   # 60+ feature specs (SDD)
+└── docs/                         # SPEC*, SDD, HARNESS, this guide</code></pre>
+
+<div class="ko">
+<h3>의존 방향</h3>
+<ul>
+  <li><code>core/domain</code> 은 <strong>의존 0</strong> — 어떤 레이어도 import 할 수 없는 가장 안쪽</li>
+  <li><code>core/application</code> 은 <code>ports + domain</code> 만 import</li>
+  <li><code>adapters/driven</code> 은 <code>ports + domain + 외부 라이브러리</code></li>
+  <li><code>adapters/driving</code> 은 <code>application</code> 호출 — 절대 inline 비즈니스 로직 금지</li>
+</ul>
+</div>
+<div class="en">
+<h3>Dependency direction</h3>
+<ul>
+  <li><code>core/domain</code> has <strong>zero dependencies</strong> — innermost; no other layer can be imported here</li>
+  <li><code>core/application</code> imports only <code>ports + domain</code></li>
+  <li><code>adapters/driven</code> imports <code>ports + domain + external libraries</code></li>
+  <li><code>adapters/driving</code> calls <code>application</code> — never inline business logic</li>
+</ul>
+</div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     3. REVERSE PIPELINE
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="reverse-pipeline">
+<h2><span class="ko">3. 역공학 파이프라인</span><span class="en">3. Reverse-engineering pipeline</span></h2>
+
+<div class="ko">
+<p><strong>9 단계 CLI 추출 흐름</strong> 이 figma-reverse 의 핵심. 각 단계는 명확한 입력 / 처리 / 출력 계약을 가지며 단계별 산출물이 디스크에 남아 추적 가능 (<code>extracted/01_container/</code> ~ <code>05_tree/</code>). PRD §6.3 의 가설 9 개를 V-01~V-08 으로 검증하면서 발견한 7 가지 핵심 사실을 기반으로 한다.</p>
+</div>
+<div class="en">
+<p>The <strong>9-stage CLI extract pipeline</strong> is the heart of figma-reverse. Each stage has explicit input / processing / output contracts and writes per-stage breadcrumbs to <code>extracted/01_container/</code> through <code>05_tree/</code>. Built atop seven concrete reverse-engineering findings (validated as V-01~V-08 against PRD §6.3 hypotheses).</p>
+</div>
+
+<div class="mermaid">
+flowchart LR
+  A([design.fig<br/>5.77 MB ZIP]) --> S1[1. Container<br/>unzip]
+  S1 --> S2[2. Archive<br/>fig-kiwi chunks]
+  S2 --> S3[3. Decompress<br/>deflate-raw + zstd]
+  S3 --> S4[4. Kiwi decode<br/>schema + message]
+  S4 --> S5[5. Tree build<br/>parent/position]
+  S5 --> S6[6. Asset map<br/>image hash refs]
+  S5 --> S7[7. Vector decode<br/>commandsBlob]
+  S5 --> S8[8. Normalize +<br/>Export]
+  S8 --> S9[9. Verify report<br/>V-01..V-08]
+  S9 --> O([output/ + extracted/<br/>+ verification_report.md])
+
+  style A fill:#fef3c7
+  style O fill:#dcfce7
+  style S4 fill:#dbeafe
+  style S7 fill:#dbeafe
+</div>
+
+<!-- 3.1 Container -->
+<h3 id="stage-container"><span class="ko">3.1 Container — ZIP 분해</span><span class="en">3.1 Container — ZIP disassembly</span></h3>
+
+<div class="ko">
+<p>Figma Cloud 의 <code>.fig</code> 는 사실 ZIP STORE (압축 없는 ZIP). <code>src/container.ts:loadContainer</code> 가 ZIP magic <code>50 4B 03 04</code> 또는 fig-kiwi magic <code>66 69 67 2D 6B 69 77 69</code> 로 자동 분기.</p>
+</div>
+<div class="en">
+<p>A Figma <code>.fig</code> is actually a ZIP STORE (uncompressed ZIP). <code>src/container.ts:loadContainer</code> branches on ZIP magic (<code>50 4B 03 04</code>) vs raw fig-kiwi magic (<code>66 69 67 2D 6B 69 77 69</code>).</p>
+</div>
+
+<pre><code>design.fig (ZIP STORE)
+├── canvas.fig          ← real binary (fig-kiwi format)
+├── meta.json           ← file_name, background_color, ...
+├── thumbnail.png
+└── images/
+    ├── &lt;sha1-hash-1&gt;   ← raw bytes, no extension
+    └── &lt;sha1-hash-2&gt;   ← shared by multiple nodes via image.hash</code></pre>
+
+<!-- 3.2 Archive + Kiwi -->
+<h3 id="stage-archive"><span class="ko">3.2 Archive + Kiwi 디코드</span><span class="en">3.2 Archive + Kiwi decode</span></h3>
+
+<div class="ko">
+<p><code>canvas.fig</code> 는 fig-kiwi 포맷:</p>
+</div>
+<div class="en">
+<p><code>canvas.fig</code> is in the fig-kiwi format:</p>
+</div>
+
+<pre><code>[8 bytes  ] "fig-kiwi" magic
+[4 bytes  ] version (LE uint32)              ← metarich = 106
+[4 bytes  ] chunk[0].size (LE uint32)
+[N bytes  ] chunk[0].data                    ← schema chunk (deflate-raw)
+[4 bytes  ] chunk[1].size
+[N bytes  ] chunk[1].data                    ← data chunk (zstd!)</code></pre>
+
+<div class="ko">
+<p><strong>이중 압축이 본 프로젝트의 핵심 발견</strong>: schema chunk 는 <em>deflate-raw</em>, data chunk 는 <em>zstd</em>. fig-kiwi npm 패키지는 단일 deflate-raw 만 가정 — 우리는 magic byte 자동 감지로 분기 (<code>src/decompress.ts</code>). 디코드 절차:</p>
+</div>
+<div class="en">
+<p><strong>Two-tiered compression is this project's core finding</strong>: the schema chunk is <em>deflate-raw</em>, the data chunk is <em>zstd</em>. The <code>fig-kiwi</code> npm package assumes a single deflate-raw — we auto-detect the algorithm by magic byte (<code>src/decompress.ts</code>). Decoder flow:</p>
+</div>
+
+<pre><code>const archive  = parseFigArchive(canvasBytes);          // Stage 2
+const schema   = kiwi.decodeBinarySchema(deflateRaw(archive.chunks[0]));
+const compiled = kiwi.compileSchema(schema);            // 568 type definitions
+const message  = compiled.decodeMessage(zstdInflate(archive.chunks[1]));
+// → root type NODE_CHANGES { nodeChanges: NodeChange[], blobs: Bytes[], ... }</code></pre>
+
+<!-- 3.3 Tree -->
+<h3 id="stage-tree"><span class="ko">3.3 Tree — 트리 재구성</span><span class="en">3.3 Tree reconstruction</span></h3>
+
+<div class="ko">
+<p><code>message.nodeChanges</code> 는 <strong>평탄한 배열</strong> — 메타리치 fixture 기준 35,660 노드. <code>src/tree.ts:buildTree</code> 가:</p>
+<ol>
+  <li>각 노드를 <code>(sessionID:localID)</code> 키 Map 에 저장</li>
+  <li><code>parentIndex.guid</code> 로 부모 link → children 배열 채움</li>
+  <li><code>parentIndex.position</code> (Figma 의 fractional indexing string) 으로 형제 정렬</li>
+  <li><code>type === 'DOCUMENT'</code> 노드를 root 로 식별</li>
+</ol>
+</div>
+<div class="en">
+<p><code>message.nodeChanges</code> is a <strong>flat array</strong> — 35,660 nodes for the metarich fixture. <code>src/tree.ts:buildTree</code>:</p>
+<ol>
+  <li>indexes each node by <code>(sessionID:localID)</code></li>
+  <li>links parents via <code>parentIndex.guid</code> → fills <code>children</code></li>
+  <li>sorts siblings by <code>parentIndex.position</code> (Figma's fractional indexing string)</li>
+  <li>identifies <code>type === 'DOCUMENT'</code> as the root</li>
+</ol>
+</div>
+
+<!-- 3.4 Assets + Vectors -->
+<h3 id="stage-assets"><span class="ko">3.4 Assets + Vectors</span><span class="en">3.4 Assets + Vectors</span></h3>
+
+<div class="ko">
+<ul>
+  <li><strong>이미지</strong>: 노드의 <code>image.hash</code> 가 SHA-1 ref. ZIP 의 <code>images/&lt;hash&gt;</code> 와 cross-reference. 확장자가 없으므로 magic byte sniff (PNG / JPG / WebP / GIF / SVG / PDF).</li>
+  <li><strong>벡터</strong>: <code>VECTOR / STAR / LINE / ELLIPSE / REGULAR_POLYGON / BOOLEAN_OPERATION / ROUNDED_RECTANGLE</code> 노드의 <code>vectorData.vectorNetworkBlob</code> 또는 <code>fillGeometry[].commandsBlob</code> 인덱스 → <code>message.blobs[]</code> byte → 5 개 path command (MOVE_TO / LINE_TO / CUBIC / QUAD / CLOSE) 디코드. 95% 성공률.</li>
+</ul>
+</div>
+<div class="en">
+<ul>
+  <li><strong>Images</strong>: <code>image.hash</code> on a node is a SHA-1 ref. Cross-checked against ZIP <code>images/&lt;hash&gt;</code>; magic-byte sniff for type (PNG / JPG / WebP / GIF / SVG / PDF) since extensions are missing.</li>
+  <li><strong>Vectors</strong>: <code>VECTOR / STAR / LINE / ELLIPSE / REGULAR_POLYGON / BOOLEAN_OPERATION / ROUNDED_RECTANGLE</code> nodes carry a <code>vectorData.vectorNetworkBlob</code> or <code>fillGeometry[].commandsBlob</code> index into <code>message.blobs[]</code>; bytes decode to 5 path opcodes (MOVE_TO / LINE_TO / CUBIC / QUAD / CLOSE). 95% success rate.</li>
+</ul>
+</div>
+
+<h4 class="ko">Vector path opcodes (실측 wire format)</h4>
+<h4 class="en">Vector path opcodes (observed wire format)</h4>
+<table>
+  <tr><th>opcode</th><th>name</th><th>payload</th><th>SVG</th></tr>
+  <tr><td><code>0x01</code></td><td>MOVE_TO</td><td>2× f32 LE (x, y)</td><td><code>M</code></td></tr>
+  <tr><td><code>0x02</code></td><td>LINE_TO</td><td>2× f32</td><td><code>L</code></td></tr>
+  <tr><td><code>0x03</code></td><td>QUAD_TO</td><td>4× f32</td><td><code>Q</code></td></tr>
+  <tr><td><code>0x04</code></td><td>CUBIC_TO</td><td>6× f32</td><td><code>C</code></td></tr>
+  <tr><td><code>0x05</code></td><td>CLOSE</td><td>—</td><td><code>Z</code></td></tr>
+</table>
+
+<blockquote class="ko">자세한 invariant: <code>docs/specs/vector-decode.spec.md</code> — opcode 매핑 (0x03/0x04 swap 검증), offset fallback (0/1 둘 다 시도 후 명령 많은 쪽 채택), region + orphan stroke-only segment 합성 (round 17 §I-V7a).</blockquote>
+<blockquote class="en">Full invariants: <code>docs/specs/vector-decode.spec.md</code> — opcode mapping (0x03/0x04 swap verified by round-trip), offset fallback (try start=0 and start=1, pick the variant with more commands), region + orphan stroke-only segment composition (round 17 §I-V7a).</blockquote>
+
+<!-- Reverse pipeline — Repack -->
+<h3 class="ko">3.5 역방향 — Repack</h3>
+<h3 class="en">3.5 Reverse direction — Repack</h3>
+
+<div class="mermaid">
+flowchart LR
+  E[extracted/] --> M{mode}
+  M -->|byte| BR["Byte Repack<br/>ZIP STORE re-bundle<br/>→ byte-identical canvas.fig"]
+  M -->|kiwi| KR["Kiwi Repack<br/>kiwi re-encode + deflate-raw + ZIP<br/>→ semantically equivalent"]
+  M -->|json| JR["JSON Repack<br/>edited message.json → kiwi → ZIP<br/>→ only mode that picks up edits"]
+  BR --> O[out.fig]
+  KR --> O
+  JR --> O
+</div>
+
+<table>
+  <tr>
+    <th>mode</th><th>module</th><th class="ko">결과</th><th class="en">Result</th><th class="ko">동등성</th><th class="en">Equality</th>
+  </tr>
+  <tr>
+    <td><strong>byte</strong></td><td><code>repackByteLevel</code></td>
+    <td colspan="2">5.77 MB ≈ orig</td>
+    <td colspan="2">🟢 byte-identical</td>
+  </tr>
+  <tr>
+    <td><strong>kiwi</strong></td><td><code>repackKiwi</code></td>
+    <td colspan="2">6.82 MB (+18%)</td>
+    <td colspan="2">🟡 semantically equivalent</td>
+  </tr>
+  <tr>
+    <td><strong>json</strong></td><td><code>repackFromJson</code></td>
+    <td colspan="2"><span class="ko">사용자 편집 반영</span><span class="en">incorporates edits</span></td>
+    <td colspan="2">🟡 lossless via <code>__bytes</code> / <code>__num</code> tags</td>
+  </tr>
+</table>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     4. WEB PIPELINE
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="web-pipeline">
+<h2><span class="ko">4. Web 파이프라인</span><span class="en">4. Web pipeline</span></h2>
+
+<div class="ko">
+<p><code>web/</code> 서브트리는 <strong>Hono backend (5274) + Vite/React 클라이언트 (5273)</strong> 의 동시 실행 (<code>concurrently</code>) 로 동작. Backend 는 sessionId 단위로 Memory + FS 에 documentJson 을 보존하고 클라이언트는 그 스냅샷을 fetch + edit + save 한다.</p>
+</div>
+<div class="en">
+<p>The <code>web/</code> subtree runs <strong>Hono backend on :5274 + Vite/React client on :5273</strong> concurrently. The backend keeps documentJson per <code>sessionId</code> in memory + FS; the client fetches a snapshot and patches / saves it.</p>
+</div>
+
+<div class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as User
+  participant C as React Client (5273)
+  participant B as Hono Backend (5274)
+  participant S as src/ (shared domain)
+  U->>C: drag-drop .fig
+  C->>B: POST /api/upload (multipart)
+  B->>S: loadContainer → decodeFigCanvas → buildTree → toClientNode
+  B-->>C: { sessionId, pageCount, nodeCount }
+  C->>B: GET /api/doc/:id
+  B-->>C: documentJson (DOCUMENT root + all CANVAS children)
+  C->>C: render Konva canvas + Inspector
+  U->>C: edit text / move node
+  C->>B: PATCH /api/doc/:id { nodeGuid, field, value }
+  B->>B: in-memory message.json patch + documentJson rebuild
+  B-->>C: { ok: true }
+  U->>C: Save (=download)
+  C->>B: POST /api/save/:id
+  B->>S: kiwi re-encode + deflate-raw + ZIP STORE
+  B-->>C: octet-stream .fig
+</div>
+
+<h3 class="ko">주요 use case</h3>
+<h3 class="en">Key use cases</h3>
+<table>
+  <tr><th class="ko">파일</th><th class="en">File</th><th class="ko">책임</th><th class="en">Responsibility</th></tr>
+  <tr><td><code>UploadFig.ts</code></td><td colspan="2"><span class="ko">.fig 디코드 + Session 생성</span><span class="en">decode .fig + create Session</span></td></tr>
+  <tr><td><code>EditNode.ts</code></td><td colspan="2"><span class="ko">message.json + documentJson 동시 patch</span><span class="en">patch message.json + documentJson atomically</span></td></tr>
+  <tr><td><code>ResizeNode.ts</code></td><td colspan="2">size + transform <span class="ko">동시 조정</span><span class="en">co-edit</span></td></tr>
+  <tr><td><code>OverrideInstanceText.ts</code></td><td colspan="2">INSTANCE <span class="ko">텍스트 override</span><span class="en">text override</span></td></tr>
+  <tr><td><code>ExportFig.ts</code></td><td colspan="2"><span class="ko">JSON Repack</span><span class="en">JSON Repack</span></td></tr>
+  <tr><td><code>RunChatTurn.ts</code></td><td colspan="2"><span class="ko">Anthropic Messages API + tool loop</span><span class="en">Anthropic Messages API + tool loop</span></td></tr>
+  <tr><td><code>AuditCompare.ts</code></td><td colspan="2"><span class="ko">plugin oracle 비교 (round 32 baseline)</span><span class="en">plugin oracle comparison (round 32 baseline)</span></td></tr>
+</table>
+
+<h3 class="ko">React 클라이언트 — 핵심 컴포넌트</h3>
+<h3 class="en">React client — core components</h3>
+<ul>
+  <li><strong>Canvas.tsx</strong> <span class="ko">— Konva Stage / Layer / NodeShape (vector / text / paint-stack 등 plan-driven)</span><span class="en">— Konva Stage / Layer / NodeShape (vector / text / paint-stack, plan-driven)</span></li>
+  <li><strong>Inspector.tsx</strong> <span class="ko">— Layer / Position / Auto Layout / Fill / Stroke / Text 섹션 + JSON 탭</span><span class="en">— Layer / Position / Auto Layout / Fill / Stroke / Text sections + JSON tab</span></li>
+  <li><strong>LayerTree.tsx + AssetList.tsx</strong> <span class="ko">— 좌측 Sidebar</span><span class="en">— left sidebar</span></li>
+  <li><strong>render/nodeRender.ts</strong> <span class="ko">— pure plan generator (hidden/vector/text-simple/text-styled/paint-stack)</span><span class="en">— pure plan generator</span></li>
+</ul>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     5. SDD + HARNESS
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="sdd">
+<h2><span class="ko">5. SDD + 하네스</span><span class="en">5. SDD + Harness</span></h2>
+
+<div class="ko">
+<p><strong>Spec-Driven Development (SDD)</strong>: 구현 전에 입력·출력·invariant 를 spec 으로 명문화. 코드는 spec 의 invariant 를 만족하는 한 자유. <strong>iron rule</strong>: spec 없이 merge 안 함, spec 의 invariant 와 test 의 assertion 은 1:1 대응.</p>
+</div>
+<div class="en">
+<p><strong>Spec-Driven Development (SDD)</strong>: write the input / output / invariants in a spec <em>before</em> implementing. Implementation is free as long as it meets the spec's invariants. <strong>Iron rule</strong>: no merge without a spec; each spec invariant maps 1:1 to a test assertion.</p>
+</div>
+
+<div class="mermaid">
+flowchart LR
+  S["1. SPEC<br/>docs/specs/&lt;feature&gt;.spec.md"] --> T["2. TEST<br/>vitest invariant assertion<br/>(initial: fail)"]
+  T --> I["3. IMPL<br/>src/&lt;module&gt;.ts<br/>(until tests pass)"]
+  I --> V["4. VERIFY<br/>npm test +<br/>harness L0..L3"]
+  V --> M[5. MERGE]
+  V -. fail .-> T
+
+  style S fill:#fef3c7
+  style M fill:#dcfce7
+</div>
+
+<h3 class="ko">Spec 5 단면</h3>
+<h3 class="en">Spec, the five slots</h3>
+
+<pre><code># spec/&lt;feature&gt;
+| 항목 | 값 |
+| 상태 | Draft / Approved / Implemented / Stable |
+| 책임 모듈 | src/&lt;module&gt;.ts |
+
+## 1. 목적 (one sentence)
+## 2. 입력 (format, type, constraints)
+## 3. 출력 (format, type, guarantees)
+## 4. Invariants (★ — I-1, I-2, ...)        ← unit tests / harness map here 1:1
+## 5. Error Cases (E-1, E-2, ...)
+## 6. Out of Scope (★ — O-1, ...)
+## 7. References</code></pre>
+
+<h3 class="ko">하네스 — 5 레이어</h3>
+<h3 class="en">Harness — 5 layers</h3>
+
+<div class="mermaid">
+graph TD
+  L0["L0 — Pure unit tests<br/>(per-module, &lt;1s)"]
+  L1["L1 — Module integration<br/>(real fixture, &lt;10s)"]
+  L2["L2 — Round-trip harness<br/>(extract → html → fig → extract; &lt;30s)"]
+  L3["L3 — Edit simulation<br/>(E1..E7 transformations)"]
+  L4["L4 — Figma compatibility<br/>(manual desktop import)"]
+  L0 --> L1 --> L2 --> L3 --> L4
+  style L4 fill:#fef3c7
+</div>
+
+<h3 class="ko">Audit harness (Phase 1+2)</h3>
+<h3 class="en">Audit harness (Phase 1+2)</h3>
+
+<div class="mermaid">
+graph TD
+  R["audit-roundtrip.mjs<br/>ZIP byte compare"]
+  CD["audit-roundtrip-canvas-diff.mjs<br/>kiwi message field walk"]
+  RP["audit-rest-as-plugin.mjs<br/>Figma REST → our parser"]
+  RC["audit-raw-coverage.mjs<br/>(round 17)<br/>raw → documentJson coverage"]
+  PC["audit-properties-coverage.mjs<br/>(round 17)<br/>componentPropDefs / VARIABLE chains"]
+  R --> ph1[Phase 1 baseline]
+  CD --> ph1
+  RP --> ph1
+  RC --> ph2[Phase 2]
+  PC --> ph2
+  style ph1 fill:#dbeafe
+  style ph2 fill:#dcfce7
+</div>
+
+<blockquote class="ko">현재 baseline: HPAI fixture 17,283 매칭 / 18,301 figma nodes / 204 diffs (round 32 R12-A/B/D — 사전 5,562 → 204, -97%). 모든 raw 필드 carry, JSON 직렬화 손실 0, INSTANCE → master prop assignment 100% 매칭. <code>docs/specs/audit-oracle.spec.md §1.1 Baseline</code>.</blockquote>
+<blockquote class="en">Current baseline: HPAI fixture 17,283 matched / 18,301 figma nodes / 204 diffs (round 32 R12-A/B/D, down from 5,562 — 97% reduction). All raw fields reach client, zero JSON serialization failures, INSTANCE → master prop assignments 100% matched. See <code>docs/specs/audit-oracle.spec.md §1.1 Baseline</code>.</blockquote>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     6. ROUND HISTORY
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="rounds">
+<h2><span class="ko">6. 라운드 히스토리</span><span class="en">6. Round history</span></h2>
+
+<div class="ko">
+<p>각 라운드는 spec → test → impl → ship 사이클 단위. 최근 main merge 순으로 정리:</p>
+</div>
+<div class="en">
+<p>One round = one spec → test → impl → ship cycle. Most-recent-first listing of <code>main</code> merges:</p>
+</div>
+
+<table>
+  <tr><th>round</th><th>PR</th><th class="ko">제목</th><th class="en">Title</th><th class="ko">핵심 변경</th><th class="en">Key change</th></tr>
+  <tr>
+    <td>16.1</td><td>#6</td><td colspan="2"><code>fix(web)</code> thread <code>root</code> through TabbedBody</td>
+    <td colspan="2"><span class="ko"><code>window.root</code> scope leak fix — closure 미전달로 DOM element 가 prop 으로 들어가던 버그</span><span class="en"><code>window.root</code> scope leak fix — closure miss let the DOM element flow into the prop</span></td>
+  </tr>
+  <tr>
+    <td>17</td><td>#5</td><td colspan="2"><code>feat(audit)</code> raw-field + properties coverage harness</td>
+    <td colspan="2"><span class="ko">audit-raw-coverage / audit-properties-coverage 신규 — silent drop / JSON 손실 / 정합성 측정</span><span class="en">two new audits — measure silent drops, JSON loss, prop-def integrity</span></td>
+  </tr>
+  <tr>
+    <td>16</td><td>#4</td><td colspan="2"><code>feat(web)</code> styleIdForText effective typography</td>
+    <td colspan="2"><span class="ko">노드의 raw fontName/fontSize 대신 style asset 의 typography 가 effective 값</span><span class="en">style asset's typography overrides raw fontName/fontSize</span></td>
+  </tr>
+  <tr>
+    <td>15</td><td>#3</td><td colspan="2"><code>feat(web)</code> Inspector library color/text-style names</td>
+    <td colspan="2"><span class="ko"><code>colorVar.alias.guid</code> + <code>styleIdForText.guid</code> → asset name 라벨</span><span class="en"><code>colorVar.alias.guid</code> + <code>styleIdForText.guid</code> resolved to asset names</span></td>
+  </tr>
+  <tr>
+    <td>14</td><td>#2</td><td colspan="2"><code>feat(web)</code> strip variant <code>prop=</code> prefixes (UI)</td>
+    <td colspan="2"><span class="ko">Inspector / LayerTree / AssetList 에서 "size=XL, State=default" → "XL, default"</span><span class="en">"size=XL, State=default" → "XL, default" in Inspector / LayerTree / AssetList</span></td>
+  </tr>
+  <tr>
+    <td>11–13</td><td>#1</td><td colspan="2">Vector render fidelity + audit R12 + vector orphan</td>
+    <td colspan="2"><span class="ko">5 변경 묶음 — path inset/scale/INSIDE strokeAlign + audit harness 정확도 + orphan stroke-only segments</span><span class="en">five-change bundle — path inset / scale / INSIDE strokeAlign + audit accuracy + orphan stroke-only segments</span></td>
+  </tr>
+</table>
+
+<h3 class="ko">Vector path 처리 분기 (round 11/12/13)</h3>
+<h3 class="en">Vector path branching (rounds 11/12/13)</h3>
+
+<div class="mermaid">
+flowchart TD
+  N["VECTOR node"] --> A{"size vs<br/>normalizedSize?"}
+  A -->|"size &gt; normalized<br/>(stroke outset)"| B["round 11<br/>_pathOffset = (size − normalized) / 2"]
+  A -->|"size &lt; normalized<br/>(parametric primitive)"| C["round 12<br/>_pathScale = size / normalized"]
+  A -->|"size = normalized"| D["pass-through"]
+  N --> E{"strokeAlign?"}
+  E -->|"INSIDE + visible fill"| F["round 13<br/>strokeWidth × 2 +<br/>Group clipFunc(path)"]
+  E -->|"OUTSIDE + visible fill"| G["round 13<br/>strokeWidth × 2 +<br/>fillAfterStrokeEnabled"]
+  E -->|"CENTER / undef"| H["pass-through"]
+</div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     7. GLOSSARY
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="glossary">
+<h2><span class="ko">7. 용어집</span><span class="en">7. Glossary</span></h2>
+
+<div class="ko"><p>전체 도메인 사전은 <code>CONTEXT.md</code> 가 source. 다음은 가장 자주 충돌하는 용어들의 짧은 요약:</p></div>
+<div class="en"><p>Full domain glossary lives in <code>CONTEXT.md</code>. Below is a short summary of the most frequently conflated terms:</p></div>
+
+<h4>Pipeline phases of the same logical "thing"</h4>
+<table>
+  <tr><th>term</th><th class="ko">의미</th><th class="en">Meaning</th><th class="ko">피해야 할 표현</th><th class="en">Avoid</th></tr>
+  <tr>
+    <td><strong>Kiwi Record</strong></td>
+    <td colspan="2"><span class="ko">디코드된 fig-kiwi message 의 평탄 entry — parent 가 GUID 로만 참조</span><span class="en">Flat entry in decoded fig-kiwi message — parent referenced by GUID only</span></td>
+    <td colspan="2">"raw node", "decoded node"</td>
+  </tr>
+  <tr>
+    <td><strong>Tree Node</strong></td>
+    <td colspan="2"><span class="ko"><code>buildTree</code> 후 parent/child 가 link 된 형태 — 1:1 with Kiwi Record</span><span class="en">A Kiwi Record after parent/child link by <code>buildTree</code> — 1:1</span></td>
+    <td colspan="2">"node" alone</td>
+  </tr>
+  <tr>
+    <td><strong>Pen Node</strong></td>
+    <td colspan="2"><span class="ko">Pencil 출력 트리의 노드 — 4 종 type, INSTANCE 인라인 후 노드 수 증가</span><span class="en">Node in the Pencil output tree — 4 types only, larger count after INSTANCE inlining</span></td>
+    <td colspan="2">"node" alone</td>
+  </tr>
+</table>
+
+<h4>Component model</h4>
+<table>
+  <tr><th>term</th><th class="ko">의미</th><th class="en">Meaning</th></tr>
+  <tr><td><strong>Master</strong></td><td colspan="2"><span class="ko">재사용 가능 템플릿 (<code>type === 'SYMBOL'</code>). .fig 안에 한 번만 존재</span><span class="en">Reusable template node (<code>type === 'SYMBOL'</code>); exists once per .fig</span></td></tr>
+  <tr><td><strong>Instance</strong></td><td colspan="2"><span class="ko">Master 의 사용처. 자체 transform/size/Override 만 carry, children 은 Expansion 시에 master 트리로 인라인</span><span class="en">A use site of a Master; carries its own transform/size/Overrides only; children inlined from master at Expansion time</span></td></tr>
+  <tr><td><strong>Override</strong></td><td colspan="2"><span class="ko">Instance 가 Master 의 결과를 바꾸는 데이터 — 3 종: <code>symbolOverrides[]</code>, <code>componentPropAssignments[]</code>, <code>componentPropRefs[]</code></span><span class="en">Instance-side data that mutates the Master's output — three kinds: <code>symbolOverrides[]</code>, <code>componentPropAssignments[]</code>, <code>componentPropRefs[]</code></span></td></tr>
+  <tr><td><strong>Expansion</strong></td><td colspan="2"><span class="ko">Instance 를 Master subtree 로 인라인. <code>Resolve</code> + <code>Reduce-to-Pen</code> 두 단계</span><span class="en">Inline an Instance with its Master subtree. Two stacked passes: <code>Resolve</code> and <code>Reduce-to-Pen</code></span></td></tr>
+</table>
+
+<h4>Identity</h4>
+<table>
+  <tr><th>term</th><th class="ko">의미</th><th class="en">Meaning</th></tr>
+  <tr><td><strong>GUID</strong></td><td colspan="2"><code>${sessionID}:${localID}</code> string — Tree Node / Kiwi Record id</td></tr>
+  <tr><td><strong>Expansion Path</strong></td><td colspan="2"><code>outerInstanceGuid/.../masterGuid</code> — pen-export 인라인 시 master descendant disambiguation</td></tr>
+  <tr><td><strong>Pen ID</strong></td><td colspan="2"><span class="ko">5 자리 base62 (<code>[0-9A-Za-z]{5}</code>) — .pen 출력의 노드 id, SHA-256 derived</span><span class="en">5-char base62 (<code>[0-9A-Za-z]{5}</code>) — pen output node id, SHA-256 derived</span></td></tr>
+</table>
+
+<h4>Visibility</h4>
+<table>
+  <tr><th>mechanism</th><th class="ko">설명</th><th class="en">Description</th></tr>
+  <tr><td><strong>Direct Visibility</strong></td><td colspan="2"><code>data.visible</code> on the node itself</td></tr>
+  <tr><td><strong>Property Visibility Toggle</strong></td><td colspan="2">Instance 의 <code>componentPropAssignments[]</code> + master 자손의 <code>componentPropRefs[VISIBLE]</code> 매칭으로 hide</td></tr>
+  <tr><td><strong>Symbol Visibility Override</strong></td><td colspan="2"><code>symbolData.symbolOverrides[].visible</code> via guidPath</td></tr>
+  <tr><td><strong>Effective Visibility</strong></td><td colspan="2"><span class="ko">위 셋의 OR-of-hidden composition (Symbol Override 의 <code>visible: true</code> 가 Direct false 를 이김)</span><span class="en">OR-of-hidden of the three above (Symbol Override <code>visible: true</code> wins over Direct false)</span></td></tr>
+</table>
+
+<h4>Round-trip equality tiers</h4>
+<ul>
+  <li><strong>byte-identical</strong> — bytes match (Byte Repack only, inner <code>canvas.fig</code>)</li>
+  <li><strong>semantically equivalent</strong> — same node count + schema + version (Kiwi / JSON Repack)</li>
+  <li><strong>lossy</strong> — fields silently dropped (no current Repack mode allows this; would be a regression)</li>
+</ul>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     8. REFERENCES
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="refs">
+<h2><span class="ko">8. 참고 자료</span><span class="en">8. References</span></h2>
+
+<h3 class="ko">프로젝트 내부 문서 (이 가이드의 source)</h3>
+<h3 class="en">Internal docs (sources for this guide)</h3>
+<ul>
+  <li><code>README.md</code> — <span class="ko">최상위 소개 + Quick start</span><span class="en">top-level intro + quick start</span></li>
+  <li><code>CONTEXT.md</code> — <span class="ko">전체 도메인 용어 사전 (영문)</span><span class="en">complete domain glossary (English)</span></li>
+  <li><code>docs/SPEC.md</code> — <span class="ko">CLI 9 단계 상세 (한글)</span><span class="en">CLI 9-stage detail (Korean)</span></li>
+  <li><code>docs/SPEC-architecture.md</code> — <span class="ko">아키텍처 round-25 시점 단일 source</span><span class="en">architecture, single source at round-25</span></li>
+  <li><code>docs/SPEC-roundtrip.md</code> — <span class="ko">round-trip 비전 + 3 모드 상세</span><span class="en">round-trip vision + 3-mode detail</span></li>
+  <li><code>docs/SPEC-figma-to-pencil.md</code> — pen-export <span class="ko">계약</span><span class="en">contract</span></li>
+  <li><code>docs/SPEC-repack.md</code> — repack <span class="ko">3 모드 상세</span><span class="en">3-mode detail</span></li>
+  <li><code>docs/SDD.md</code> — <span class="ko">SDD 방법론</span><span class="en">SDD methodology</span></li>
+  <li><code>docs/HARNESS.md</code> — <span class="ko">L0~L4 검증 하네스</span><span class="en">L0–L4 verification harness</span></li>
+  <li><code>docs/specs/*.spec.md</code> — 60+ <span class="ko">기능별 micro-spec</span><span class="en">feature micro-specs</span></li>
+  <li><code>docs/adr/*.md</code> — <span class="ko">아키텍처 결정 로그</span><span class="en">architecture decision records</span></li>
+</ul>
+
+<h3 class="ko">외부 자료</h3>
+<h3 class="en">External</h3>
+<ul>
+  <li>Kiwi binary format — Evan Wallace, <a href="https://github.com/evanw/kiwi" target="_blank">github.com/evanw/kiwi</a></li>
+  <li>fig-kiwi npm package — single-deflate-raw assumption (we extend with zstd auto-detect)</li>
+  <li>pencil.dev — <span class="ko"><code>.pen</code> 포맷 / Pencil 에디터</span><span class="en"><code>.pen</code> format / Pencil editor</span></li>
+  <li>zstd — Facebook RFC 8478 (we use <code>fzstd</code>, decode-only)</li>
+</ul>
+
+<h3 class="ko">개발자 워크플로</h3>
+<h3 class="en">Developer workflow</h3>
+<pre><code># Extract a .fig
+npx tsx src/cli.ts extract docs/&lt;file&gt;.fig output/&lt;name&gt;
+
+# Repack (byte mode default)
+npx tsx src/cli.ts repack output/&lt;name&gt; out.fig --mode byte
+
+# Run unit + integration tests
+npm test                       # main project (162 tests)
+cd web && npm test             # web (602 tests)
+
+# Web editor (concurrent backend + Vite)
+cd web && npm run dev          # → http://localhost:5273
+
+# Audit harness (round 17)
+node web/scripts/audit-raw-coverage.mjs
+node web/scripts/audit-properties-coverage.mjs</code></pre>
+
+</section>
+
+</main>
+</div>
+
+<script>
+function setLang(lang) {
+  document.documentElement.setAttribute('data-lang', lang);
+  document.documentElement.setAttribute('lang', lang);
+  document.getElementById('btn-ko').classList.toggle('active', lang === 'ko');
+  document.getElementById('btn-en').classList.toggle('active', lang === 'en');
+  try { localStorage.setItem('figma-reverse-dev-guide-lang', lang); } catch (e) {}
+}
+(() => {
+  try {
+    const saved = localStorage.getItem('figma-reverse-dev-guide-lang');
+    if (saved === 'en' || saved === 'ko') setLang(saved);
+  } catch (e) {}
+})();
+</script>
+
+</body>
+</html>
