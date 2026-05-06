@@ -37,8 +37,7 @@ import { SaveSnapshot } from '../core/application/SaveSnapshot.js';
 import { LoadSnapshot } from '../core/application/LoadSnapshot.js';
 import { ServeAsset } from '../core/application/ServeAsset.js';
 import { RunChatTurn } from '../core/application/RunChatTurn.js';
-import { Undo } from '../core/application/Undo.js';
-import { Redo } from '../core/application/Redo.js';
+import { History } from '../core/application/History.js';
 import { AuditCompare } from '../core/application/AuditCompare.js';
 
 // ─── Composition root: adapters + use cases ──────────────────────────────
@@ -73,8 +72,7 @@ const runChatTurn = new RunChatTurn(sessionStore, tools, {
   subscription: agentSdkChat,
   apiKey: anthropicChat,
 });
-const undoUseCase = new Undo(sessionStore, editJournal);
-const redoUseCase = new Redo(sessionStore, editJournal);
+const historyUseCase = new History(sessionStore, editJournal);
 const auditCompareUseCase = new AuditCompare(sessionStore);
 
 // `toHttpError` lives in adapters/driving/http/errors.ts now —
@@ -99,8 +97,7 @@ registerRoutes(app, {
   loadSnapshot: loadSnapshotUseCase,
   serveAsset: serveAssetUseCase,
   runChatTurn,
-  undo: undoUseCase,
-  redo: redoUseCase,
+  history: historyUseCase,
   auditCompare: auditCompareUseCase,
 });
 

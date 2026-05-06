@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { EditNode } from './EditNode.js';
 import { ResizeNode } from './ResizeNode.js';
 import { OverrideInstanceText } from './OverrideInstanceText.js';
-import { Undo } from './Undo.js';
-import { Redo } from './Redo.js';
+import { History } from './History.js';
 import { FakeSessionStore } from './testing/fakeSessionStore.js';
 import { InMemoryEditJournal } from '../../server/adapters/driven/InMemoryEditJournal.js';
 
@@ -51,27 +50,28 @@ function seed() {
   return store;
 }
 
-describe('Undo / Redo', () => {
+describe('History (undo / redo)', () => {
   it('round-trips a text edit through undo → redo', async () => {
     const store = seed();
     const journal = new InMemoryEditJournal();
     const editNode = new EditNode(store, journal);
-    const undo = new Undo(store, journal);
-    const redo = new Redo(store, journal);
+    const history = new History(store, journal);
 
     await editNode.execute({
       sessionId: 'sid', nodeGuid: '0:1', field: 'textData.characters', value: 'EDITED',
     });
     expect(JSON.parse(store.readMessage('sid')).nodeChanges[0].textData.characters).toBe('EDITED');
 
-    const u = await undo.execute({ sessionId: 'sid' });
+    const u = await history.execute({ sessionId: 'sid', direction: 'undo' });
     expect(u.ok).toBe(true);
-    expect(u.undoneLabel).toBe('Edit');
+    expect(u.direction).toBe('undo');
+    expect(u.appliedLabel).toBe('Edit');
     expect(JSON.parse(store.readMessage('sid')).nodeChanges[0].textData.characters).toBe('INITIAL');
 
-    const r = await redo.execute({ sessionId: 'sid' });
+    const r = await history.execute({ sessionId: 'sid', direction: 'redo' });
     expect(r.ok).toBe(true);
-    expect(r.redoneLabel).toBe('Edit');
+    expect(r.direction).toBe('redo');
+    expect(r.appliedLabel).toBe('Edit');
     expect(JSON.parse(store.readMessage('sid')).nodeChanges[0].textData.characters).toBe('EDITED');
   });
 
@@ -80,7 +80,7 @@ describe('Undo / Redo', () => {
     const store = seed();
     const journal = new InMemoryEditJournal();
     const resize = new ResizeNode(store, journal);
-    const undo = new Undo(store, journal);
+    const history = new History(store, journal);
 
     await resize.execute({
       sessionId: 'sid', guid: '0:2', x: 999, y: 888, w: 777, h: 666,
@@ -89,7 +89,7 @@ describe('Undo / Redo', () => {
     expect(node.transform.m02).toBe(999);
     expect(node.size).toEqual({ x: 777, y: 666 });
 
-    await undo.execute({ sessionId: 'sid' });
+    await history.execute({ sessionId: 'sid', direction: 'undo' });
     node = JSON.parse(store.readMessage('sid')).nodeChanges[1];
     expect(node.transform.m02).toBe(100);
     expect(node.transform.m12).toBe(50);
@@ -100,13 +100,12 @@ describe('Undo / Redo', () => {
     const store = seed();
     const journal = new InMemoryEditJournal();
     const editNode = new EditNode(store, journal);
-    const undo = new Undo(store, journal);
-    const redo = new Redo(store, journal);
+    const history = new History(store, journal);
 
     await editNode.execute({
       sessionId: 'sid', nodeGuid: '0:1', field: 'textData.characters', value: 'first',
     });
-    await undo.execute({ sessionId: 'sid' });
+    await history.execute({ sessionId: 'sid', direction: 'undo' });
     expect(journal.depths('sid')).toEqual({ past: 0, future: 1 });
 
     // New edit while there's redo history → future stack must clear.
@@ -116,18 +115,21 @@ describe('Undo / Redo', () => {
     expect(journal.depths('sid')).toEqual({ past: 1, future: 0 });
 
     // Redo now does nothing.
-    const r = await redo.execute({ sessionId: 'sid' });
+    const r = await history.execute({ sessionId: 'sid', direction: 'redo' });
     expect(r.ok).toBe(false);
-    expect(r.redoneLabel).toBeNull();
+    expect(r.direction).toBe('redo');
+    expect(r.appliedLabel).toBeNull();
   });
 
   it('undo on an empty stack returns ok=false without touching the doc', async () => {
     const store = seed();
     const journal = new InMemoryEditJournal();
-    const undo = new Undo(store, journal);
+    const history = new History(store, journal);
     const before = store.readMessage('sid');
-    const r = await undo.execute({ sessionId: 'sid' });
+    const r = await history.execute({ sessionId: 'sid', direction: 'undo' });
     expect(r.ok).toBe(false);
+    expect(r.direction).toBe('undo');
+    expect(r.appliedLabel).toBeNull();
     expect(store.readMessage('sid')).toBe(before);
   });
 
@@ -135,7 +137,7 @@ describe('Undo / Redo', () => {
     const store = seed();
     const journal = new InMemoryEditJournal();
     const override = new OverrideInstanceText(store, journal);
-    const undo = new Undo(store, journal);
+    const history = new History(store, journal);
 
     await override.execute({
       sessionId: 'sid', instanceGuid: '0:3', masterTextGuid: '0:1', value: 'PER_INSTANCE',
@@ -143,7 +145,7 @@ describe('Undo / Redo', () => {
     let inst = JSON.parse(store.readMessage('sid')).nodeChanges[2];
     expect(inst.symbolData.symbolOverrides).toHaveLength(1);
 
-    await undo.execute({ sessionId: 'sid' });
+    await history.execute({ sessionId: 'sid', direction: 'undo' });
     inst = JSON.parse(store.readMessage('sid')).nodeChanges[2];
     expect(inst.symbolData.symbolOverrides).toEqual([]);
   });
@@ -212,12 +214,11 @@ describe('Undo / Redo', () => {
       }],
     });
 
-    const undo = new Undo(store, journal);
-    const redo = new Redo(store, journal);
+    const history = new History(store, journal);
     const session = store.getById('sid')!;
 
     // Undo → message.json reverts to 3 nodes, documentJson rebuilt to match.
-    await undo.execute({ sessionId: 'sid' });
+    await history.execute({ sessionId: 'sid', direction: 'undo' });
     let parsed = JSON.parse(store.readMessage('sid')) as { nodeChanges: unknown[] };
     expect(parsed.nodeChanges).toHaveLength(3);
     const docAfterUndo = session.documentJson as {
@@ -229,7 +230,7 @@ describe('Undo / Redo', () => {
     expect(docAfterUndo.children![0].children).toHaveLength(1);
 
     // Redo → message.json back to 4, documentJson rebuilt to match.
-    await redo.execute({ sessionId: 'sid' });
+    await history.execute({ sessionId: 'sid', direction: 'redo' });
     parsed = JSON.parse(store.readMessage('sid')) as { nodeChanges: unknown[] };
     expect(parsed.nodeChanges).toHaveLength(4);
     const docAfterRedo = session.documentJson as {
