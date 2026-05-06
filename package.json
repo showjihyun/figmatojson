@@ -1,6 +1,6 @@
 {
   "name": "figma-reverse",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": ".fig (Figma) 파일 역공학 → 구조화된 JSON + 에셋 export 파이프라인",
   "type": "module",
   "main": "dist/index.js",
