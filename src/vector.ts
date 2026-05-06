@@ -450,12 +450,27 @@ export function vectorNetworkToPath(vn: VectorNetwork): string {
   if (vn.regions.length > 0) {
     // fill 영역이 있는 경우: 각 region 의 각 loop 별로 segments 정렬 후 path 생성
     const parts: string[] = [];
+    const used = new Set<number>();
     for (const region of vn.regions) {
       for (const loop of region.loops) {
         if (loop.segments.length === 0) continue;
+        for (const idx of loop.segments) used.add(idx);
         const segs = loop.segments.map((idx) => vn.segments[idx]!);
         parts.push(buildPathFromSegments(vn.vertices, orientSegments(segs)));
       }
+    }
+    // I-V7a — orphan stroke-only segments (line that no region/loop refs).
+    // HPAI 700:319 has 6 such segments (the connecting line of the icon).
+    // No orient: orphan list is typically disconnected; orientSegments would
+    // make spurious reversals. buildPathFromSegments inserts a fresh M
+    // whenever the chain breaks, which is the correct behavior for
+    // disconnected lines.
+    const orphans: VNSegment[] = [];
+    for (let i = 0; i < vn.segments.length; i++) {
+      if (!used.has(i)) orphans.push(vn.segments[i]!);
+    }
+    if (orphans.length > 0) {
+      parts.push(buildPathFromSegments(vn.vertices, orphans));
     }
     return parts.filter((p) => p.length > 0).join(' ');
   }

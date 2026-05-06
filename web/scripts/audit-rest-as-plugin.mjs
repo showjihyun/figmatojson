@@ -35,15 +35,24 @@ const BACKEND = process.env.AUDIT_BACKEND ?? 'http://localhost:5274';
 const CORPORA = {
   bvp: { figPath: 'docs/bvp.fig', keyEnv: 'FIGMA_FILE_KEY_BVP' },
   metarich: { figPath: 'docs/메타리치 화면 UI Design.fig', keyEnv: 'FIGMA_FILE_KEY' },
+  hpai: {
+    figPath: 'docs/2025_HPAI_산란계밀집 대단지농장, 월별시계열위험도 시각화.fig',
+    keyEnv: 'FIGMA_FILE_KEY_HPAI',
+  },
 };
 
 function loadEnv() {
   const env = {};
   const path = resolve(REPO_ROOT, '.env.local');
-  if (!existsSync(path)) throw new Error(`missing ${path}`);
-  for (const line of readFileSync(path, 'utf-8').split(/\r?\n/)) {
-    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-    if (m) env[m[1]] = m[2];
+  if (existsSync(path)) {
+    for (const line of readFileSync(path, 'utf-8').split(/\r?\n/)) {
+      const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+      if (m) env[m[1]] = m[2];
+    }
+  }
+  // process.env wins so callers can inject keys without editing .env.local.
+  for (const k of Object.keys(process.env)) {
+    if (process.env[k] !== undefined) env[k] = process.env[k];
   }
   return env;
 }
@@ -76,7 +85,12 @@ function adaptNode(node, parentAbs = { x: 0, y: 0 }) {
     out.transform = { m02: bbox.x - parentAbs.x, m12: bbox.y - parentAbs.y };
   }
   if (typeof node.opacity === 'number' && node.opacity !== 1) out.opacity = node.opacity;
-  if (typeof node.rotation === 'number' && node.rotation !== 0) out.rotation = node.rotation;
+  // REST emits rotation in radians (math CCW); plugin sandbox emits degrees
+  // (CW positive). Spec: audit-harness.spec.md §I-X12a.
+  if (typeof node.rotation === 'number' && node.rotation !== 0) {
+    const deg = -node.rotation * 180 / Math.PI;
+    if (deg !== 0) out.rotation = deg;
+  }
   if (typeof node.cornerRadius === 'number' && node.cornerRadius !== 0) out.cornerRadius = node.cornerRadius;
   // Always emit fills/strokes arrays (even empty) so the audit `fills.length`
   // / `strokes.length` comparisons aren't poisoned by adapter omission.

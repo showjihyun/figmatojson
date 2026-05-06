@@ -122,6 +122,24 @@ vector 노드의 *그래프* 표현 — vertices + segments + regions. pen-expor
   `vn.segments` 로 풀고 `orientSegments` 로 endpoint chain 정렬 후
   `buildPathFromSegments` 로 직렬화. 여러 loop / region 의 path 는
   공백 join — fill-rule 은 region 의 windingRule 이 결정 (호출자 책임).
+- I-V7a **Region + orphan 합성**: region 이 1개 이상인 경우라도 *어느
+  region/loop 에도 포함되지 않은 segments* (= "orphan stroke-only
+  segments") 가 존재하면 그 segments 도 region path 뒤에 별도 sub-path
+  로 emit 한다. 이는 figma 의 한 vector 노드가 *동시에* fill-region
+  (점·도형) 과 stroke-only line (선) 을 carry 하는 흔한 케이스를 다룬다.
+  HPAI 700:319 ("data-01 / Icon") 의 22 segments 중 6 개가 정확히 이
+  분기에 해당 — region 4개가 점을 그리고, orphan 6개가 선을 그린다.
+  이전 구현 (round 11 까지) 은 region 만 emit 해서 line 이 통째로 누락.
+  - orphan segments 는 `orientSegments` 를 *통하지 않고* 원본 인덱스 순서
+    그대로 `buildPathFromSegments` 호출. 이유: orphan 은 disconnected
+    line 모음일 가능성이 크고, 그럴 때 orientSegments 의 "이전 endpoint
+    매칭으로 뒤집기" 가 거짓 뒤집기를 만든다. `buildPathFromSegments`
+    는 connected 가 아닐 때 자동으로 새 `M` subpath 시작 — 따라서 orient
+    없이도 각 line 이 정확히 그려진다.
+  - fill-rule 은 region path 에만 의미가 있고 orphan 은 stroke-only.
+    호출자가 fill-rule 을 region 단위로 적용하든 path 전체로 적용하든
+    orphan segments 는 fill 로 그려지지 않는다 (closing Z 가 없거나
+    open chain).
 - I-V8 region 이 0개면 stroke-only / line: 모든 segment 를 한 path 로
   단일 호출. segments 도 0개면 빈 문자열.
 - I-V9 segment chain orientation (`orientSegments`):

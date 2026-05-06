@@ -74,12 +74,38 @@ export function toClientNode(
   // can render real shapes via Konva.Path. Without this, every vector
   // becomes a colored bbox rectangle (no shape fidelity).
   if (VECTOR_TYPES.has(n.type)) {
-    const vd = data.vectorData as { vectorNetworkBlob?: number } | undefined;
+    const vd = data.vectorData as
+      | { vectorNetworkBlob?: number; normalizedSize?: { x?: unknown; y?: unknown } }
+      | undefined;
     if (vd && typeof vd.vectorNetworkBlob === 'number') {
       const blob = blobs[vd.vectorNetworkBlob];
       if (blob?.bytes) {
         const vn = parseVectorNetworkBlob(blob.bytes);
         if (vn) out._path = vectorNetworkToPath(vn);
+      }
+    }
+    // round 11/12 — fit the path inside the node box. Two mutually-exclusive
+    // branches based on the sign of (size − normalizedSize):
+    //   • size ≥ normalizedSize on both axes → round 11 inset (stroke outset
+    //     pattern, e.g. 700:319 size=20×20 normalized=16×16 → offset (2,2)).
+    //   • any axis has size < normalizedSize → round 12 scale (parametric
+    //     primitive, e.g. 1440:621 ELLIPSE size=80×80 normalized=120×120
+    //     → scale (0.667, 0.667)). Spec round12 §I-2/3.
+    const size = data.size as { x?: unknown; y?: unknown } | undefined;
+    const ns = vd?.normalizedSize;
+    if (
+      size && ns &&
+      typeof size.x === 'number' && typeof size.y === 'number' &&
+      typeof ns.x === 'number' && typeof ns.y === 'number'
+    ) {
+      const dx = size.x - ns.x;
+      const dy = size.y - ns.y;
+      if (dx < 0 || dy < 0) {
+        if (ns.x !== 0 && ns.y !== 0) {
+          out._pathScale = { x: size.x / ns.x, y: size.y / ns.y };
+        }
+      } else if (dx !== 0 || dy !== 0) {
+        out._pathOffset = { x: dx / 2, y: dy / 2 };
       }
     }
   }

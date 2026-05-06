@@ -119,49 +119,49 @@ test.describe('Tier 2 PoC — Undo/Redo round-trip', () => {
     // Undo #1 — back to M1, future depth = 1.
     let res = await request.post(`${BACKEND}/api/undo/${sessionId}`);
     let body = await res.json();
-    expect(body).toMatchObject({ ok: true, undoneLabel: 'Edit', past: 1, future: 1 });
+    expect(body).toMatchObject({ ok: true, direction: 'undo', appliedLabel: 'Edit', past: 1, future: 1 });
     expect(await getCharacters(request, sessionId, guid)).toBe('UNDO_E2E_M1');
 
     // Undo #2 — back to original, past=0, future=2.
     res = await request.post(`${BACKEND}/api/undo/${sessionId}`);
     body = await res.json();
-    expect(body).toMatchObject({ ok: true, undoneLabel: 'Edit', past: 0, future: 2 });
+    expect(body).toMatchObject({ ok: true, direction: 'undo', appliedLabel: 'Edit', past: 0, future: 2 });
     expect(await getCharacters(request, sessionId, guid)).toBe(original);
 
     // Empty-stack undo — I-5 / I-E2: ok=false, no throw, no state change.
     res = await request.post(`${BACKEND}/api/undo/${sessionId}`);
     body = await res.json();
-    expect(body).toMatchObject({ ok: false, undoneLabel: null, past: 0, future: 2 });
+    expect(body).toMatchObject({ ok: false, direction: 'undo', appliedLabel: null, past: 0, future: 2 });
     expect(await getCharacters(request, sessionId, guid)).toBe(original);
 
     // Redo #1 — climb back to M1, past=1, future=1.
     res = await request.post(`${BACKEND}/api/redo/${sessionId}`);
     body = await res.json();
-    expect(body).toMatchObject({ ok: true, redoneLabel: 'Edit', past: 1, future: 1 });
+    expect(body).toMatchObject({ ok: true, direction: 'redo', appliedLabel: 'Edit', past: 1, future: 1 });
     expect(await getCharacters(request, sessionId, guid)).toBe('UNDO_E2E_M1');
 
     // Redo #2 — climb to M2, past=2, future=0.
     res = await request.post(`${BACKEND}/api/redo/${sessionId}`);
     body = await res.json();
-    expect(body).toMatchObject({ ok: true, redoneLabel: 'Edit', past: 2, future: 0 });
+    expect(body).toMatchObject({ ok: true, direction: 'redo', appliedLabel: 'Edit', past: 2, future: 0 });
     expect(await getCharacters(request, sessionId, guid)).toBe('UNDO_E2E_M2');
 
     // Empty redo stack — symmetric of the empty-undo check.
     res = await request.post(`${BACKEND}/api/redo/${sessionId}`);
     body = await res.json();
-    expect(body).toMatchObject({ ok: false, redoneLabel: null, past: 2, future: 0 });
+    expect(body).toMatchObject({ ok: false, direction: 'redo', appliedLabel: null, past: 2, future: 0 });
 
     // I-1: a fresh record() must clear the future stack. Undo back to M1
     // first so future has 1 entry, then PATCH a new value — that record
     // must wipe the future.
     res = await request.post(`${BACKEND}/api/undo/${sessionId}`);
     body = await res.json();
-    expect(body).toMatchObject({ ok: true, past: 1, future: 1 });
+    expect(body).toMatchObject({ ok: true, direction: 'undo', past: 1, future: 1 });
 
     expect((await patch('UNDO_E2E_BRANCH')).ok()).toBeTruthy();
     res = await request.post(`${BACKEND}/api/redo/${sessionId}`);
     body = await res.json();
-    expect(body).toMatchObject({ ok: false, redoneLabel: null });
+    expect(body).toMatchObject({ ok: false, direction: 'redo', appliedLabel: null });
     expect(body.future).toBe(0);
     // past should now be the M1 edit + the BRANCH edit = 2 (M2 was popped
     // into future and then cleared by the BRANCH record).
