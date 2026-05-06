@@ -417,6 +417,47 @@ function NodeShapeImpl({
     onSelect(guid, shift ? 'toggle' : 'replace');
   };
 
+  // Slice 1B (#1) — single-style TEXT branch driven by nodeRender plan. The
+  // inline `if (node.type === 'TEXT')` block below now only handles the
+  // multi-run path (text-styled fallthrough); slice 1D will migrate it.
+  if (plan.kind === 'text-simple') {
+    return (
+      <KText
+        x={plan.drawX}
+        y={plan.drawY}
+        rotation={plan.outer.rotation}
+        opacity={plan.outer.opacity}
+        globalCompositeOperation={plan.outer.blendMode as never}
+        text={plan.text}
+        fontSize={plan.fontSize}
+        fontFamily={plan.fontFamily}
+        fontStyle={plan.fontStyle}
+        textDecoration={plan.textDecoration}
+        letterSpacing={plan.letterSpacing}
+        lineHeight={plan.lineHeight}
+        verticalAlign={plan.verticalAlign}
+        align={plan.align}
+        fill={plan.fill}
+        width={plan.drawWidth}
+        height={plan.drawHeight}
+        shadowEnabled={plan.shadow != null}
+        shadowOffsetX={plan.shadow?.shadowOffsetX}
+        shadowOffsetY={plan.shadow?.shadowOffsetY}
+        shadowBlur={plan.shadow?.shadowBlur}
+        shadowColor={plan.shadow?.shadowColor}
+        shadowOpacity={plan.shadow?.shadowOpacity}
+        draggable={isSelected}
+        onClick={onShapeClick}
+        onTap={onShapeClick}
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        onMouseEnter={onMouseEnter}
+        onMouseLeave={onMouseLeave}
+        listening
+      />
+    );
+  }
+
   if (node.type === 'TEXT') {
     // Render-time text override (per-instance) wins over master textData.
     const rawChars = (node._renderTextOverride as string | undefined) ?? node.textData?.characters ?? '';
@@ -595,6 +636,49 @@ function NodeShapeImpl({
   }
 
   if (plan.kind === 'vector') {
+    const pathEl = (
+      <Path
+        data={plan.path}
+        x={plan.pathOffset.x}
+        y={plan.pathOffset.y}
+        scaleX={plan.pathScale.x}
+        scaleY={plan.pathScale.y}
+        fill={plan.fill}
+        stroke={plan.stroke?.color}
+        strokeWidth={plan.stroke?.width || undefined}
+        fillAfterStrokeEnabled={plan.stroke?.fillAfterStrokeEnabled}
+        dash={plan.dashPattern}
+        lineCap={plan.lineCap}
+        lineJoin={plan.lineJoin}
+        shadowEnabled={plan.shadow != null}
+        shadowOffsetX={plan.shadow?.shadowOffsetX}
+        shadowOffsetY={plan.shadow?.shadowOffsetY}
+        shadowBlur={plan.shadow?.shadowBlur}
+        shadowColor={plan.shadow?.shadowColor}
+        shadowOpacity={plan.shadow?.shadowOpacity}
+        listening
+      />
+    );
+    // Round 13 — INSIDE strokeAlign emulation: wrap the Path in a Group
+    // whose clipFunc fills the same path (with the same x/y/scale) so
+    // the doubled stroke's outer half gets clipped. Only inner half remains
+    // visible — visually identical to Figma's INSIDE.
+    const inner = plan.clipToPath ? (
+      <Group
+        clipFunc={(ctx) => {
+          ctx.translate(plan.pathOffset.x, plan.pathOffset.y);
+          ctx.scale(plan.pathScale.x, plan.pathScale.y);
+          // Path2D parses SVG path strings (modern browsers). jsdom (test
+          // env) can't reach this code — Konva.Layer.draw() is never called
+          // in component unit tests.
+          const p = new Path2D(plan.path);
+          ctx.beginPath();
+          ctx.fill(p);
+        }}
+      >
+        {pathEl}
+      </Group>
+    ) : pathEl;
     return (
       <Group
         x={plan.outer.bbox.x}
@@ -610,27 +694,7 @@ function NodeShapeImpl({
         onMouseEnter={onMouseEnter}
         onMouseLeave={onMouseLeave}
       >
-        <Path
-          data={plan.path}
-          x={plan.pathOffset.x}
-          y={plan.pathOffset.y}
-          scaleX={plan.pathScale.x}
-          scaleY={plan.pathScale.y}
-          fill={plan.fill}
-          stroke={plan.stroke?.color}
-          strokeWidth={plan.stroke?.width || undefined}
-          fillAfterStrokeEnabled={plan.stroke?.fillAfterStrokeEnabled}
-          dash={plan.dashPattern}
-          lineCap={plan.lineCap}
-          lineJoin={plan.lineJoin}
-          shadowEnabled={plan.shadow != null}
-          shadowOffsetX={plan.shadow?.shadowOffsetX}
-          shadowOffsetY={plan.shadow?.shadowOffsetY}
-          shadowBlur={plan.shadow?.shadowBlur}
-          shadowColor={plan.shadow?.shadowColor}
-          shadowOpacity={plan.shadow?.shadowOpacity}
-          listening
-        />
+        {inner}
       </Group>
     );
   }

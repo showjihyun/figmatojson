@@ -78,3 +78,45 @@ export function applyStrokeAlign(
     cornerRadius: offsetCornerRadius(dims.cornerRadius, half),
   };
 }
+
+/**
+ * Round 13 — INSIDE / OUTSIDE strokeAlign emulation for Konva.Path.
+ *
+ * Spec: docs/specs/web-render-fidelity-round13.spec.md
+ *
+ * Konva.Path has no native `stroke-alignment`. We emulate via two
+ * orthogonal Konva plumbings:
+ *   INSIDE  → Group `clipFunc(path)` wrap + strokeWidth*2
+ *             (clip cuts off outer half, only inner half visible)
+ *   OUTSIDE → `fillAfterStrokeEnabled=true` + strokeWidth*2
+ *             (fill paints over inner half, only outer half visible)
+ *
+ * Caller (Canvas.tsx) wraps the Path in a clipFunc Group when
+ * `clipToPath === true`. `fillAfterStrokeEnabled` is passed straight
+ * through as a Konva.Path prop.
+ *
+ * `hasVisibleFill` matters: with no fill, INSIDE/OUTSIDE are visually
+ * identical to CENTER, so we skip the doubling and leave plumbings off.
+ */
+export interface VectorStrokeAlignProps {
+  strokeWidth: number;
+  fillAfterStrokeEnabled: boolean;
+  clipToPath: boolean;
+}
+
+export function applyStrokeAlignToVectorPath(
+  strokeWeight: number | undefined,
+  strokeAlign: StrokeAlign,
+  hasVisibleFill: boolean,
+): VectorStrokeAlignProps {
+  const w = typeof strokeWeight === 'number' && strokeWeight > 0 ? strokeWeight : 0;
+  if (hasVisibleFill && w > 0) {
+    if (strokeAlign === 'INSIDE') {
+      return { strokeWidth: w * 2, fillAfterStrokeEnabled: false, clipToPath: true };
+    }
+    if (strokeAlign === 'OUTSIDE') {
+      return { strokeWidth: w * 2, fillAfterStrokeEnabled: true, clipToPath: false };
+    }
+  }
+  return { strokeWidth: w, fillAfterStrokeEnabled: false, clipToPath: false };
+}

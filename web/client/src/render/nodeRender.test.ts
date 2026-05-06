@@ -99,7 +99,9 @@ describe('nodeRender', () => {
       expect(plan.fill).toBe('transparent');
     });
 
-    it('INSIDE strokeAlign with a visible fill doubles strokeWidth and sets fillAfterStrokeEnabled', () => {
+    it('INSIDE strokeAlign with a visible fill doubles strokeWidth and sets clipToPath', () => {
+      // round 13 §2: INSIDE emulation = clip + width*2 (Canvas wraps the
+      // Path in a clipFunc Group so the doubled stroke's outer half is cut off).
       const plan = nodeRender({
         ...baseVector,
         fillPaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }],
@@ -111,11 +113,30 @@ describe('nodeRender', () => {
       expect(plan.stroke).toEqual({
         color: 'rgba(0,255,0,1.000)',
         width: 4,
-        fillAfterStrokeEnabled: true,
+        fillAfterStrokeEnabled: false,
       });
+      expect(plan.clipToPath).toBe(true);
     });
 
-    it('INSIDE strokeAlign with NO fill skips emulation (would just look thicker)', () => {
+    it('OUTSIDE strokeAlign with a visible fill doubles strokeWidth and sets fillAfterStrokeEnabled', () => {
+      // round 13 §2: OUTSIDE emulation = fill-after-stroke + width*2.
+      const plan = nodeRender({
+        ...baseVector,
+        fillPaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }],
+        strokeWeight: 2,
+        strokePaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }],
+        strokeAlign: 'OUTSIDE',
+      }, emptyCtx());
+      if (plan.kind !== 'vector') throw new Error('expected vector');
+      expect(plan.stroke).toEqual({
+        color: 'rgba(255,0,0,1.000)',
+        width: 4,
+        fillAfterStrokeEnabled: true,
+      });
+      expect(plan.clipToPath).toBe(false);
+    });
+
+    it('INSIDE strokeAlign with NO fill skips emulation (would be visually identical to CENTER)', () => {
       const plan = nodeRender({
         ...baseVector,
         // no fillPaints → fill === 'transparent'
@@ -129,9 +150,10 @@ describe('nodeRender', () => {
         width: 2,
         fillAfterStrokeEnabled: false,
       });
+      expect(plan.clipToPath).toBe(false);
     });
 
-    it('CENTER strokeAlign passes strokeWidth through unchanged', () => {
+    it('CENTER strokeAlign passes strokeWidth through unchanged with no clip/fillAfter', () => {
       const plan = nodeRender({
         ...baseVector,
         fillPaints: [{ type: 'SOLID', color: { r: 1, g: 1, b: 1, a: 1 } }],
@@ -142,6 +164,7 @@ describe('nodeRender', () => {
       if (plan.kind !== 'vector') throw new Error('expected vector');
       expect(plan.stroke?.width).toBe(3);
       expect(plan.stroke?.fillAfterStrokeEnabled).toBe(false);
+      expect(plan.clipToPath).toBe(false);
     });
 
     it('passes through dashPattern when non-empty, undefined otherwise', () => {
@@ -176,9 +199,280 @@ describe('nodeRender', () => {
     });
   });
 
+  describe('text-simple', () => {
+    const baseText = {
+      id: '1:20',
+      type: 'TEXT',
+      transform: { m02: 10, m12: 20 },
+      size: { x: 200, y: 30 },
+      textData: { characters: 'hello' },
+    };
+
+    it('emits a text-simple plan with chars from textData.characters', () => {
+      const plan = nodeRender(baseText, emptyCtx());
+      if (plan.kind !== 'text-simple') throw new Error(`expected text-simple, got ${plan.kind}`);
+      expect(plan.text).toBe('hello');
+      expect(plan.fontSize).toBe(12);          // default
+      expect(plan.fontFamily).toBe('Inter');   // default
+      expect(plan.fill).toBe('#ddd');          // default fallback (no fillPaints)
+    });
+
+    it('uses _renderTextOverride when set, ignoring textData.characters', () => {
+      const plan = nodeRender(
+        { ...baseText, _renderTextOverride: 'OVERRIDDEN' },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+      expect(plan.text).toBe('OVERRIDDEN');
+    });
+
+    it('applies textCase=UPPER after the override resolution', () => {
+      const plan = nodeRender(
+        { ...baseText, textCase: 'UPPER', _renderTextOverride: 'mixedCase' },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+      expect(plan.text).toBe('MIXEDCASE');
+    });
+
+    it('resolves SOLID fillPaints to rgba()', () => {
+      const plan = nodeRender(
+        {
+          ...baseText,
+          fillPaints: [{ type: 'SOLID', color: { r: 0.2, g: 0.4, b: 0.6, a: 0.8 } }],
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+      expect(plan.fill).toBe('rgba(51,102,153,0.8)');
+    });
+
+    it('passes typography fields through their helpers', () => {
+      const plan = nodeRender(
+        {
+          ...baseText,
+          fontSize: 16,
+          fontName: { family: 'Roboto', style: 'Bold Italic' },
+          letterSpacing: { value: 5, units: 'PIXELS' },
+          lineHeight: { value: 24, units: 'PIXELS' },
+          textAlignVertical: 'CENTER',
+          textAlignHorizontal: 'RIGHT',
+          textDecoration: 'UNDERLINE',
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+      expect(plan.fontSize).toBe(16);
+      expect(plan.fontFamily).toBe('Roboto');
+      expect(plan.fontStyle).toBe('italic bold');
+      expect(plan.letterSpacing).toBe(5);
+      expect(plan.lineHeight).toBeCloseTo(24 / 16);
+      expect(plan.verticalAlign).toBe('middle');
+      expect(plan.align).toBe('right');
+      expect(plan.textDecoration).toBe('underline');
+    });
+
+    describe('auto-resize math', () => {
+      it('isFixedWidthMode (NONE) passes size.x as drawWidth', () => {
+        const plan = nodeRender(
+          { ...baseText, textAutoResize: 'NONE' },
+          emptyCtx(),
+        );
+        if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+        expect(plan.drawX).toBe(10);
+        expect(plan.drawWidth).toBe(200);
+      });
+
+      it('isFixedWidthMode (TRUNCATE) passes size.x as drawWidth', () => {
+        const plan = nodeRender(
+          { ...baseText, textAutoResize: 'TRUNCATE' },
+          emptyCtx(),
+        );
+        if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+        expect(plan.drawWidth).toBe(200);
+      });
+
+      it('left-aligned non-fixed mode omits drawWidth (Konva default)', () => {
+        const plan = nodeRender(
+          { ...baseText, textAlignHorizontal: 'LEFT' },
+          emptyCtx(),
+        );
+        if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+        expect(plan.drawX).toBe(10);
+        expect(plan.drawWidth).toBeUndefined();
+      });
+
+      it('center-aligned overflow shifts drawX symmetrically and uses natural width', () => {
+        const ctx: RenderContext = {
+          isolation: null,
+          measureText: () => 300, // natural > baseW (200)
+        };
+        const plan = nodeRender(
+          { ...baseText, textAlignHorizontal: 'CENTER' },
+          ctx,
+        );
+        if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+        // overflow = 300 - 200 = 100; drawX shifts left by 50.
+        expect(plan.drawX).toBe(10 - 50);
+        expect(plan.drawWidth).toBe(300);
+      });
+
+      it('right-aligned overflow shifts drawX leftward by full overflow', () => {
+        const ctx: RenderContext = {
+          isolation: null,
+          measureText: () => 280, // overflow = 80
+        };
+        const plan = nodeRender(
+          { ...baseText, textAlignHorizontal: 'RIGHT' },
+          ctx,
+        );
+        if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+        expect(plan.drawX).toBe(10 - 80);
+        expect(plan.drawWidth).toBe(280);
+      });
+
+      it('center-aligned NO overflow keeps drawX at outer.bbox.x and uses baseW', () => {
+        const ctx: RenderContext = {
+          isolation: null,
+          measureText: () => 100, // natural <= baseW
+        };
+        const plan = nodeRender(
+          { ...baseText, textAlignHorizontal: 'CENTER' },
+          ctx,
+        );
+        if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+        expect(plan.drawX).toBe(10);
+        expect(plan.drawWidth).toBe(200);
+      });
+
+      it('center-aligned with baseW=0 (zero-width master) skips overflow math', () => {
+        const ctx: RenderContext = {
+          isolation: null,
+          measureText: () => 100, // 100 > 0 but baseW=0 short-circuits
+        };
+        const plan = nodeRender(
+          {
+            ...baseText,
+            size: { x: 0, y: 30 },
+            textAlignHorizontal: 'CENTER',
+          },
+          ctx,
+        );
+        if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+        expect(plan.drawX).toBe(10);
+        expect(plan.drawWidth).toBeUndefined();
+      });
+
+      it('passes the right typography args to measureText for center/right overflow detection', () => {
+        const calls: Array<unknown[]> = [];
+        const ctx: RenderContext = {
+          isolation: null,
+          measureText: (...args) => {
+            calls.push(args);
+            return 250;
+          },
+        };
+        nodeRender(
+          {
+            ...baseText,
+            fontSize: 14,
+            fontName: { family: 'Roboto', style: 'Italic' },
+            letterSpacing: { value: 2, units: 'PIXELS' },
+            textAlignHorizontal: 'CENTER',
+            _renderTextOverride: 'CHECK',
+          },
+          ctx,
+        );
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toEqual(['CHECK', 14, 'Roboto', 'italic', 2]);
+      });
+    });
+
+    it('resolves shadowFromEffects', () => {
+      const plan = nodeRender(
+        {
+          ...baseText,
+          effects: [{
+            type: 'DROP_SHADOW',
+            offset: { x: 2, y: 3 },
+            radius: 4,
+            color: { r: 0, g: 0, b: 0, a: 1 },
+          }],
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
+      expect(plan.shadow?.shadowOffsetX).toBe(2);
+      expect(plan.shadow?.shadowOffsetY).toBe(3);
+    });
+  });
+
+  describe('text-styled fallthrough', () => {
+    it('returns fallthrough with reason=text-styled when characterStyleIDs + styleOverrideTable mark a styled run', () => {
+      const plan = nodeRender(
+        {
+          id: '1:30',
+          type: 'TEXT',
+          transform: { m02: 0, m12: 0 },
+          size: { x: 100, y: 20 },
+          textData: {
+            characters: 'AB',
+            characterStyleIDs: [0, 1],
+            styleOverrideTable: [
+              { styleID: 1, fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }] },
+            ],
+          },
+        },
+        emptyCtx(),
+      );
+      expect(plan).toEqual({ kind: 'fallthrough', reason: 'text-styled' });
+    });
+
+    it('renders simple when _renderTextOverride is set, even with style data (override+runs not v1)', () => {
+      // Spec web-canvas-text-style-runs.spec.md §3.2 — override + runs is v1
+      // 비대상; falls back to single KText with base style.
+      const plan = nodeRender(
+        {
+          id: '1:31',
+          type: 'TEXT',
+          transform: { m02: 0, m12: 0 },
+          size: { x: 100, y: 20 },
+          _renderTextOverride: 'OVERRIDE',
+          textData: {
+            characters: 'AB',
+            characterStyleIDs: [0, 1],
+            styleOverrideTable: [
+              { styleID: 1, fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }] },
+            ],
+          },
+        },
+        emptyCtx(),
+      );
+      expect(plan.kind).toBe('text-simple');
+    });
+
+    it('renders simple when style table has only the base styleID (no styled runs)', () => {
+      const plan = nodeRender(
+        {
+          id: '1:32',
+          type: 'TEXT',
+          transform: { m02: 0, m12: 0 },
+          size: { x: 100, y: 20 },
+          textData: {
+            characters: 'AB',
+            characterStyleIDs: [0, 0],
+            styleOverrideTable: [],
+          },
+        },
+        emptyCtx(),
+      );
+      expect(plan.kind).toBe('text-simple');
+    });
+  });
+
   describe('fallthrough', () => {
-    it('returns fallthrough for FRAME / RECTANGLE / TEXT (slice 1A scope)', () => {
-      for (const type of ['FRAME', 'RECTANGLE', 'TEXT', 'INSTANCE', 'SYMBOL']) {
+    it('returns fallthrough for FRAME / RECTANGLE / INSTANCE / SYMBOL (paint-stack pending 1C)', () => {
+      for (const type of ['FRAME', 'RECTANGLE', 'INSTANCE', 'SYMBOL']) {
         const plan = nodeRender(
           { id: 'x', type, transform: { m02: 0, m12: 0 }, size: { x: 1, y: 1 } },
           emptyCtx(),
