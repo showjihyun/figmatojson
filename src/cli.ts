@@ -18,6 +18,7 @@ import { generateEditableHtml } from './editable-html.js';
 import { generateHtmlDashboard, generateRoundTripHtml } from './html-export.js';
 import { generatePenExport } from './pen-export.js';
 import { buildByteLevelFigBuffer } from './repack.js';
+import { extractTokens, formatTokens, type TokenFormat } from './tokens.js';
 import {
   dumpStage1Container,
   dumpStage2Archive,
@@ -174,6 +175,16 @@ Subcommand: pen-export — Pencil .pen 형식 호환 단순 JSON
         hex fill, SVG path geometry, auto-layout 직접 표현.
         편집 시 가장 직관적. round-trip은 sidecar 메타와 결합.
 
+Subcommand: tokens — 디자인 토큰 추출 (color / typography / effect styles)
+  Arguments:
+    <input.fig>            .fig 파일
+  Options:
+    --format json|css|js|ts  출력 포맷 (default: json)
+    --out <path>             파일 저장 (생략 시 stdout)
+  설명: Figma 의 published styles 을 schemaVersion 1 의 Tokens shape 으로 추출.
+        FILL → colors, TEXT → typography, EFFECT → effects. v1 spacing 미지원,
+        variables (modes) 는 default mode 로 resolve. spec: docs/specs/tokens.spec.md.
+
 Examples:
   figma-reverse extract design.fig
   figma-reverse extract "/path/to/My Design.fig" ./out --minify
@@ -226,6 +237,9 @@ async function main(): Promise<void> {
   }
   if (cmd === 'pen-export') {
     return runPenExport(argv.slice(1));
+  }
+  if (cmd === 'tokens') {
+    return runTokens(argv.slice(1));
   }
   // backwards-compat: 첫 인자가 .fig면 extract로 간주
   return runExtract(argv);
@@ -889,6 +903,50 @@ function badge(s: string): string {
       return '⚪';
     default:
       return s;
+  }
+}
+
+async function runTokens(args: string[]): Promise<void> {
+  let input = '';
+  let outPath: string | undefined;
+  let format: TokenFormat = 'json';
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--format' || a === '-f') {
+      const v = args[++i];
+      if (v !== 'json' && v !== 'css' && v !== 'js' && v !== 'ts') {
+        fatal(`unknown --format value: ${v} (json|css|js|ts)`);
+      }
+      format = v;
+    } else if (a === '--out' || a === '-o') {
+      outPath = args[++i];
+    } else if (!input) {
+      input = a!;
+    }
+  }
+  if (!input) {
+    process.stderr.write('error: tokens requires <input.fig>\n\n');
+    process.stderr.write('Usage:\n');
+    process.stderr.write('  figma-reverse tokens <input.fig> [--format=json|css|js|ts] [--out <path>]\n');
+    process.exit(1);
+  }
+  const inputPath = resolve(input);
+  if (!existsSync(inputPath)) fatal(`input .fig not found: ${inputPath}`);
+
+  const container = loadContainer(inputPath);
+  const decoded = decodeFigCanvas(container.canvasFig);
+  const tokens = extractTokens(decoded, basename(inputPath));
+  const text = formatTokens(tokens, format);
+
+  if (outPath) {
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(resolve(outPath), text, 'utf-8');
+    log(`▶ tokens written: ${resolve(outPath)} (${format}) — ` +
+      `${Object.keys(tokens.colors).length} colors, ` +
+      `${Object.keys(tokens.typography).length} typography, ` +
+      `${Object.keys(tokens.effects).length} effects`);
+  } else {
+    process.stdout.write(text);
   }
 }
 
