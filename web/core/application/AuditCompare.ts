@@ -106,6 +106,28 @@ function normalizeType(t: unknown): unknown {
 }
 
 /**
+ * Per-field value aliases for enums whose binary value is preserved across
+ * schemas but whose name was renamed between schema versions. We normalize
+ * both sides through this map before equality checks so a kiwi-stored
+ * legacy name compares equal to its current Figma alias.
+ *
+ * Round 32 (R12-D): stackPrimaryAlignItems `SPACE_EVENLY` (kiwi value=3) ↔
+ * `SPACE_BETWEEN` (Figma current). Same wire-format value, different
+ * label. See audit-oracle.spec.md §5.4 / §I-A9b.
+ */
+const VALUE_ALIASES: Record<string, Record<string, string>> = {
+  stackPrimaryAlignItems: {
+    SPACE_EVENLY: 'SPACE_BETWEEN',
+  },
+};
+
+function aliasValue(field: string, value: unknown): unknown {
+  const map = VALUE_ALIASES[field];
+  if (!map || typeof value !== 'string') return value;
+  return map[value] ?? value;
+}
+
+/**
  * Per-field default values. When the Figma REST API serializes a node it
  * omits fields equal to their type-default — Figma's plugin sandbox emits
  * them only when non-default (see `figma-plugin/code.js`). Our parser
@@ -270,6 +292,40 @@ function indexById(
   }
 }
 
+/**
+ * Round 32 (R12-A): predicate used as a `gate` on transform.m02/m12/size.x/y.
+ * REST emits `absoluteBoundingBox` (post-rotation axis-aligned bbox) while
+ * kiwi carries the pre-rotation anchor inside `transform`. The two have
+ * different meaning on rotated nodes, so skip those entries when either
+ * side reports rotation. Plugin trials are unaffected — plugin emits
+ * pre-rotation `node.x/y` so its baseline (bvp/metarich 99.47%) keeps
+ * comparing the same fields. See audit-oracle.spec.md §I-A4c.
+ */
+function notRotatedGate(figma: Record<string, unknown>, ours: Record<string, unknown>): boolean {
+  const fr = figma.rotation;
+  if (typeof fr === 'number' && Math.abs(fr) > 1e-9) return false;
+  const t = ours.transform as { m00?: number; m01?: number } | undefined;
+  if (t && typeof t === 'object') {
+    const m00 = typeof t.m00 === 'number' ? t.m00 : 1;
+    const m01 = typeof t.m01 === 'number' ? t.m01 : 0;
+    // m00 < 0 alone means 180° rotation (700:160 reproduction); m01 != 0
+    // covers any non-trivial rotation.
+    if (m00 < 0 || Math.abs(m01) > 1e-9) return false;
+  }
+  return true;
+}
+
+/**
+ * Round 32 (R12-B): rotation field uses 360°-wrap modular tolerance instead
+ * of the generic 0.5 absolute-diff. Same physical rotation can be reported
+ * with different signs (180/-180) or after atan2 derivation drift near
+ * ±90°. Returns the [-180, 180] normalized diff. Spec §I-A15a.
+ */
+function modularRotationDiff(a: number, b: number): number {
+  const raw = ((a - b) % 360 + 540) % 360 - 180;
+  return Math.abs(raw);
+}
+
 /** Compare a single comparable field. Returns true if the values differ. */
 function fieldDiffers(field: string, orig: unknown, rt: unknown): boolean {
   // Type aliasing: normalize both sides before comparing the `type` field.
@@ -277,6 +333,10 @@ function fieldDiffers(field: string, orig: unknown, rt: unknown): boolean {
     orig = normalizeType(orig);
     rt = normalizeType(rt);
   }
+  // R12-D — value-level enum alias for fields whose schema-encoded name
+  // was renamed but whose binary value is preserved.
+  orig = aliasValue(field, orig);
+  rt = aliasValue(field, rt);
   // Substitute default for `undefined` on either side when the field has a
   // known default (REST API / plugin emit-on-non-default convention vs. our
   // parser always materializes). After substitution we fall through to
@@ -291,6 +351,10 @@ function fieldDiffers(field: string, orig: unknown, rt: unknown): boolean {
   if (orig == null && rt == null) return false;
   // NaN === NaN false in JS — treat both-NaN as equal.
   if (typeof orig === 'number' && typeof rt === 'number' && Number.isNaN(orig) && Number.isNaN(rt)) return false;
+  // R12-B — rotation: modular wrap tolerance (180/-180 etc. equal).
+  if (field === 'rotation' && typeof orig === 'number' && typeof rt === 'number') {
+    return modularRotationDiff(orig, rt) >= 0.5;
+  }
   // Floating-point tolerance — Figma plugin returns floats, our parser
   // sometimes round-trips through Float32 (Math.fround). 0.5px below screen
   // resolution is invisible.
@@ -327,10 +391,33 @@ const COMPARABLE_FIELDS: Array<{
     same('type', (n) => n.type),
     same('name', (n) => n.name),
     same('visible', (n) => n.visible),
-    same('size.x', (n) => (n.size as { x?: number } | undefined)?.x),
-    same('size.y', (n) => (n.size as { y?: number } | undefined)?.y),
-    same('transform.m02', (n) => (n.transform as { m02?: number } | undefined)?.m02),
-    same('transform.m12', (n) => (n.transform as { m12?: number } | undefined)?.m12),
+    // R12-A — geometry fields are gated when either side carries rotation;
+    // the kiwi pre-rotation anchor and REST post-rotation bbox use different
+    // coordinate conventions. Spec §I-A4c.
+    {
+      field: 'size.x',
+      pickFigma: (n) => (n.size as { x?: number } | undefined)?.x,
+      pickOurs: (n) => (n.size as { x?: number } | undefined)?.x,
+      gate: notRotatedGate,
+    },
+    {
+      field: 'size.y',
+      pickFigma: (n) => (n.size as { y?: number } | undefined)?.y,
+      pickOurs: (n) => (n.size as { y?: number } | undefined)?.y,
+      gate: notRotatedGate,
+    },
+    {
+      field: 'transform.m02',
+      pickFigma: (n) => (n.transform as { m02?: number } | undefined)?.m02,
+      pickOurs: (n) => (n.transform as { m02?: number } | undefined)?.m02,
+      gate: notRotatedGate,
+    },
+    {
+      field: 'transform.m12',
+      pickFigma: (n) => (n.transform as { m12?: number } | undefined)?.m12,
+      pickOurs: (n) => (n.transform as { m12?: number } | undefined)?.m12,
+      gate: notRotatedGate,
+    },
     {
       // Plugin returns `node.rotation` in *degrees*; kiwi stores rotation
       // inside the transform matrix (m00/m01/m10/m11) and doesn't surface
