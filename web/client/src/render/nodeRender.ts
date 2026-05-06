@@ -53,6 +53,7 @@ import {
   konvaVerticalAlign,
 } from '../lib/textStyle.js';
 import { applyTextCase, konvaTextDecoration } from '../lib/textTransform.js';
+import { effectiveTextStyle } from '@core/domain/colorStyleRef';
 import { hasStyledRuns, splitTextRuns } from '../lib/textStyleRuns.js';
 import { solidFillCss, strokeFromPaints } from '@core/domain/color';
 import { imageHashHex } from '@core/domain/image';
@@ -90,6 +91,15 @@ export interface RenderContext {
     fontStyle: string | undefined,
     letterSpacing: number | undefined,
   ) => number;
+
+  /**
+   * Document root used to resolve `styleIdForText` aliases on TEXT nodes
+   * (round 16). When provided, planTextSimple / planTextStyled overlay
+   * the referenced style asset's typography on top of the node's raw
+   * fields. Optional — old callers and unit tests may pass undefined,
+   * in which case all fields fall back to node raw (= pre-round-16).
+   */
+  documentRoot?: unknown;
 }
 
 export interface NodeOuterFrame {
@@ -355,20 +365,27 @@ function planTextSimple(node: Record<string, unknown>, ctx: RenderContext): Node
   const textData = node.textData as { characters?: string } | undefined;
   const rawChars =
     typeof renderOverride === 'string' ? renderOverride : textData?.characters ?? '';
-  // textCase applies AFTER the per-instance override (round 5 §6 Resolved
-  // questions): override sets the literal string, render-time case shapes it.
-  const text = applyTextCase(rawChars, node.textCase as string | undefined);
+  // Round 16 — overlay styleIdForText asset onto raw before reading
+  // typography. Per-field fallback inside the helper. textCase comes
+  // from the same effective set; applies AFTER the per-instance text
+  // override (round 5 §6 Resolved questions).
+  const eff = effectiveTextStyle(node, ctx.documentRoot);
+  const text = applyTextCase(rawChars, eff.textCase ?? (node.textCase as string | undefined));
 
-  const fontSize = typeof node.fontSize === 'number' ? (node.fontSize as number) : 12;
-  const fontName = node.fontName as { family?: string; style?: string } | undefined;
+  const fontSize = typeof eff.fontSize === 'number'
+    ? eff.fontSize
+    : typeof node.fontSize === 'number' ? (node.fontSize as number) : 12;
+  const fontName = (eff.fontName ?? node.fontName) as { family?: string; style?: string } | undefined;
   const fontFamily = fontName?.family ?? 'Inter';
   const fontStyle = konvaFontStyle(fontName?.style);
-  const textDecoration = konvaTextDecoration(node.textDecoration as string | undefined);
+  const textDecoration = konvaTextDecoration(
+    (eff.textDecoration ?? node.textDecoration) as string | undefined,
+  );
   const letterSpacing = konvaLetterSpacing(
-    node.letterSpacing as never,
+    (eff.letterSpacing ?? node.letterSpacing) as never,
     fontSize,
   );
-  const lineHeight = konvaLineHeight(node.lineHeight as never, fontSize);
+  const lineHeight = konvaLineHeight((eff.lineHeight ?? node.lineHeight) as never, fontSize);
   const verticalAlign = konvaVerticalAlign(node.textAlignVertical as string | undefined);
   const align = konvaTextAlign(node.textAlignHorizontal as string | undefined);
   const fill = textBaseFillColor(node);
@@ -583,20 +600,31 @@ function planTextStyled(node: Record<string, unknown>, ctx: RenderContext): Node
 
   // Reachable only when needsStyledTextRuns returned true, which guarantees
   // textData with both arrays present and no _renderTextOverride.
-  const fontSize = typeof node.fontSize === 'number' ? (node.fontSize as number) : 12;
-  const fontName = node.fontName as { family?: string; style?: string } | undefined;
+  // Round 16 — overlay styleIdForText asset onto raw before reading
+  // typography. Per-character overrides (round 26) stack on top later;
+  // base must be effective-correct first.
+  const eff = effectiveTextStyle(node, ctx.documentRoot);
+  const fontSize = typeof eff.fontSize === 'number'
+    ? eff.fontSize
+    : typeof node.fontSize === 'number' ? (node.fontSize as number) : 12;
+  const fontName = (eff.fontName ?? node.fontName) as { family?: string; style?: string } | undefined;
   const fontFamily = fontName?.family ?? 'Inter';
   const fontStyle = konvaFontStyle(fontName?.style);
-  const textDecoration = konvaTextDecoration(node.textDecoration as string | undefined);
+  const textDecoration = konvaTextDecoration(
+    (eff.textDecoration ?? node.textDecoration) as string | undefined,
+  );
   const letterSpacing = konvaLetterSpacing(
-    node.letterSpacing as never,
+    (eff.letterSpacing ?? node.letterSpacing) as never,
     fontSize,
   );
-  const lineHeight = konvaLineHeight(node.lineHeight as never, fontSize);
+  const lineHeight = konvaLineHeight((eff.lineHeight ?? node.lineHeight) as never, fontSize);
   const verticalAlign = konvaVerticalAlign(node.textAlignVertical as string | undefined);
 
   const baseFill = textBaseFillColor(node);
-  const chars = applyTextCase(textData.characters ?? '', node.textCase as string | undefined);
+  const chars = applyTextCase(
+    textData.characters ?? '',
+    (eff.textCase ?? node.textCase) as string | undefined,
+  );
   const rawRuns = splitTextRuns(
     chars,
     textData.characterStyleIDs,
