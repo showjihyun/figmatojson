@@ -352,12 +352,14 @@ describe('LayerTree — COMPONENT_SET self-expand on selection (spec I-F11.5b)',
       );
     }
     const { rerender } = render(<Harness sel={new Set()} />);
-    expect(screen.queryByText('size=XL, State=default')).toBeNull();
+    // Round 14 — variant `prop=` prefixes are stripped in the LayerTree.
+    // raw "size=XL, State=default" → display "XL, default".
+    expect(screen.queryByText('XL, default')).toBeNull();
 
     rerender(<Harness sel={new Set(['0:1'])} />);
-    expect(screen.getByText('size=XL, State=default')).toBeTruthy();
-    expect(screen.getByText('size=XL, State=hover')).toBeTruthy();
-    expect(screen.getByText('size=XL, State=disabled')).toBeTruthy();
+    expect(screen.getByText('XL, default')).toBeTruthy();
+    expect(screen.getByText('XL, hover')).toBeTruthy();
+    expect(screen.getByText('XL, disabled')).toBeTruthy();
   });
 });
 

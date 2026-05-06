@@ -12,6 +12,7 @@ import { useMemo, useState } from 'react';
 import { Component as ComponentIcon, Search } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { variantLabelText } from '@/lib/variantLabel';
 
 interface DocNode {
   guid?: { sessionID?: number; localID?: number };
@@ -62,7 +63,9 @@ export function collectAssets(doc: DocNode | null, pages: DocNode[]): AssetEntry
         if (guid) {
           out.push({
             guid,
-            name: n.name ?? '',
+            // Round 14 — strip variant `prop=` prefixes for display.
+            // variantLabelText is a no-op for non-variant names.
+            name: variantLabelText(n.name) ?? '',
             type: n.type,
             pageIdx,
             pageName,
