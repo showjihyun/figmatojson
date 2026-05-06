@@ -37,26 +37,13 @@ import {
 import { type HoverInfo } from './components/canvas/HoverTooltip';
 import { HoverOverlay } from './components/canvas/HoverOverlay';
 import { countVariantChildren } from './lib/variants';
-import {
-  konvaFontStyle,
-  konvaLetterSpacing,
-  konvaLineHeight,
-  konvaTextAlign,
-  konvaVerticalAlign,
-} from './lib/textStyle';
 import { nodeRender, type RenderContext } from './render/nodeRender';
-import { shadowFromEffects } from './lib/shadow';
 import { InnerShadowOverlay } from './components/canvas/InnerShadowOverlay';
-import { konvaBlendMode } from './lib/blendMode';
 import { computeImageCrop } from './lib/imageScale';
 import { LayerBlurWrapper } from './components/canvas/LayerBlurWrapper';
 import { variantLabelText } from './lib/variantLabel';
 import { VariantLabel } from './components/canvas/VariantLabel';
 import { rotationDegrees } from './lib/transform';
-import { firstStopRgba, gradientFromPaint, type KonvaGradient } from './lib/gradient';
-import { pickTopPaint } from './lib/paint';
-import { applyTextCase, konvaTextDecoration } from './lib/textTransform';
-import { splitTextRuns, hasStyledRuns, type StyleRun } from './lib/textStyleRuns';
 
 // Singleton 2D context for measuring per-run text widths when a TEXT node
 // carries character-range fills (web-canvas-text-style-runs.spec.md §3.2
@@ -321,27 +308,11 @@ function NodeShapeImpl({
   const plan = nodeRender(node as Record<string, unknown>, renderCtx);
   if (plan.kind === 'hidden') return null;
 
+  // x, y stay as locals because the drag handler closes over the
+  // pre-drag position to compute deltas; everything else (rotation,
+  // opacity, blendMode, w/h, paint-stack details) lives on the plan.
   const x = node.transform?.m02 ?? 0;
   const y = node.transform?.m12 ?? 0;
-  // w/h are still consumed by the inline TEXT single-KText defensive
-  // fallback (slice 1D will remove it). All other paint-stack locals
-  // (stroke / cornerR / isAncestorOfIsolated) moved into nodeRender's plan.
-  const w = node.size?.x ?? 0;
-  const h = node.size?.y ?? 0;
-
-  // Universal Figma props (round 3):
-  //   - rotation: pure-rotation matrices → degrees; skew falls through to
-  //     translation-only (spec I-R3).
-  //   - opacity: pass through 0..1; undefined when 1 / missing.
-  // Both apply on the OUTER element (Group / KText) so children inherit.
-  const rotation = rotationDegrees(node.transform);
-  const opacity = typeof node.opacity === 'number' && node.opacity !== 1
-    ? node.opacity
-    : undefined;
-  // Node-level blendMode (round 9 §4) — applied to the outer element
-  // so the whole node composites with siblings using the chosen mode.
-  // PASS_THROUGH and NORMAL pass through to undefined (default).
-  const nodeBlend = konvaBlendMode(node.blendMode as string | undefined);
 
   // Hover: skip for instance master expansions so hover bubbles up to the
   // outer INSTANCE (spec I-S5). e.cancelBubble in onMouseEnter ensures the
@@ -432,171 +403,17 @@ function NodeShapeImpl({
     );
   }
 
-  if (node.type === 'TEXT') {
-    // Render-time text override (per-instance) wins over master textData.
-    const rawChars = (node._renderTextOverride as string | undefined) ?? node.textData?.characters ?? '';
-    // textCase applies AFTER the override (spec round5 §6 Resolved
-    // questions): instance override sets the literal string, then the
-    // render-time case transform shapes it for display.
-    const chars = applyTextCase(rawChars, node.textCase);
-    const textDecoration = konvaTextDecoration(node.textDecoration);
-    const fontSize = node.fontSize ?? 12;
-    const fontFamily = node.fontName?.family ?? 'Inter';
-    const baseFillColor = (() => {
-      const fills = node.fillPaints;
-      if (!Array.isArray(fills)) return '#ddd';
-      const first = fills.find((p: any) => p?.type === 'SOLID' && p?.visible !== false);
-      if (!first?.color) return '#ddd';
-      const { r = 0, g = 0, b = 0, a = 1 } = first.color;
-      return `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)},${a})`;
-    })();
-    // Spec web-render-fidelity-high.spec.md §3.1–3.5 — pull the additional
-    // typography fields off the kiwi node and pass them through. Helpers
-    // return undefined for absent / default values so JSX spread props
-    // fall back to Konva's defaults without explicit branching here.
-    const letterSpacing = konvaLetterSpacing(node.letterSpacing, fontSize);
-    const lineHeight = konvaLineHeight(node.lineHeight, fontSize);
-    const verticalAlign = konvaVerticalAlign(node.textAlignVertical);
-    const align = konvaTextAlign(node.textAlignHorizontal);
-    const fontStyle = konvaFontStyle(node.fontName?.style);
-    const shadow = shadowFromEffects(node.effects);
-
-    // Style runs (web-canvas-text-style-runs.spec.md). Only branches into
-    // the multi-KText path when the node carries per-character style data
-    // AND a render-time text override is NOT in effect (override + runs
-    // composition is v1 비대상 — fallback to single KText with base style).
-    const useStyleRuns =
-      typeof node._renderTextOverride !== 'string' &&
-      node.textData &&
-      Array.isArray(node.textData.characterStyleIDs) &&
-      Array.isArray(node.textData.styleOverrideTable);
-    const runs: StyleRun[] = useStyleRuns
-      ? splitTextRuns(chars, node.textData.characterStyleIDs, node.textData.styleOverrideTable)
-      : [];
-    const renderRuns = useStyleRuns && hasStyledRuns(runs);
-
-    if (renderRuns) {
-      // Per-run fill resolution: override.fillPaints[0] when present,
-      // else the base node fill. Same SOLID-only assumption as the
-      // single-KText path above.
-      const runFill = (r: StyleRun): string => {
-        const fps = r.override.fillPaints;
-        if (!Array.isArray(fps)) return baseFillColor;
-        const first = fps.find((p: any) => p?.type === 'SOLID' && p?.visible !== false);
-        if (!first?.color) return baseFillColor;
-        const { r: cr = 0, g: cg = 0, b: cb = 0, a: ca = 1 } = first.color;
-        return `rgba(${Math.round(cr * 255)},${Math.round(cg * 255)},${Math.round(cb * 255)},${ca})`;
-      };
-      // Compute cumulative x offsets via canvas.measureText. Each run is
-      // measured with the same typography settings — v1 doesn't honour
-      // per-run fontSize/fontFamily overrides (spec §5 비대상), so the
-      // measurement font is constant across runs.
-      const offsets: number[] = [0];
-      for (let i = 0; i < runs.length - 1; i++) {
-        const w = measureRunWidth(runs[i].text, fontSize, fontFamily, fontStyle, letterSpacing);
-        offsets.push(offsets[offsets.length - 1] + w);
-      }
-      return (
-        <Group
-          x={x}
-          y={y}
-          rotation={rotation}
-          opacity={opacity}
-          globalCompositeOperation={nodeBlend as never}
-          draggable={isSelected}
-          onClick={onShapeClick}
-          onTap={onShapeClick}
-          onDragStart={onDragStart}
-          onDragEnd={onDragEnd}
-          onMouseEnter={onMouseEnter}
-          onMouseLeave={onMouseLeave}
-        >
-          {runs.map((r, i) => (
-            <KText
-              key={i}
-              x={offsets[i]}
-              y={0}
-              text={r.text}
-              fontSize={fontSize}
-              fontFamily={fontFamily}
-              fontStyle={fontStyle}
-              textDecoration={textDecoration}
-              letterSpacing={letterSpacing}
-              lineHeight={lineHeight}
-              verticalAlign={verticalAlign}
-              fill={runFill(r)}
-              listening={false}
-            />
-          ))}
-        </Group>
-      );
-    }
-
-    // Figma's textAutoResize semantics (web-canvas-text-frame-fidelity.spec.md
-    // §2.1 I-1): HEIGHT / WIDTH_AND_HEIGHT / undefined → text renders at its
-    // natural width; the master size.x is just the design-time measured
-    // width (informational, not a hard clip). Passing width=size.x to KText
-    // produces visible clipping ("Button" → "Butto") whenever our font
-    // measures even 1-2px wider than Figma's source font.
-    //
-    // Two cases:
-    //   - align is unset / 'left' / 'justify': omit width entirely. KText
-    //     renders at natural width, no clipping risk.
-    //   - align is 'center' / 'right': width is needed for alignment to
-    //     work, but if the natural text is wider than the master width
-    //     we grow the KText box symmetrically (center) or leftward (right)
-    //     to fit, AND shift x so the visual position stays anchored
-    //     where Figma intended.
-    //   - textAutoResize 'NONE' / 'TRUNCATE': respect the master width as
-    //     a hard limit (rare).
-    const isFixedWidthMode =
-      node.textAutoResize === 'NONE' || node.textAutoResize === 'TRUNCATE';
-    let ktextX = x;
-    let ktextWidth: number | undefined;
-    if (isFixedWidthMode) {
-      ktextWidth = w || undefined;
-    } else if (align === 'center' || align === 'right') {
-      const baseW = w || 0;
-      const natural = measureRunWidth(chars, fontSize, fontFamily, fontStyle, letterSpacing);
-      if (natural > baseW && baseW > 0) {
-        const overflow = natural - baseW;
-        if (align === 'center') {
-          ktextX = x - overflow / 2;
-        } else {
-          ktextX = x - overflow;
-        }
-        ktextWidth = natural;
-      } else {
-        ktextWidth = baseW || undefined;
-      }
-    } else {
-      ktextWidth = undefined;
-    }
+  // Slice 1D (#1) — multi-run TEXT branch driven by the nodeRender plan.
+  // Each TextStyledRun carries its substring, cumulative offsetX, and
+  // resolved fill color; NodeShapeImpl just maps runs to KText elements.
+  if (plan.kind === 'text-styled') {
     return (
-      <KText
-        x={ktextX}
-        y={y}
-        rotation={rotation}
-        opacity={opacity}
-        globalCompositeOperation={nodeBlend as never}
-        text={chars}
-        fontSize={fontSize}
-        fontFamily={fontFamily}
-        fontStyle={fontStyle}
-        textDecoration={textDecoration}
-        letterSpacing={letterSpacing}
-        lineHeight={lineHeight}
-        verticalAlign={verticalAlign}
-        align={align}
-        fill={baseFillColor}
-        width={ktextWidth}
-        height={h || undefined}
-        shadowEnabled={shadow != null}
-        shadowOffsetX={shadow?.shadowOffsetX}
-        shadowOffsetY={shadow?.shadowOffsetY}
-        shadowBlur={shadow?.shadowBlur}
-        shadowColor={shadow?.shadowColor}
-        shadowOpacity={shadow?.shadowOpacity}
+      <Group
+        x={plan.outer.bbox.x}
+        y={plan.outer.bbox.y}
+        rotation={plan.outer.rotation}
+        opacity={plan.outer.opacity}
+        globalCompositeOperation={plan.outer.blendMode as never}
         draggable={isSelected}
         onClick={onShapeClick}
         onTap={onShapeClick}
@@ -604,8 +421,25 @@ function NodeShapeImpl({
         onDragEnd={onDragEnd}
         onMouseEnter={onMouseEnter}
         onMouseLeave={onMouseLeave}
-        listening
-      />
+      >
+        {plan.runs.map((r, i) => (
+          <KText
+            key={i}
+            x={r.offsetX}
+            y={0}
+            text={r.text}
+            fontSize={plan.fontSize}
+            fontFamily={plan.fontFamily}
+            fontStyle={plan.fontStyle}
+            textDecoration={plan.textDecoration}
+            letterSpacing={plan.letterSpacing}
+            lineHeight={plan.lineHeight}
+            verticalAlign={plan.verticalAlign}
+            fill={r.fill}
+            listening={false}
+          />
+        ))}
+      </Group>
     );
   }
 

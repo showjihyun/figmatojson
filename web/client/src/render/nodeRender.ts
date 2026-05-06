@@ -5,7 +5,7 @@
  * node's visual decisions. The plan is consumed by Canvas's NodeShape
  * component, which translates it into Konva elements + handlers.
  *
- * Migrated kinds so far:
+ * Migrated kinds:
  *   - 'hidden'       — Effective Visibility false / isolation hide. (1A)
  *   - 'vector'       — VECTOR_TYPES with a precomputed _path string. (1A)
  *   - 'text-simple'  — TEXT nodes that don't need per-character style runs.
@@ -14,8 +14,13 @@
  *                      / SECTION / SYMBOL: multi-paint stacking, stroke
  *                      (uniform or per-side), shadow / inner shadow / layer
  *                      blur, frame clip. (1C)
- *   - 'fallthrough'  — text-styled (multi-run TEXT) only; the inline branch
- *                      in Canvas.tsx handles it until 1D.
+ *   - 'text-styled'  — TEXT nodes with per-character styled runs. The plan
+ *                      pre-resolves each run's fill + cumulative x-offset so
+ *                      Canvas just maps runs to KText elements. (1D)
+ *
+ * `'fallthrough'` is still in the union as a defensive escape hatch but the
+ * dispatch below never returns it after 1D. Canvas treats any unrecognised
+ * kind as render-nothing.
  *
  * The function is pure — no React, no Konva, no DOM. Callers that need
  * browser-only operations (text width measurement) inject them via
@@ -225,10 +230,36 @@ export interface NodePaintStackPlan {
   clipChildren: boolean;
 }
 
+export interface TextStyledRun {
+  /** The substring this run covers. */
+  text: string;
+  /** Cumulative x within the Group (px) — sum of measureText widths of all preceding runs. */
+  offsetX: number;
+  /**
+   * Resolved fill color — `override.fillPaints[0]` (first visible SOLID)
+   * or the node's base fill color when the run carries no usable override.
+   */
+  fill: string;
+}
+
+export interface NodeTextStyledPlan {
+  kind: 'text-styled';
+  outer: NodeOuterFrame;
+  runs: TextStyledRun[];
+  fontSize: number;
+  fontFamily: string;
+  fontStyle: string | undefined;
+  textDecoration: string | undefined;
+  letterSpacing: number | undefined;
+  lineHeight: number | undefined;
+  verticalAlign: 'top' | 'middle' | 'bottom' | undefined;
+}
+
 export type NodeRenderPlan =
   | NodeHiddenPlan
   | NodeVectorPlan
   | NodeTextSimplePlan
+  | NodeTextStyledPlan
   | NodePaintStackPlan
   | NodeFallthroughPlan;
 
@@ -517,6 +548,90 @@ function planPaintStack(node: Record<string, unknown>, ctx: RenderContext): Node
 }
 
 /**
+ * Resolve a styled run's fill color: first SOLID visible paint in
+ * `override.fillPaints`, else fall back to the node's base fill. Same
+ * SOLID-only assumption as the inline path that lived in Canvas.tsx
+ * before slice 1D.
+ */
+function resolveStyledRunFill(
+  run: { override: { fillPaints?: unknown[] } },
+  baseFill: string,
+): string {
+  const fps = run.override.fillPaints;
+  if (!Array.isArray(fps)) return baseFill;
+  const first = (fps as Array<Record<string, unknown>>).find(
+    (p) =>
+      (p as { type?: string }).type === 'SOLID' &&
+      (p as { visible?: boolean }).visible !== false,
+  );
+  if (!first || !first.color) return baseFill;
+  const c = first.color as { r?: number; g?: number; b?: number; a?: number };
+  const r = Math.round((c.r ?? 0) * 255);
+  const g = Math.round((c.g ?? 0) * 255);
+  const b = Math.round((c.b ?? 0) * 255);
+  const a = c.a ?? 1;
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function planTextStyled(node: Record<string, unknown>, ctx: RenderContext): NodeTextStyledPlan {
+  const outer = readOuter(node);
+  const textData = node.textData as {
+    characters?: string;
+    characterStyleIDs: number[];
+    styleOverrideTable: Array<Record<string, unknown>>;
+  };
+
+  // Reachable only when needsStyledTextRuns returned true, which guarantees
+  // textData with both arrays present and no _renderTextOverride.
+  const fontSize = typeof node.fontSize === 'number' ? (node.fontSize as number) : 12;
+  const fontName = node.fontName as { family?: string; style?: string } | undefined;
+  const fontFamily = fontName?.family ?? 'Inter';
+  const fontStyle = konvaFontStyle(fontName?.style);
+  const textDecoration = konvaTextDecoration(node.textDecoration as string | undefined);
+  const letterSpacing = konvaLetterSpacing(
+    node.letterSpacing as never,
+    fontSize,
+  );
+  const lineHeight = konvaLineHeight(node.lineHeight as never, fontSize);
+  const verticalAlign = konvaVerticalAlign(node.textAlignVertical as string | undefined);
+
+  const baseFill = textBaseFillColor(node);
+  const chars = applyTextCase(textData.characters ?? '', node.textCase as string | undefined);
+  const rawRuns = splitTextRuns(
+    chars,
+    textData.characterStyleIDs,
+    textData.styleOverrideTable as never,
+  );
+
+  const runs: TextStyledRun[] = [];
+  let offsetX = 0;
+  for (let i = 0; i < rawRuns.length; i++) {
+    const r = rawRuns[i];
+    runs.push({
+      text: r.text,
+      offsetX,
+      fill: resolveStyledRunFill(r, baseFill),
+    });
+    if (i < rawRuns.length - 1) {
+      offsetX += ctx.measureText(r.text, fontSize, fontFamily, fontStyle, letterSpacing);
+    }
+  }
+
+  return {
+    kind: 'text-styled',
+    outer,
+    runs,
+    fontSize,
+    fontFamily,
+    fontStyle,
+    textDecoration,
+    letterSpacing,
+    lineHeight,
+    verticalAlign,
+  };
+}
+
+/**
  * True when this TEXT node carries per-character style data AND there's at
  * least one styled (non-base) run. The multi-run branch in Canvas relies on
  * exactly this condition, so the predicate must match bit-for-bit.
@@ -564,7 +679,7 @@ export function nodeRender(
 
   if (type === 'TEXT') {
     if (needsStyledTextRuns(node)) {
-      return { kind: 'fallthrough', reason: 'text-styled' };
+      return planTextStyled(node, ctx);
     }
     return planTextSimple(node, ctx);
   }
