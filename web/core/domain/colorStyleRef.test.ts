@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { colorVarName, textStyleName, effectiveTextStyle, resolveVariableChain } from './colorStyleRef.js';
+import { colorVarName, textStyleName, effectiveTextStyle, resolveVariableChain, colorVarTrail } from './colorStyleRef.js';
 
 /**
  * Spec: docs/specs/web-render-fidelity-round15.spec.md
@@ -423,5 +423,127 @@ describe('resolveVariableChain (round 18-A)', () => {
     const result = resolveVariableChain(nodes[0], r)!;
     expect(result.end).toEqual({ kind: 'depth-cap', cap: 8 });
     expect(result.chain.length).toBe(8);
+  });
+});
+
+/**
+ * Spec round 18-B — `colorVarTrail` formats the chain as Inspector-ready
+ * { id, name } entries plus the underlying end-state. Reuses round 18-A's
+ * walker; adds round-15-style gating (paint must carry a colorVar alias
+ * whose target is a VARIABLE).
+ */
+describe('colorVarTrail (round 18-B)', () => {
+  function rawColorEntry() {
+    return {
+      modeID: { sessionID: 0, localID: 0 },
+      variableData: {
+        value: { color: { r: 0.1, g: 0.4, b: 0.95, a: 1 } },
+        dataType: 'COLOR',
+        resolvedDataType: 'COLOR',
+      },
+    };
+  }
+  function aliasEntry(s: number, l: number) {
+    return {
+      modeID: { sessionID: 0, localID: 0 },
+      variableData: {
+        value: { alias: { guid: { sessionID: s, localID: l } } },
+        dataType: 'ALIAS',
+        resolvedDataType: 'COLOR',
+      },
+    };
+  }
+  function variable(id: string, name: string | null, entry?: unknown) {
+    const [s, l] = id.split(':').map(Number);
+    return {
+      id,
+      guid: { sessionID: s, localID: l },
+      type: 'VARIABLE',
+      name,
+      children: [],
+      ...(entry !== undefined ? { variableDataValues: { entries: [entry] } } : {}),
+    };
+  }
+  function paintAliasing(s: number, l: number) {
+    return {
+      type: 'SOLID',
+      colorVar: { value: { alias: { guid: { sessionID: s, localID: l } } } },
+    };
+  }
+
+  it('TR-1: returns null when paint has no colorVar', () => {
+    expect(colorVarTrail({ type: 'SOLID' }, root([]))).toBeNull();
+  });
+
+  it('TR-2: returns null when alias guid does not resolve', () => {
+    expect(colorVarTrail(paintAliasing(99, 99), root([]))).toBeNull();
+  });
+
+  it('TR-3: 1-hop (raw VARIABLE) → entries=[A], end=leaf', () => {
+    const A = variable('11:434', 'Button/Primary/Default', rawColorEntry());
+    const r = root([A]);
+    const result = colorVarTrail(paintAliasing(11, 434), r)!;
+    expect(result.end).toEqual({ kind: 'leaf' });
+    expect(result.entries).toEqual([{ id: '11:434', name: 'Button/Primary/Default' }]);
+  });
+
+  it('TR-4: 2-hop chain → entries[A,B], names ordered', () => {
+    const B = variable('2:69', 'Color/Blue/600', rawColorEntry());
+    const A = variable('11:434', 'Button/Primary/Default', aliasEntry(2, 69));
+    const r = root([A, B]);
+    const result = colorVarTrail(paintAliasing(11, 434), r)!;
+    expect(result.end).toEqual({ kind: 'leaf' });
+    expect(result.entries).toEqual([
+      { id: '11:434', name: 'Button/Primary/Default' },
+      { id: '2:69', name: 'Color/Blue/600' },
+    ]);
+  });
+
+  it('TR-5: depth-cap is propagated through the trail', () => {
+    const C = variable('3:3', 'C', rawColorEntry());
+    const B = variable('2:2', 'B', aliasEntry(3, 3));
+    const A = variable('1:1', 'A', aliasEntry(2, 2));
+    const r = root([A, B, C]);
+    // colorVarTrail uses default maxDepth=8; force a smaller cap by
+    // building a longer chain than 8.
+    const longChain = [];
+    for (let i = 1; i <= 12; i++) {
+      const next = i < 12 ? aliasEntry(0, i + 1) : rawColorEntry();
+      longChain.push(variable(`0:${i}`, `n${i}`, next));
+    }
+    const r2 = root(longChain);
+    const result = colorVarTrail(paintAliasing(0, 1), r2)!;
+    expect(result.end).toEqual({ kind: 'depth-cap', cap: 8 });
+    expect(result.entries.length).toBe(8);
+  });
+
+  it('TR-6: cycle preserves entries + end=cycle', () => {
+    const A = variable('1:1', 'A', aliasEntry(2, 2));
+    const B = variable('2:2', 'B', aliasEntry(1, 1));
+    const r = root([A, B]);
+    const result = colorVarTrail(paintAliasing(1, 1), r)!;
+    expect(result.end).toEqual({ kind: 'cycle', cycledAt: '1:1' });
+    expect(result.entries.map((e) => e.id)).toEqual(['1:1', '2:2']);
+  });
+
+  it('TR-7: dead-end (alias to missing guid) → end=dead-end', () => {
+    const A = variable('1:1', 'A', aliasEntry(99, 99));
+    const r = root([A]);
+    const result = colorVarTrail(paintAliasing(1, 1), r)!;
+    expect(result.end).toEqual({ kind: 'dead-end' });
+    expect(result.entries).toEqual([{ id: '1:1', name: 'A' }]);
+  });
+
+  it('TR-8: non-variable target → null (matches round 15 gate)', () => {
+    const f = { id: '7:7', type: 'FRAME', name: 'oops', children: [] };
+    const r = root([f]);
+    expect(colorVarTrail(paintAliasing(7, 7), r)).toBeNull();
+  });
+
+  it('TR-9: entry with null name carries through', () => {
+    const A = variable('1:1', null, rawColorEntry());
+    const r = root([A]);
+    const result = colorVarTrail(paintAliasing(1, 1), r)!;
+    expect(result.entries).toEqual([{ id: '1:1', name: null }]);
   });
 });
