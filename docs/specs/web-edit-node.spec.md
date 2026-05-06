@@ -5,7 +5,7 @@
 | 상태 | Approved (Phase 7) |
 | 구현 | `web/core/application/EditNode.ts` |
 | 테스트 | `web/core/application/EditNode.test.ts` |
-| 부모 | [docs/ARCHITECTURE.md](../ARCHITECTURE.md) |
+| 부모 | [docs/SPEC-architecture.md](../SPEC-architecture.md) |
 
 ## 1. 목적
 
@@ -26,6 +26,11 @@ output = { ok: true }
 - I-2 `session.documentJson` 트리에서 동일 GUID 노드를 찾으면 같은 `value`가 같은 `field` 위치에 존재
 - I-3 `field === 'textData.characters'` 이고 `value`가 string이면, 트리 내 모든 INSTANCE의 `_componentTexts[]` 중 `guid === nodeGuid` 인 항목의 `characters` 가 새 값으로 갱신됨 (인스펙터의 component-text 패널이 재로드 없이 갱신된다)
 - I-4 message.json의 다른 노드/필드는 변경되지 않음 (단일 노드 단일 필드 변경)
+- I-5 `field === 'textData.characters'` 이고 `value`가 string이면, **Figma 의 사전 계산 layout cache 가 무효화**되어야 한다 — 그렇지 않으면 Figma 가 import 시 stale cache 를 우선해 *변경된 값이 적용 안 된 채로 로드*. 구체적으로:
+  - 편집된 노드 자체의 `textData.{glyphs, baselines, derivedLines, fontMetaData, layoutSize, minContentHeight, truncatedHeight, truncationStartIndex, logicalIndexToCharacterOffsetMap, decorations, blockquotes, hyperlinkBoxes, mentionBoxes, fallbackFonts}` 모두 제거 (`web/core/domain/textInvalidation.ts:invalidateTextLayoutCache`)
+  - 같은 노드의 직접 필드 `derivedTextData` 제거
+  - `textData.characterStyleIDs` 길이를 새 `characters.length` 와 동기화 (짧으면 truncate, 길면 마지막 style index 로 pad — kiwi 인코드의 run mismatch 방지)
+  - 모든 INSTANCE 노드의 `derivedSymbolData[]` 에서 `guidPath.guids[last] === nodeGuid` 인 entry 제거 (`pruneInstanceDerivedTextData`) — Figma 가 import 시 per-instance bake 를 재계산
 
 ## 4. Error cases
 

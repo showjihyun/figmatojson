@@ -24,6 +24,7 @@ import type {
   PatchPair,
 } from '../../../core/ports/EditJournal.js';
 import { rebuildDocumentFromMessage } from '../../../core/domain/messageJson.js';
+import { invalidateTextLayoutCache, pruneInstanceDerivedTextData } from '../../../core/domain/textInvalidation.js';
 import { between } from '../../../../src/fractional-index.js';
 import { atomicWriteFileSync } from './atomicWrite.js';
 
@@ -81,6 +82,12 @@ export async function applyTool(
       const before = (node.textData as { characters?: unknown } | undefined)?.characters;
       const after = String(input.value);
       ((node.textData ??= {}) as Record<string, unknown>).characters = after;
+      // Invalidate Figma's pre-computed text layout cache (glyphs, baselines,
+      // derivedLines, fontMetaData, layoutSize, ...) on this node + matching
+      // INSTANCE descendants. Without this Figma re-imports the file and uses
+      // the stale cache, silently showing the OLD text. See textInvalidation.ts.
+      invalidateTextLayoutCache(node, after);
+      pruneInstanceDerivedTextData(msg, String(input.guid));
       atomicWriteFileSync(messagePath, JSON.stringify(msg));
       mirrorClient(String(input.guid), (n) => {
         ((n.textData ??= {}) as Record<string, unknown>).characters = after;
