@@ -204,6 +204,14 @@ human-in-the-loop 없이 oracle 프로토콜 검증 가능.
   생략으로 흐려지는 것 방지.
 - I-X12 default omission: `opacity !== 1`, `rotation !== 0`, `cornerRadius !== 0`
   일 때만 emit (plugin sandbox 와 동일 — `audit-oracle §I-S4`).
+- I-X12a **rotation 단위 + 부호 정규화**: REST 는 `node.rotation` 을
+  *radian, math convention (CCW positive)* 으로 carry. plugin sandbox 는
+  *degrees, plugin convention (CW positive)* 으로 emit (`audit-oracle §I-A4a`).
+  adapter 는 `out.rotation = -node.rotation * 180 / Math.PI` 로 두 차원을
+  맞추고, 변환 후 값이 0 (또는 가까우면 §I-A15 의 0.5 tolerance 가 흡수)
+  이면 omit. 이 변환 누락은 회전된 모든 노드에서 audit false-positive 2K+
+  를 만들기 때문에 별도 invariant 로 못 박는다 (HPAI corpus baseline 측정
+  근거: 2026-05-06 hpai run, 2060 rotation diffs → 0 예상).
 
 ### 5.4 Caveats vs. real plugin trial
 
