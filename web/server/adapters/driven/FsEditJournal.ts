@@ -23,6 +23,7 @@ import {
 
 import type {
   EditJournal,
+  HistoryDirection,
   JournalEntry,
 } from '../../../core/ports/EditJournal.js';
 import type { SessionStore } from '../../../core/ports/SessionStore.js';
@@ -34,6 +35,10 @@ interface SessionStacks {
 
 const MAX_ENTRIES = 100;
 const HISTORY_FILE = '.history.json';
+
+function stackKey(direction: HistoryDirection): keyof SessionStacks {
+  return direction === 'undo' ? 'past' : 'future';
+}
 
 export class FsEditJournal implements EditJournal {
   private readonly bySession = new Map<string, SessionStacks>();
@@ -100,27 +105,15 @@ export class FsEditJournal implements EditJournal {
     this.flush(sessionId);
   }
 
-  popUndo(sessionId: string): JournalEntry | null {
+  popStep(sessionId: string, direction: HistoryDirection): JournalEntry | null {
     const stacks = this.get(sessionId);
-    const entry = stacks.past.pop() ?? null;
+    const entry = stacks[stackKey(direction)].pop() ?? null;
     if (entry) this.flush(sessionId);
     return entry;
   }
 
-  popRedo(sessionId: string): JournalEntry | null {
-    const stacks = this.get(sessionId);
-    const entry = stacks.future.pop() ?? null;
-    if (entry) this.flush(sessionId);
-    return entry;
-  }
-
-  pushFuture(sessionId: string, entry: JournalEntry): void {
-    this.get(sessionId).future.push(entry);
-    this.flush(sessionId);
-  }
-
-  pushPast(sessionId: string, entry: JournalEntry): void {
-    this.get(sessionId).past.push(entry);
+  pushStep(sessionId: string, direction: HistoryDirection, entry: JournalEntry): void {
+    this.get(sessionId)[stackKey(direction)].push(entry);
     this.flush(sessionId);
   }
 

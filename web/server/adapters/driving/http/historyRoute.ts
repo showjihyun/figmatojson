@@ -5,7 +5,10 @@ import { toHttpError } from './errors.js';
 export function registerHistoryRoutes(app: Hono, deps: Deps): void {
   app.post('/api/undo/:id', async (c) => {
     try {
-      const out = await deps.undo.execute({ sessionId: c.req.param('id') });
+      const out = await deps.history.execute({
+        sessionId: c.req.param('id'),
+        direction: 'undo',
+      });
       return c.json(out);
     } catch (err) {
       return toHttpError(c, err);
@@ -14,7 +17,10 @@ export function registerHistoryRoutes(app: Hono, deps: Deps): void {
 
   app.post('/api/redo/:id', async (c) => {
     try {
-      const out = await deps.redo.execute({ sessionId: c.req.param('id') });
+      const out = await deps.history.execute({
+        sessionId: c.req.param('id'),
+        direction: 'redo',
+      });
       return c.json(out);
     } catch (err) {
       return toHttpError(c, err);

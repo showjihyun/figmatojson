@@ -5,8 +5,7 @@ import { join } from 'node:path';
 
 import { applyTool } from './applyTool.js';
 import { InMemoryEditJournal } from './InMemoryEditJournal.js';
-import { Undo } from '../../../core/application/Undo.js';
-import { Redo } from '../../../core/application/Redo.js';
+import { History } from '../../../core/application/History.js';
 import type { Session } from '../../../core/domain/entities/Session.js';
 import type { Document } from '../../../core/domain/entities/Document.js';
 
@@ -120,9 +119,9 @@ function buildFixture(): { dir: string; session: Session; messagePath: string } 
 }
 
 /**
- * Disk-backed SessionStore + FsLike shim for tests that need a real Undo /
- * Redo against the same on-disk message.json that applyTool writes through
- * `s.dir`. Both halves share state so Undo.readMessage observes applyTool's
+ * Disk-backed SessionStore + FsLike shim for tests that need a real History
+ * step against the same on-disk message.json that applyTool writes through
+ * `s.dir`. Both halves share state so History.readMessage observes applyTool's
  * mutations without any in-memory caching layer to keep in sync.
  */
 function buildDiskStore(
@@ -163,7 +162,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
     await applyTool(fx.session, 'set_text', { guid: '0:1', value: 'world' }, journal);
 
     expect(journal.depths('sid-test')).toEqual({ past: 1, future: 0 });
-    const entry = journal.popUndo('sid-test');
+    const entry = journal.popStep('sid-test', 'undo');
     expect(entry?.label).toBe('AI: set_text');
     expect(entry?.patches).toEqual([
       { guid: '0:1', field: 'textData.characters', before: 'hello', after: 'world' },
@@ -181,7 +180,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
 
   it('set_position records both axes', async () => {
     await applyTool(fx.session, 'set_position', { guid: '0:1', x: 99, y: 77 }, journal);
-    const entry = journal.popUndo('sid-test');
+    const entry = journal.popStep('sid-test', 'undo');
     expect(entry?.label).toBe('AI: set_position');
     expect(entry?.patches).toEqual([
       { guid: '0:1', field: 'transform.m02', before: 10, after: 99 },
@@ -191,7 +190,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
 
   it('set_size clamps to >= 1 and records both dimensions', async () => {
     await applyTool(fx.session, 'set_size', { guid: '0:1', w: 0, h: 250 }, journal);
-    const entry = journal.popUndo('sid-test');
+    const entry = journal.popStep('sid-test', 'undo');
     expect(entry?.patches).toEqual([
       { guid: '0:1', field: 'size.x', before: 100, after: 1 },
       { guid: '0:1', field: 'size.y', before: 50, after: 250 },
@@ -205,7 +204,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       { guid: '0:1', r: 0, g: 1, b: 0, a: 0.5 },
       journal,
     );
-    const entry = journal.popUndo('sid-test');
+    const entry = journal.popStep('sid-test', 'undo');
     expect(entry?.label).toBe('AI: set_fill_color');
     expect(entry?.patches).toHaveLength(1);
     const p = entry!.patches[0];
@@ -217,7 +216,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
 
   it('set_corner_radius records cornerRadius', async () => {
     await applyTool(fx.session, 'set_corner_radius', { guid: '0:2', value: 12 }, journal);
-    const entry = journal.popUndo('sid-test');
+    const entry = journal.popStep('sid-test', 'undo');
     expect(entry?.label).toBe('AI: set_corner_radius');
     expect(entry?.patches).toEqual([
       { guid: '0:2', field: 'cornerRadius', before: 4, after: 12 },
@@ -226,7 +225,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
 
   it('set_corner_radius clamps negatives to 0', async () => {
     await applyTool(fx.session, 'set_corner_radius', { guid: '0:2', value: -5 }, journal);
-    const entry = journal.popUndo('sid-test');
+    const entry = journal.popStep('sid-test', 'undo');
     expect(entry?.patches[0].after).toBe(0);
   });
 
@@ -240,7 +239,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       { guids: ['0:1', '0:2'], axis: 'left' },
       journal,
     );
-    const entry = journal.popUndo('sid-test');
+    const entry = journal.popStep('sid-test', 'undo');
     expect(entry?.label).toBe('AI: align left');
     expect(entry?.patches).toHaveLength(2);
     expect(entry?.patches.every((p) => p.field === 'transform.m02')).toBe(true);
@@ -256,7 +255,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       { guids: ['0:1', '0:2'], axis: 'top' },
       journal,
     );
-    const entry = journal.popUndo('sid-test');
+    const entry = journal.popStep('sid-test', 'undo');
     expect(entry?.patches.every((p) => p.field === 'transform.m12')).toBe(true);
   });
 
@@ -274,7 +273,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       { instanceGuid: '0:3', masterTextGuid: '0:1', value: 'overridden!' },
       journal,
     );
-    const entry = journal.popUndo('sid-test');
+    const entry = journal.popStep('sid-test', 'undo');
     expect(entry?.label).toBe('AI: override_instance_text');
     expect(entry?.patches).toHaveLength(1);
     const p = entry!.patches[0];
@@ -291,9 +290,9 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
     expect(journal.depths('sid-test')).toEqual({ past: 3, future: 0 });
 
     // Top of the past stack is the most recent edit.
-    const last = journal.popUndo('sid-test');
+    const last = journal.popStep('sid-test', 'undo');
     expect(last?.label).toBe('AI: set_position');
-    const second = journal.popUndo('sid-test');
+    const second = journal.popStep('sid-test', 'undo');
     expect(second?.label).toBe('AI: set_text');
     expect(second?.patches[0].before).toBe('A');
     expect(second?.patches[0].after).toBe('B');
@@ -359,7 +358,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
 
     it('records a __msg__ sentinel patch with full nodeChanges before/after', async () => {
       await applyTool(fx.session, 'duplicate', { guid: '0:1' }, journal);
-      const entry = journal.popUndo('sid-test');
+      const entry = journal.popStep('sid-test', 'undo');
       expect(entry?.label).toBe('AI: duplicate');
       expect(entry?.patches).toHaveLength(1);
       const p = entry!.patches[0];
@@ -487,7 +486,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
 
     it('records a __msg__ sentinel patch labelled "AI: group"', async () => {
       await applyTool(fx.session, 'group', { guids: ['0:1', '0:2'] }, journal);
-      const entry = journal.popUndo('sid-test');
+      const entry = journal.popStep('sid-test', 'undo');
       expect(entry?.label).toBe('AI: group');
       expect(entry?.patches).toHaveLength(1);
       expect(entry!.patches[0].guid).toBe('__msg__');
@@ -614,7 +613,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
 
       await applyTool(fx.session, 'ungroup', { guid: groupGuid }, journal);
       // Most recent journal entry is the ungroup.
-      const entry = journal.popUndo('sid-test');
+      const entry = journal.popStep('sid-test', 'undo');
       expect(entry?.label).toBe('AI: ungroup');
       expect(entry?.patches[0].guid).toBe('__msg__');
     });
@@ -886,12 +885,12 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       }
       expect(journal.depths('sid-test').past).toBe(10);
 
-      const undo = new Undo(
-        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+      const history = new History(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof History>[0],
         journal,
       );
       for (let i = 0; i < 10; i++) {
-        const r = await undo.execute({ sessionId: 'sid-test' });
+        const r = await history.execute({ sessionId: 'sid-test', direction: 'undo' });
         expect(r.ok).toBe(true);
       }
       expect(journal.depths('sid-test').past).toBe(0);
@@ -907,12 +906,12 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       }
       expect(journal.depths('sid-test').past).toBe(10);
 
-      const undo = new Undo(
-        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+      const history = new History(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof History>[0],
         journal,
       );
       for (let i = 0; i < 10; i++) {
-        const r = await undo.execute({ sessionId: 'sid-test' });
+        const r = await history.execute({ sessionId: 'sid-test', direction: 'undo' });
         expect(r.ok).toBe(true);
       }
       expect(journal.depths('sid-test').past).toBe(0);
@@ -936,12 +935,12 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       }
       expect(journal.depths('sid-test').past).toBe(20);
 
-      const undo = new Undo(
-        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+      const history = new History(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof History>[0],
         journal,
       );
       for (let i = 0; i < 20; i++) {
-        const r = await undo.execute({ sessionId: 'sid-test' });
+        const r = await history.execute({ sessionId: 'sid-test', direction: 'undo' });
         expect(r.ok).toBe(true);
       }
       expect(journal.depths('sid-test').past).toBe(0);
@@ -971,13 +970,13 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       };
       expect(cloneAfterB.textData.characters).toBe('A');
 
-      const undo = new Undo(
-        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+      const history = new History(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof History>[0],
         journal,
       );
 
       // Undo B (structural): clone gone; master still 'A'.
-      await undo.execute({ sessionId: 'sid-test' });
+      await history.execute({ sessionId: 'sid-test', direction: 'undo' });
       snap = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
         nodeChanges: Array<Record<string, unknown>>;
       };
@@ -989,7 +988,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
 
       // Undo A (leaf, after a structural undo just rebuilt documentJson):
       // master back to 'hello'; documentJson mirror also reverts.
-      await undo.execute({ sessionId: 'sid-test' });
+      await history.execute({ sessionId: 'sid-test', direction: 'undo' });
       snap = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
         nodeChanges: Array<Record<string, unknown>>;
       };
@@ -1032,13 +1031,13 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       ) as { textData: { characters: string } };
       expect(cloneAfterB.textData.characters).toBe('CLONE_EDITED');
 
-      const undo = new Undo(
-        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+      const history = new History(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof History>[0],
         journal,
       );
 
       // Undo B (leaf on clone): clone's text reverts to the source's value.
-      await undo.execute({ sessionId: 'sid-test' });
+      await history.execute({ sessionId: 'sid-test', direction: 'undo' });
       snap = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
         nodeChanges: Array<Record<string, unknown>>;
       };
@@ -1048,7 +1047,7 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       expect(cloneAfterUndoB.textData.characters).toBe('hello');
 
       // Undo A (structural duplicate): clone disappears entirely.
-      await undo.execute({ sessionId: 'sid-test' });
+      await history.execute({ sessionId: 'sid-test', direction: 'undo' });
       snap = JSON.parse(readFileSync(fx.messagePath, 'utf8')) as {
         nodeChanges: Array<Record<string, unknown>>;
       };
@@ -1076,23 +1075,20 @@ describe('applyTool — chat-driven mutations record to the journal', () => {
       const stateE = readFileSync(fx.messagePath, 'utf8');
       expect(journal.depths('sid-test').past).toBe(5);
 
-      const undo = new Undo(
-        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Undo>[0],
+      const history = new History(
+        buildDiskStore(fx) as unknown as ConstructorParameters<typeof History>[0],
         journal,
       );
       for (let i = 0; i < 5; i++) {
-        const r = await undo.execute({ sessionId: 'sid-test' });
+        const r = await history.execute({ sessionId: 'sid-test', direction: 'undo' });
         expect(r.ok).toBe(true);
       }
       expect(readFileSync(fx.messagePath, 'utf8')).toBe(baseline);
       expect(journal.depths('sid-test')).toEqual({ past: 0, future: 5 });
 
-      const redo = new Redo(
-        buildDiskStore(fx) as unknown as ConstructorParameters<typeof Redo>[0],
-        journal,
-      );
+      // Use the same History instance for the redo half.
       for (let i = 0; i < 5; i++) {
-        const r = await redo.execute({ sessionId: 'sid-test' });
+        const r = await history.execute({ sessionId: 'sid-test', direction: 'redo' });
         expect(r.ok).toBe(true);
       }
       expect(readFileSync(fx.messagePath, 'utf8')).toBe(stateE);

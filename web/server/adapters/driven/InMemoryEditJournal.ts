@@ -9,6 +9,7 @@
 
 import type {
   EditJournal,
+  HistoryDirection,
   JournalEntry,
 } from '../../../core/ports/EditJournal.js';
 
@@ -18,6 +19,10 @@ interface SessionStacks {
 }
 
 const MAX_ENTRIES = 100;
+
+function stackKey(direction: HistoryDirection): keyof SessionStacks {
+  return direction === 'undo' ? 'past' : 'future';
+}
 
 export class InMemoryEditJournal implements EditJournal {
   private readonly bySession = new Map<string, SessionStacks>();
@@ -38,22 +43,13 @@ export class InMemoryEditJournal implements EditJournal {
     stacks.future.length = 0;
   }
 
-  popUndo(sessionId: string): JournalEntry | null {
+  popStep(sessionId: string, direction: HistoryDirection): JournalEntry | null {
     const stacks = this.bySession.get(sessionId);
-    return stacks?.past.pop() ?? null;
+    return stacks?.[stackKey(direction)].pop() ?? null;
   }
 
-  popRedo(sessionId: string): JournalEntry | null {
-    const stacks = this.bySession.get(sessionId);
-    return stacks?.future.pop() ?? null;
-  }
-
-  pushFuture(sessionId: string, entry: JournalEntry): void {
-    this.get(sessionId).future.push(entry);
-  }
-
-  pushPast(sessionId: string, entry: JournalEntry): void {
-    this.get(sessionId).past.push(entry);
+  pushStep(sessionId: string, direction: HistoryDirection, entry: JournalEntry): void {
+    this.get(sessionId)[stackKey(direction)].push(entry);
   }
 
   depths(sessionId: string): { past: number; future: number } {
