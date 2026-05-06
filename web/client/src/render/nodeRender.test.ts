@@ -410,14 +410,18 @@ describe('nodeRender', () => {
     });
   });
 
-  describe('text-styled fallthrough', () => {
-    it('returns fallthrough with reason=text-styled when characterStyleIDs + styleOverrideTable mark a styled run', () => {
+  describe('text-styled', () => {
+    const baseStyled = {
+      id: '1:30',
+      type: 'TEXT',
+      transform: { m02: 4, m12: 8 },
+      size: { x: 200, y: 24 },
+    };
+
+    it('emits a text-styled plan with one run per styleID boundary', () => {
       const plan = nodeRender(
         {
-          id: '1:30',
-          type: 'TEXT',
-          transform: { m02: 0, m12: 0 },
-          size: { x: 100, y: 20 },
+          ...baseStyled,
           textData: {
             characters: 'AB',
             characterStyleIDs: [0, 1],
@@ -428,18 +432,16 @@ describe('nodeRender', () => {
         },
         emptyCtx(),
       );
-      expect(plan).toEqual({ kind: 'fallthrough', reason: 'text-styled' });
+      if (plan.kind !== 'text-styled') throw new Error(`expected text-styled, got ${plan.kind}`);
+      expect(plan.runs.map((r) => r.text)).toEqual(['A', 'B']);
     });
 
-    it('renders simple when _renderTextOverride is set, even with style data (override+runs not v1)', () => {
+    it('falls back to text-simple when _renderTextOverride is set (override+runs not v1)', () => {
       // Spec web-canvas-text-style-runs.spec.md §3.2 — override + runs is v1
       // 비대상; falls back to single KText with base style.
       const plan = nodeRender(
         {
-          id: '1:31',
-          type: 'TEXT',
-          transform: { m02: 0, m12: 0 },
-          size: { x: 100, y: 20 },
+          ...baseStyled,
           _renderTextOverride: 'OVERRIDE',
           textData: {
             characters: 'AB',
@@ -454,13 +456,10 @@ describe('nodeRender', () => {
       expect(plan.kind).toBe('text-simple');
     });
 
-    it('renders simple when style table has only the base styleID (no styled runs)', () => {
+    it('falls back to text-simple when only the base styleID is referenced', () => {
       const plan = nodeRender(
         {
-          id: '1:32',
-          type: 'TEXT',
-          transform: { m02: 0, m12: 0 },
-          size: { x: 100, y: 20 },
+          ...baseStyled,
           textData: {
             characters: 'AB',
             characterStyleIDs: [0, 0],
@@ -470,6 +469,76 @@ describe('nodeRender', () => {
         emptyCtx(),
       );
       expect(plan.kind).toBe('text-simple');
+    });
+
+    it('per-run fill: SOLID override paint overrides base fill; missing/non-SOLID falls back', () => {
+      const plan = nodeRender(
+        {
+          ...baseStyled,
+          fillPaints: [{ type: 'SOLID', color: { r: 0.5, g: 0.5, b: 0.5, a: 1 } }],
+          textData: {
+            characters: 'XYZ',
+            characterStyleIDs: [0, 1, 2],
+            styleOverrideTable: [
+              { styleID: 1, fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }] },
+              { styleID: 2 /* no fillPaints — base fill */ },
+            ],
+          },
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'text-styled') throw new Error('expected text-styled');
+      expect(plan.runs[0].fill).toBe('rgba(128,128,128,1)');     // base
+      expect(plan.runs[1].fill).toBe('rgba(255,0,0,1)');          // override
+      expect(plan.runs[2].fill).toBe('rgba(128,128,128,1)');     // missing → base
+    });
+
+    it('cumulative offsetX is computed via ctx.measureText on each non-final run', () => {
+      // Stub measureText returns a width per character so offsets are predictable.
+      const ctx: RenderContext = {
+        isolation: null,
+        measureText: (text) => text.length * 10,
+      };
+      const plan = nodeRender(
+        {
+          ...baseStyled,
+          textData: {
+            characters: 'aabbcc',
+            characterStyleIDs: [0, 0, 1, 1, 0, 0],
+            styleOverrideTable: [
+              { styleID: 1, fillPaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }] },
+            ],
+          },
+        },
+        ctx,
+      );
+      if (plan.kind !== 'text-styled') throw new Error('expected text-styled');
+      expect(plan.runs.map((r) => r.text)).toEqual(['aa', 'bb', 'cc']);
+      // run 0: 0; run 1: 0 + 20; run 2: 20 + 20 = 40.
+      expect(plan.runs.map((r) => r.offsetX)).toEqual([0, 20, 40]);
+    });
+
+    it('passes typography fields through their helpers (same as text-simple)', () => {
+      const plan = nodeRender(
+        {
+          ...baseStyled,
+          fontSize: 18,
+          fontName: { family: 'SF Pro', style: 'Bold' },
+          letterSpacing: { value: 1, units: 'PIXELS' },
+          textData: {
+            characters: 'AB',
+            characterStyleIDs: [0, 1],
+            styleOverrideTable: [
+              { styleID: 1, fillPaints: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }] },
+            ],
+          },
+        },
+        emptyCtx(),
+      );
+      if (plan.kind !== 'text-styled') throw new Error('expected text-styled');
+      expect(plan.fontSize).toBe(18);
+      expect(plan.fontFamily).toBe('SF Pro');
+      expect(plan.fontStyle).toBe('bold');
     });
   });
 
