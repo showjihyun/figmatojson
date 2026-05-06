@@ -137,8 +137,21 @@ interface IsolationMask {
 }
 const IsolationContext = createContext<IsolationMask | null>(null);
 
+// Round 16 — DOCUMENT root for `styleIdForText` alias resolution. Provided
+// by Canvas, consumed by NodeShape's RenderContext so planTextSimple/Styled
+// can overlay the referenced text-style asset onto the node's raw fields.
+// Null when the document hasn't loaded yet.
+const DocumentRootContext = createContext<unknown | null>(null);
+
 interface CanvasProps {
   page: any;
+  /**
+   * Document root — round 16. Used to resolve `styleIdForText` aliases
+   * on TEXT nodes; the referenced text-style asset lives outside the
+   * current page. Optional — when omitted, TEXT nodes fall back to raw
+   * typography (= pre-round-16).
+   */
+  root?: any;
   selectedGuids: Set<string>;
   onSelect: (guid: string | null, mode?: 'replace' | 'toggle') => void;
   /** Drag-group: emits new positions for every selected node atomically. */
@@ -293,17 +306,20 @@ function NodeShapeImpl({
   // Round-23 isolation. (Round-23-v2: also drops sibling subtrees outright
   // so they don't leak into the captured area through z-order overlap.)
   const isolation = useContext(IsolationContext);
+  const documentRoot = useContext(DocumentRootContext);
   const myId = (node as { id?: string }).id ?? '';
 
   // Slice 1A of the render-module deepening (#1): hidden + vector kinds
   // are produced by the pure `nodeRender` plan generator; remaining branches
   // (TEXT / paint-stack) still run inline below. See web/client/src/render/.
+  // documentRoot (round 16) lets text plans resolve styleIdForText aliases.
   const renderCtx = useMemo<RenderContext>(
     () => ({
       isolation: isolation ?? null,
       measureText: measureRunWidth,
+      documentRoot,
     }),
-    [isolation],
+    [isolation, documentRoot],
   );
   const plan = nodeRender(node as Record<string, unknown>, renderCtx);
   if (plan.kind === 'hidden') return null;
@@ -1099,7 +1115,7 @@ function SelectionOverlay({
   );
 }
 
-export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, onResizeMany, sessionId }: CanvasProps) {
+export function Canvas({ page, root, selectedGuids, onSelect, onMoveMany, onResize, onResizeMany, sessionId }: CanvasProps) {
   // Single-selection convenience for resize bounds + multi-bbox iteration.
   const selectedGuid = selectedGuids.size === 1 ? [...selectedGuids][0]! : null;
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1521,6 +1537,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
             <DragSnapshotContext.Provider value={dragSnapshotApi}>
               <HoverContext.Provider value={hoverApi}>
                 <IsolationContext.Provider value={isolation}>
+                <DocumentRootContext.Provider value={root ?? null}>
                 {visibleChildren.map((c) => (
                   // Key by guid so React reuses the same NodeShape instance
                   // when culling shifts the array — avoids unmount/remount of
@@ -1533,6 +1550,7 @@ export function Canvas({ page, selectedGuids, onSelect, onMoveMany, onResize, on
                     sessionId={sessionId}
                   />
                 ))}
+                </DocumentRootContext.Provider>
                 </IsolationContext.Provider>
               </HoverContext.Provider>
             </DragSnapshotContext.Provider>
