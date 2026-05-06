@@ -106,6 +106,92 @@ function resolveStyleAsset(node: unknown, root: unknown): Record<string, unknown
   return target;
 }
 
+/**
+ * Round 18-A — `resolveVariableChain` walks a VARIABLE node's
+ * `variableDataValues.entries[0]` alias chain, hop by hop, with cycle /
+ * dead-end / depth-cap detection. Returns the last-resolved node + the
+ * GUID trail + an end-state classification.
+ *
+ * Spec: docs/specs/web-render-fidelity-round18-A.spec.md
+ *
+ * Single-mode only — entries[0]. Multi-mode chain (light/dark themes)
+ * is intentionally out of scope.
+ */
+export type VariableChainEnd =
+  | { kind: 'leaf' }
+  | { kind: 'non-variable' }
+  | { kind: 'cycle'; cycledAt: string }
+  | { kind: 'dead-end' }
+  | { kind: 'depth-cap'; cap: number };
+
+export interface VariableChainResult {
+  /** chain 의 마지막 도달 노드 (cycle/dead-end 시 마지막으로 정상 도달한 곳). */
+  leaf: unknown | null;
+  /** 거쳐간 GUID 들 — 입력 VARIABLE 부터 leaf 또는 break-point 까지. */
+  chain: string[];
+  end: VariableChainEnd;
+}
+
+const DEFAULT_CHAIN_MAX_DEPTH = 8;
+
+function readAliasGuidFromEntry(entry: unknown): AliasGuid | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const e = entry as { variableData?: { dataType?: string; value?: { alias?: { guid?: AliasGuid } } } };
+  if (e.variableData?.dataType !== 'ALIAS') return null;
+  return e.variableData.value?.alias?.guid ?? null;
+}
+
+function isAliasEntry(entry: unknown): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  return (entry as { variableData?: { dataType?: string } }).variableData?.dataType === 'ALIAS';
+}
+
+export function resolveVariableChain(
+  node: unknown,
+  root: unknown,
+  options?: { maxDepth?: number },
+): VariableChainResult | null {
+  if (!node || typeof node !== 'object') return null;
+  const maxDepth = options?.maxDepth ?? DEFAULT_CHAIN_MAX_DEPTH;
+  const start = node as { type?: string; id?: string; variableDataValues?: { entries?: unknown[] } };
+  if (start.type !== 'VARIABLE') return null;
+
+  const chain: string[] = [];
+  let cur: typeof start | (Record<string, unknown> & { type?: string; id?: string }) = start;
+
+  for (let i = 0; i < maxDepth; i++) {
+    const id = (cur as { id?: string }).id;
+    if (typeof id === 'string') chain.push(id);
+
+    const entries = (cur as typeof start).variableDataValues?.entries;
+    const first = Array.isArray(entries) ? entries[0] : undefined;
+
+    // No entries / first entry is not an ALIAS → cur is the leaf.
+    if (!first || !isAliasEntry(first)) {
+      return { leaf: cur, chain, end: { kind: 'leaf' } };
+    }
+
+    const guid = readAliasGuidFromEntry(first);
+    const aliasId = readGuid(guid ?? null);
+    if (!aliasId) return { leaf: cur, chain, end: { kind: 'dead-end' } };
+
+    if (chain.includes(aliasId)) {
+      return { leaf: cur, chain, end: { kind: 'cycle', cycledAt: aliasId } };
+    }
+
+    const next = findById(root, aliasId) as Record<string, unknown> | null;
+    if (!next) return { leaf: cur, chain, end: { kind: 'dead-end' } };
+    if ((next as { type?: string }).type !== 'VARIABLE') {
+      chain.push(aliasId);
+      return { leaf: next, chain, end: { kind: 'non-variable' } };
+    }
+
+    cur = next as never;
+  }
+
+  return { leaf: cur, chain, end: { kind: 'depth-cap', cap: maxDepth } };
+}
+
 export function effectiveTextStyle(node: unknown, root: unknown): EffectiveTextStyle {
   if (!node || typeof node !== 'object') return {};
   const raw = node as Record<string, unknown>;

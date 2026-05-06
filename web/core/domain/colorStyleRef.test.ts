@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { colorVarName, textStyleName, effectiveTextStyle } from './colorStyleRef.js';
+import { colorVarName, textStyleName, effectiveTextStyle, resolveVariableChain } from './colorStyleRef.js';
 
 /**
  * Spec: docs/specs/web-render-fidelity-round15.spec.md
@@ -282,5 +282,146 @@ describe('effectiveTextStyle (round 16)', () => {
     };
     const eff = effectiveTextStyle(node, r);
     expect(eff.fontSize).toBe(16);
+  });
+});
+
+/**
+ * Spec round 18-A — `resolveVariableChain` walks `variableDataValues.entries[0]`
+ * alias chain with cycle / dead-end / depth-cap detection. Used by the
+ * Inspector (round 15+) to expose the full alias trail and by future
+ * audit scripts to classify chain end-states.
+ */
+describe('resolveVariableChain (round 18-A)', () => {
+  function aliasEntry(sessionID: number, localID: number) {
+    return {
+      modeID: { sessionID: 0, localID: 0 },
+      variableData: {
+        value: { alias: { guid: { sessionID, localID } } },
+        dataType: 'ALIAS',
+        resolvedDataType: 'COLOR',
+      },
+    };
+  }
+  function rawColorEntry() {
+    return {
+      modeID: { sessionID: 0, localID: 0 },
+      variableData: {
+        value: { color: { r: 0.1, g: 0.4, b: 0.95, a: 1 } },
+        dataType: 'COLOR',
+        resolvedDataType: 'COLOR',
+      },
+    };
+  }
+  function variable(id: string, entry?: unknown) {
+    const [s, l] = id.split(':').map(Number);
+    return {
+      id,
+      guid: { sessionID: s, localID: l },
+      type: 'VARIABLE',
+      name: id,
+      children: [],
+      ...(entry !== undefined ? { variableDataValues: { entries: [entry] } } : {}),
+    };
+  }
+
+  it('T-1: returns null for null node', () => {
+    expect(resolveVariableChain(null, root([]))).toBeNull();
+  });
+
+  it('T-2: returns null for non-VARIABLE node', () => {
+    const r = root([{ id: '5:5', type: 'FRAME', children: [] }]);
+    expect(resolveVariableChain({ type: 'FRAME', id: '5:5' }, r)).toBeNull();
+  });
+
+  it('T-3: VARIABLE with raw COLOR entry → leaf, chain=[id]', () => {
+    const node = variable('11:1', rawColorEntry());
+    const r = root([node]);
+    const result = resolveVariableChain(node, r)!;
+    expect(result.end).toEqual({ kind: 'leaf' });
+    expect(result.chain).toEqual(['11:1']);
+    expect(result.leaf).toBe(node);
+  });
+
+  it('T-4: 2-hop chain (A → B raw) → leaf=B', () => {
+    const B = variable('2:69', rawColorEntry());
+    const A = variable('11:434', aliasEntry(2, 69));
+    const r = root([A, B]);
+    const result = resolveVariableChain(A, r)!;
+    expect(result.end).toEqual({ kind: 'leaf' });
+    expect(result.chain).toEqual(['11:434', '2:69']);
+    expect(result.leaf).toBe(B);
+  });
+
+  it('T-5: 3-hop chain (A → B → C raw)', () => {
+    const C = variable('3:3', rawColorEntry());
+    const B = variable('2:2', aliasEntry(3, 3));
+    const A = variable('1:1', aliasEntry(2, 2));
+    const r = root([A, B, C]);
+    const result = resolveVariableChain(A, r)!;
+    expect(result.end).toEqual({ kind: 'leaf' });
+    expect(result.chain).toEqual(['1:1', '2:2', '3:3']);
+    expect(result.leaf).toBe(C);
+  });
+
+  it('T-6: dead-end → leaf=last seen, end=dead-end', () => {
+    const A = variable('1:1', aliasEntry(99, 99)); // 99:99 missing
+    const r = root([A]);
+    const result = resolveVariableChain(A, r)!;
+    expect(result.end).toEqual({ kind: 'dead-end' });
+    expect(result.chain).toEqual(['1:1']);
+    expect(result.leaf).toBe(A);
+  });
+
+  it('T-7: cycle (A → B → A) → end=cycle, cycledAt=A.id', () => {
+    const A = variable('1:1', aliasEntry(2, 2));
+    const B = variable('2:2', aliasEntry(1, 1));
+    const r = root([A, B]);
+    const result = resolveVariableChain(A, r)!;
+    expect(result.end).toEqual({ kind: 'cycle', cycledAt: '1:1' });
+    expect(result.chain).toEqual(['1:1', '2:2']);
+    expect(result.leaf).toBe(B);
+  });
+
+  it('T-8: depth-cap (10-hop, maxDepth=3) → end=depth-cap', () => {
+    const nodes = [];
+    for (let i = 1; i <= 10; i++) {
+      const next = i < 10 ? aliasEntry(0, i + 1) : rawColorEntry();
+      nodes.push(variable(`0:${i}`, next));
+    }
+    const r = root(nodes);
+    const result = resolveVariableChain(nodes[0], r, { maxDepth: 3 })!;
+    expect(result.end).toEqual({ kind: 'depth-cap', cap: 3 });
+    expect(result.chain.length).toBe(3);
+  });
+
+  it('T-9: non-VARIABLE leaf → leaf=that node, end=non-variable', () => {
+    const f = { id: '7:7', type: 'FRAME', name: 'oops', children: [] };
+    const A = variable('1:1', aliasEntry(7, 7));
+    const r = root([A, f]);
+    const result = resolveVariableChain(A, r)!;
+    expect(result.end).toEqual({ kind: 'non-variable' });
+    expect(result.chain).toEqual(['1:1', '7:7']);
+    expect(result.leaf).toBe(f);
+  });
+
+  it('T-10: VARIABLE with no entries → leaf=node, end=leaf', () => {
+    const node = variable('1:1');                 // no variableDataValues
+    const r = root([node]);
+    const result = resolveVariableChain(node, r)!;
+    expect(result.end).toEqual({ kind: 'leaf' });
+    expect(result.chain).toEqual(['1:1']);
+    expect(result.leaf).toBe(node);
+  });
+
+  it('default maxDepth=8', () => {
+    const nodes = [];
+    for (let i = 1; i <= 12; i++) {
+      const next = i < 12 ? aliasEntry(0, i + 1) : rawColorEntry();
+      nodes.push(variable(`0:${i}`, next));
+    }
+    const r = root(nodes);
+    const result = resolveVariableChain(nodes[0], r)!;
+    expect(result.end).toEqual({ kind: 'depth-cap', cap: 8 });
+    expect(result.chain.length).toBe(8);
   });
 });
