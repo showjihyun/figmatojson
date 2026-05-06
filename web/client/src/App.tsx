@@ -353,7 +353,7 @@ export function App() {
                 size="default"
                 onClick={onSaveSession}
                 disabled={busy}
-                title="Save the current edit state as a JSON snapshot you can resume later"
+                title="(Optional) Save current edits as a JSON snapshot to resume later in the editor. Not required before Export — Export auto-saves."
               >
                 <Save />
                 Save Session
@@ -363,7 +363,7 @@ export function App() {
                 size="lg"
                 onClick={onSaveFig}
                 disabled={busy}
-                title="Export to .fig (downloads a Figma-importable file)"
+                title="Auto-save all pending edits and download a Figma-importable .fig"
               >
                 <Download />
                 Export .fig
