@@ -127,8 +127,8 @@
   <h1>figma-reverse — Developer Guide</h1>
   <p class="subtitle ko">Figma <code>.fig</code> 바이너리를 구조화된 JSON / Pencil <code>.pen</code> / 편집 가능한 HTML 로 무손실 변환하는 파이프라인의 기술 문서.</p>
   <p class="subtitle en">Technical guide for the lossless pipeline that reverse-engineers Figma <code>.fig</code> binaries into structured JSON, Pencil <code>.pen</code>, and editable HTML.</p>
-  <p class="footnote ko">생성일 2026-05-07 · main 브랜치 기준 (round 16.1 + round 17 머지) · 기존 <code>docs/SPEC*.md</code>, <code>CONTEXT.md</code>, <code>SDD.md</code>, <code>HARNESS.md</code> 자료를 종합·요약.</p>
-  <p class="footnote en">Generated 2026-05-07 · based on <code>main</code> after round 16.1 + round 17 · synthesized from existing <code>docs/SPEC*.md</code>, <code>CONTEXT.md</code>, <code>SDD.md</code>, <code>HARNESS.md</code>.</p>
+  <p class="footnote ko">생성일 2026-05-07 · main 브랜치 기준 (PR #1~#10 머지 — rounds 11~18-B) · 기존 <code>docs/SPEC*.md</code>, <code>CONTEXT.md</code>, <code>SDD.md</code>, <code>HARNESS.md</code> 자료를 종합·요약.</p>
+  <p class="footnote en">Generated 2026-05-07 · based on <code>main</code> after PRs #1–#10 (rounds 11–18-B) · synthesized from existing <code>docs/SPEC*.md</code>, <code>CONTEXT.md</code>, <code>SDD.md</code>, <code>HARNESS.md</code>.</p>
 </header>
 
 <!-- ═══════════════════════════════════════════════════════════════════════
@@ -138,26 +138,36 @@
 <h2><span class="ko">1. 개요</span><span class="en">1. Overview</span></h2>
 
 <div class="ko">
-<p><strong>figma-reverse</strong> 는 Figma 의 <code>.fig</code> 바이너리를 <em>오프라인에서, API 없이, 계정 없이</em> 무손실 분해하는 도구체인이다. 두 개의 출력 그룹과 한 개의 편집기를 동시에 제공한다:</p>
+<p><strong>figma-reverse</strong> 는 Figma 의 <code>.fig</code> 바이너리를 <em>오프라인에서, API 없이, 계정 없이</em> 무손실 분해하는 도구체인이다. 3 가지 CLI 출력 형식과 1 개의 Web 편집기를 제공한다:</p>
 <ul>
-  <li><strong>구조화 JSON + 에셋</strong> — 사람이 읽을 수 있는 page-level JSON, SHA-256 manifest 가 동봉된 image / SVG 디렉토리</li>
-  <li><strong>Pencil <code>.pen</code> + <code>.pen.json</code></strong> — pencil.dev 호환 디자인 파일 + provenance trail</li>
-  <li><strong>편집 가능한 단일 HTML 파일</strong> — 원본 <code>.fig</code> 가 base64 로 embed 된 자체 완결 dashboard</li>
-  <li><strong>Web 편집기</strong> — Konva canvas + Inspector + chat agent 가 떠있는 React 클라이언트 (<code>web/</code>)</li>
+  <li><strong>구조화 JSON + 에셋</strong> — 사람이 읽을 수 있는 page-level JSON, SHA-256 manifest 가 동봉된 image / SVG 디렉토리 (<code>extract</code>)</li>
+  <li><strong>Pencil <code>.pen</code> + <code>.pen.json</code></strong> — pencil.dev 호환 디자인 파일 + provenance trail (<code>pen-export</code>)</li>
+  <li><strong>편집 가능한 단일 HTML 파일</strong> — 원본 <code>.fig</code> 가 base64 로 embed 된 자체 완결 dashboard (<code>editable-html</code> + <code>html-report</code> + <code>round-trip-html</code> + <code>tokens</code>)</li>
+  <li><strong>Web 편집기</strong> — Konva canvas + Inspector + Anthropic Messages API tool loop 기반 chat agent 가 떠있는 React 클라이언트 (<code>web/</code>)</li>
 </ul>
-<p>핵심 가치는 <strong>round-trip 보장</strong>: <code>.fig → extracted/ → .fig</code> 가 byte-identical (Byte Repack) 또는 의미 동등 (Kiwi/JSON Repack) 으로 다시 만들어진다. CLI 9 단계 파이프라인 + Web 편집기가 같은 도메인 모듈 (<code>src/</code>) 위에 얹혀 있어 한쪽 변경이 다른 쪽에도 전파된다.</p>
+<p>핵심 가치는 <strong>round-trip 보장</strong>: <code>.fig → extracted/ → .fig</code> 가 byte-identical (Byte Repack) 또는 의미 동등 (Kiwi/JSON Repack) 으로 다시 만들어진다. <strong>9-stage <code>extract</code> + 6 추가 CLI 명령</strong> + Web 편집기가 같은 도메인 모듈 (<code>src/</code>) 위에 얹혀 있어 한쪽 변경이 다른 쪽에도 전파된다.</p>
 </div>
 
 <div class="en">
-<p><strong>figma-reverse</strong> is an <em>offline, no-API, no-account</em> toolchain that losslessly decomposes Figma <code>.fig</code> binaries. It produces two output groups plus a web editor:</p>
+<p><strong>figma-reverse</strong> is an <em>offline, no-API, no-account</em> toolchain that losslessly decomposes Figma <code>.fig</code> binaries. It exposes 3 CLI output formats plus a Web editor:</p>
 <ul>
-  <li><strong>Structured JSON + assets</strong> — human-readable per-page JSON, image / SVG directories with SHA-256 manifests</li>
-  <li><strong>Pencil <code>.pen</code> + <code>.pen.json</code></strong> — pencil.dev-compatible design file + provenance trail</li>
-  <li><strong>Single editable HTML</strong> — self-contained dashboard with the original <code>.fig</code> base64-embedded</li>
-  <li><strong>Web editor</strong> — React client (<code>web/</code>) with Konva canvas, Inspector, and a chat agent</li>
+  <li><strong>Structured JSON + assets</strong> — human-readable per-page JSON, image / SVG directories with SHA-256 manifests (<code>extract</code>)</li>
+  <li><strong>Pencil <code>.pen</code> + <code>.pen.json</code></strong> — pencil.dev-compatible design file + provenance trail (<code>pen-export</code>)</li>
+  <li><strong>Single editable HTML</strong> — self-contained dashboard with the original <code>.fig</code> base64-embedded (<code>editable-html</code> + <code>html-report</code> + <code>round-trip-html</code> + <code>tokens</code>)</li>
+  <li><strong>Web editor</strong> — React client (<code>web/</code>) with Konva canvas, Inspector, and an Anthropic Messages API tool-loop chat agent</li>
 </ul>
-<p>The core value claim is <strong>round-trip integrity</strong>: <code>.fig → extracted/ → .fig</code> reproduces byte-identical (Byte Repack) or semantically equivalent (Kiwi / JSON Repack) output. The CLI 9-stage pipeline and the Web editor sit on top of the same domain modules under <code>src/</code>, so a change on one side propagates to the other.</p>
+<p>The core value claim is <strong>round-trip integrity</strong>: <code>.fig → extracted/ → .fig</code> reproduces byte-identical (Byte Repack) or semantically equivalent (Kiwi / JSON Repack) output. <strong>The 9-stage <code>extract</code> + 6 sibling CLI commands</strong> + the Web editor all sit on top of the same domain modules under <code>src/</code>, so a change on one side propagates to the other.</p>
 </div>
+
+<h3 class="ko">30 초 시작</h3>
+<h3 class="en">30-second start</h3>
+<pre><code># Decode any .fig and inspect the result
+git clone &lt;repo&gt; && cd figma_reverse && npm install
+npx tsx src/cli.ts extract docs/bvp.fig
+
+# Then either:
+#   • open output/bvp/verification_report.md       (CLI flow)
+#   • cd web && npm run dev                         (web editor at :5273)</code></pre>
 
 <h3 class="ko">기술 스택</h3>
 <h3 class="en">Stack</h3>
@@ -194,12 +204,15 @@ graph TB
     A4[vector / instanceOverrides /<br/>masterIndex / expansion]
   end
 
-  subgraph cli["CLI pipeline"]
+  subgraph cli["CLI pipeline (7 subcommands)"]
     direction TB
     C1[extract<br/>9 stages]
     C2[repack<br/>byte/kiwi/json]
     C3[pen-export]
-    C4[editable-html]
+    C4[editable-html<br/>--single-file]
+    C5[html-report<br/>browsable dashboard]
+    C6[round-trip-html<br/>extract→html→fig viewer]
+    C7[tokens<br/>colors/typography JSON]
   end
 
   subgraph web["web/ pipeline (Clean + Hexagonal)"]
@@ -284,10 +297,10 @@ graph TB
 <h2><span class="ko">3. 역공학 파이프라인</span><span class="en">3. Reverse-engineering pipeline</span></h2>
 
 <div class="ko">
-<p><strong>9 단계 CLI 추출 흐름</strong> 이 figma-reverse 의 핵심. 각 단계는 명확한 입력 / 처리 / 출력 계약을 가지며 단계별 산출물이 디스크에 남아 추적 가능 (<code>extracted/01_container/</code> ~ <code>05_tree/</code>). PRD §6.3 의 가설 9 개를 V-01~V-08 으로 검증하면서 발견한 7 가지 핵심 사실을 기반으로 한다.</p>
+<p><strong>9 단계 CLI 추출 흐름</strong> 이 figma-reverse 의 핵심. 각 단계는 명확한 입력 / 처리 / 출력 계약을 가지며 단계별 산출물이 디스크에 남아 추적 가능 (<code>&lt;extracted-dir&gt;/01_container/</code> ~ <code>05_tree/</code>). 기본 <code>extracted-dir</code> 은 output dir 미지정 시 <code>extracted/&lt;figName&gt;/</code>, 지정 시 <code>&lt;output-parent&gt;/extracted/&lt;figName&gt;/</code> (override: <code>--extracted-dir &lt;path&gt;</code>). PRD §6.3 의 가설 9 개를 V-01~V-08 으로 검증하면서 발견한 7 가지 핵심 사실을 기반으로 한다.</p>
 </div>
 <div class="en">
-<p>The <strong>9-stage CLI extract pipeline</strong> is the heart of figma-reverse. Each stage has explicit input / processing / output contracts and writes per-stage breadcrumbs to <code>extracted/01_container/</code> through <code>05_tree/</code>. Built atop seven concrete reverse-engineering findings (validated as V-01~V-08 against PRD §6.3 hypotheses).</p>
+<p>The <strong>9-stage CLI extract pipeline</strong> is the heart of figma-reverse. Each stage has explicit input / processing / output contracts and writes per-stage breadcrumbs to <code>&lt;extracted-dir&gt;/01_container/</code> through <code>05_tree/</code>. Default <code>extracted-dir</code> = <code>extracted/&lt;figName&gt;/</code> when no output dir is specified, otherwise it sits next to the output dir at <code>&lt;output-parent&gt;/extracted/&lt;figName&gt;/</code> (override with <code>--extracted-dir &lt;path&gt;</code>). Built atop seven concrete reverse-engineering findings (validated as V-01~V-08 against PRD §6.3 hypotheses).</p>
 </div>
 
 <div class="mermaid">
@@ -742,20 +755,42 @@ flowchart TD
 
 <h3 class="ko">개발자 워크플로</h3>
 <h3 class="en">Developer workflow</h3>
-<pre><code># Extract a .fig
+<pre><code># --- 7 CLI subcommands (npx tsx src/cli.ts &lt;cmd&gt; …) ---
+
+# 1) extract  — .fig → output/&lt;name&gt;/{pages,assets,…} + extracted/ breadcrumbs
 npx tsx src/cli.ts extract docs/&lt;file&gt;.fig output/&lt;name&gt;
+#   options: --minify  --no-document  --no-vector  --no-intermediate
+#            --include-raw-message  --extracted-dir &lt;path&gt;
 
-# Repack (byte mode default)
-npx tsx src/cli.ts repack output/&lt;name&gt; out.fig --mode byte
+# 2) repack   — extracted/ → .fig (3 modes)
+npx tsx src/cli.ts repack output/extracted/&lt;name&gt; out.fig --mode byte
+npx tsx src/cli.ts repack output/extracted/&lt;name&gt; out.fig --mode kiwi
+npx tsx src/cli.ts repack output/extracted/&lt;name&gt; out.fig --mode json
 
-# Run unit + integration tests
+# 3) pen-export   — .fig → .pen + .pen.json (Pencil-compatible)
+npx tsx src/cli.ts pen-export docs/&lt;file&gt;.fig --out out.pen
+
+# 4) editable-html — .fig → single self-contained HTML with embedded .fig
+npx tsx src/cli.ts editable-html docs/&lt;file&gt;.fig --out out.html --single-file
+
+# 5) html-report   — extracted/ → browsable dashboard (multi-file or single)
+npx tsx src/cli.ts html-report output/extracted/&lt;name&gt; ./dashboard
+npx tsx src/cli.ts html-report output/extracted/&lt;name&gt; report.html --single-file
+
+# 6) round-trip-html — extracted/ → 06_report/figma-round-trip.html viewer
+npx tsx src/cli.ts round-trip-html output/extracted/&lt;name&gt;
+
+# 7) tokens — .fig → tokens JSON (colors / typography / spacing)
+npx tsx src/cli.ts tokens docs/&lt;file&gt;.fig
+
+# --- Tests ---
 npm test                       # main project (162 tests)
-cd web && npm test             # web (602 tests)
+cd web && npm test             # web (622 tests)
 
-# Web editor (concurrent backend + Vite)
+# --- Web editor (concurrent backend + Vite) ---
 cd web && npm run dev          # → http://localhost:5273
 
-# Audit harness (round 17)
+# --- Audit harness (round 17) ---
 node web/scripts/audit-raw-coverage.mjs
 node web/scripts/audit-properties-coverage.mjs</code></pre>
 
