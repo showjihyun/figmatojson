@@ -194,12 +194,15 @@ graph TB
     A4[vector / instanceOverrides /<br/>masterIndex / expansion]
   end
 
-  subgraph cli["CLI pipeline"]
+  subgraph cli["CLI pipeline (7 subcommands)"]
     direction TB
     C1[extract<br/>9 stages]
     C2[repack<br/>byte/kiwi/json]
     C3[pen-export]
-    C4[editable-html]
+    C4[editable-html<br/>--single-file]
+    C5[html-report<br/>browsable dashboard]
+    C6[round-trip-html<br/>extract→html→fig viewer]
+    C7[tokens<br/>colors/typography JSON]
   end
 
   subgraph web["web/ pipeline (Clean + Hexagonal)"]
@@ -284,10 +287,10 @@ graph TB
 <h2><span class="ko">3. 역공학 파이프라인</span><span class="en">3. Reverse-engineering pipeline</span></h2>
 
 <div class="ko">
-<p><strong>9 단계 CLI 추출 흐름</strong> 이 figma-reverse 의 핵심. 각 단계는 명확한 입력 / 처리 / 출력 계약을 가지며 단계별 산출물이 디스크에 남아 추적 가능 (<code>extracted/01_container/</code> ~ <code>05_tree/</code>). PRD §6.3 의 가설 9 개를 V-01~V-08 으로 검증하면서 발견한 7 가지 핵심 사실을 기반으로 한다.</p>
+<p><strong>9 단계 CLI 추출 흐름</strong> 이 figma-reverse 의 핵심. 각 단계는 명확한 입력 / 처리 / 출력 계약을 가지며 단계별 산출물이 디스크에 남아 추적 가능 (<code>&lt;extracted-dir&gt;/01_container/</code> ~ <code>05_tree/</code>). 기본 <code>extracted-dir</code> 은 output dir 미지정 시 <code>extracted/&lt;figName&gt;/</code>, 지정 시 <code>&lt;output-parent&gt;/extracted/&lt;figName&gt;/</code> (override: <code>--extracted-dir &lt;path&gt;</code>). PRD §6.3 의 가설 9 개를 V-01~V-08 으로 검증하면서 발견한 7 가지 핵심 사실을 기반으로 한다.</p>
 </div>
 <div class="en">
-<p>The <strong>9-stage CLI extract pipeline</strong> is the heart of figma-reverse. Each stage has explicit input / processing / output contracts and writes per-stage breadcrumbs to <code>extracted/01_container/</code> through <code>05_tree/</code>. Built atop seven concrete reverse-engineering findings (validated as V-01~V-08 against PRD §6.3 hypotheses).</p>
+<p>The <strong>9-stage CLI extract pipeline</strong> is the heart of figma-reverse. Each stage has explicit input / processing / output contracts and writes per-stage breadcrumbs to <code>&lt;extracted-dir&gt;/01_container/</code> through <code>05_tree/</code>. Default <code>extracted-dir</code> = <code>extracted/&lt;figName&gt;/</code> when no output dir is specified, otherwise it sits next to the output dir at <code>&lt;output-parent&gt;/extracted/&lt;figName&gt;/</code> (override with <code>--extracted-dir &lt;path&gt;</code>). Built atop seven concrete reverse-engineering findings (validated as V-01~V-08 against PRD §6.3 hypotheses).</p>
 </div>
 
 <div class="mermaid">
@@ -742,20 +745,42 @@ flowchart TD
 
 <h3 class="ko">개발자 워크플로</h3>
 <h3 class="en">Developer workflow</h3>
-<pre><code># Extract a .fig
+<pre><code># --- 7 CLI subcommands (npx tsx src/cli.ts &lt;cmd&gt; …) ---
+
+# 1) extract  — .fig → output/&lt;name&gt;/{pages,assets,…} + extracted/ breadcrumbs
 npx tsx src/cli.ts extract docs/&lt;file&gt;.fig output/&lt;name&gt;
+#   options: --minify  --no-document  --no-vector  --no-intermediate
+#            --include-raw-message  --extracted-dir &lt;path&gt;
 
-# Repack (byte mode default)
-npx tsx src/cli.ts repack output/&lt;name&gt; out.fig --mode byte
+# 2) repack   — extracted/ → .fig (3 modes)
+npx tsx src/cli.ts repack output/extracted/&lt;name&gt; out.fig --mode byte
+npx tsx src/cli.ts repack output/extracted/&lt;name&gt; out.fig --mode kiwi
+npx tsx src/cli.ts repack output/extracted/&lt;name&gt; out.fig --mode json
 
-# Run unit + integration tests
+# 3) pen-export   — .fig → .pen + .pen.json (Pencil-compatible)
+npx tsx src/cli.ts pen-export docs/&lt;file&gt;.fig --out out.pen
+
+# 4) editable-html — .fig → single self-contained HTML with embedded .fig
+npx tsx src/cli.ts editable-html docs/&lt;file&gt;.fig --out out.html --single-file
+
+# 5) html-report   — extracted/ → browsable dashboard (multi-file or single)
+npx tsx src/cli.ts html-report output/extracted/&lt;name&gt; ./dashboard
+npx tsx src/cli.ts html-report output/extracted/&lt;name&gt; report.html --single-file
+
+# 6) round-trip-html — extracted/ → 06_report/figma-round-trip.html viewer
+npx tsx src/cli.ts round-trip-html output/extracted/&lt;name&gt;
+
+# 7) tokens — .fig → tokens JSON (colors / typography / spacing)
+npx tsx src/cli.ts tokens docs/&lt;file&gt;.fig
+
+# --- Tests ---
 npm test                       # main project (162 tests)
-cd web && npm test             # web (602 tests)
+cd web && npm test             # web (622 tests)
 
-# Web editor (concurrent backend + Vite)
+# --- Web editor (concurrent backend + Vite) ---
 cd web && npm run dev          # → http://localhost:5273
 
-# Audit harness (round 17)
+# --- Audit harness (round 17) ---
 node web/scripts/audit-raw-coverage.mjs
 node web/scripts/audit-properties-coverage.mjs</code></pre>
 
