@@ -192,6 +192,48 @@ export function resolveVariableChain(
   return { leaf: cur, chain, end: { kind: 'depth-cap', cap: maxDepth } };
 }
 
+/**
+ * Round 18-B — `colorVarTrail` formats a paint's colorVar alias chain as
+ * a list of `{ id, name }` entries the Inspector can render as
+ * "A → B → C", together with the underlying chain end-state (cycle /
+ * dead-end / depth-cap / leaf) for marker rendering.
+ *
+ * Spec: docs/specs/web-render-fidelity-round18-B.spec.md
+ *
+ * Reuses `resolveVariableChain`. Adds round-15-style gating: returns null
+ * when paint has no `colorVar` alias OR when the alias target isn't a
+ * VARIABLE — keeping behavior consistent with `colorVarName`.
+ */
+export interface ColorVarTrailEntry {
+  id: string;
+  name: string | null;
+}
+
+export interface ColorVarTrailResult {
+  entries: ColorVarTrailEntry[];
+  end: VariableChainEnd;
+}
+
+export function colorVarTrail(paint: unknown, root: unknown): ColorVarTrailResult | null {
+  if (!paint || typeof paint !== 'object' || !root) return null;
+  const p = paint as { colorVar?: { value?: { alias?: { guid?: AliasGuid } } } };
+  const id = readGuid(p.colorVar?.value?.alias?.guid);
+  if (!id) return null;
+  const target = findById(root, id) as Record<string, unknown> | null;
+  if (!target || target.type !== 'VARIABLE') return null;
+
+  const chainResult = resolveVariableChain(target, root);
+  if (!chainResult) return null;
+
+  const entries: ColorVarTrailEntry[] = chainResult.chain.map((cid) => {
+    const node = findById(root, cid) as { name?: unknown } | null;
+    const name = node && typeof node.name === 'string' ? node.name : null;
+    return { id: cid, name };
+  });
+
+  return { entries, end: chainResult.end };
+}
+
 export function effectiveTextStyle(node: unknown, root: unknown): EffectiveTextStyle {
   if (!node || typeof node !== 'object') return {};
   const raw = node as Record<string, unknown>;
