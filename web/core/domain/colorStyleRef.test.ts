@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { colorVarName, textStyleName, effectiveTextStyle, resolveVariableChain, colorVarTrail } from './colorStyleRef.js';
 
 /**
- * Spec: docs/specs/web-render-fidelity-round15.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round15.spec.md
  *
  * `paint.colorVar.value.alias.guid` and `node.styleIdForText.guid` carry
  * Figma color/text-style library references. The helpers return the

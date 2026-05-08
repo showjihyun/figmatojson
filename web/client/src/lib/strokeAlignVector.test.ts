@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { applyStrokeAlignToVectorPath } from './strokeAlign.js';
 
 /**
- * Spec: docs/specs/web-render-fidelity-round13.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round13.spec.md
  *
  * Konva.Path lacks a native stroke-alignment, so we emulate via two
  * orthogonal plumbings:

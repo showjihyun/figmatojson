@@ -1,7 +1,7 @@
 /**
  * Figma IMAGE paint scaleMode → Konva.Image crop / dst rect.
  *
- * Spec: docs/specs/web-render-fidelity-round8.spec.md §2
+ * Spec: docs/specs/archive/web-render-fidelity-round8.spec.md §2
  *
  * Konva.Image accepts a `crop` prop ({x, y, width, height}) that
  * specifies which part of the source image to use, plus regular

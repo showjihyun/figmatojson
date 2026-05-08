@@ -26,6 +26,10 @@
 
 **한 줄 요약**: Figma의 `.fig` 바이너리를 9단계 파이프라인으로 풀어 무손실 JSON·이미지·SVG로 export하고, 단계별 산출물을 폴더로 남겨 추적·검증·재패키징을 가능하게 한다.
 
+> 📘 **바이너리 구조 시각 레퍼런스**: [`docs/fig-format/index.html`](./fig-format/index.html)
+> — Stage 1~4의 byte-level 레이아웃, fig-kiwi 컨테이너, 568 type schema, ENUM/STRUCT/MESSAGE 와이어 패턴, tag-matching 디코드를 mermaid + 색상 byte-map 으로 정리한 단일 HTML.
+> Source notes: [`docs/fig-format/figma-fig-format.md`](./fig-format/figma-fig-format.md).
+
 ---
 
 ## 1. 처리 프로세스 (9 단계)
@@ -35,6 +39,7 @@
 ### Stage 1️⃣ 컨테이너 분해
 
 > Figma Cloud export `.fig`는 사실 **ZIP 파일**이다. 안의 `canvas.fig`만 진짜 바이너리.
+> 👁️ 시각 레퍼런스: [fig-format §2 — Layer 1 Container](./fig-format/index.html#layer1)
 
 | | |
 |---|---|
@@ -47,6 +52,7 @@
 ### Stage 2️⃣ fig-kiwi 아카이브 청크 분해
 
 > `canvas.fig`는 Evan Wallace의 **Kiwi 직렬화 포맷** + 청크 컨테이너. 두 청크(스키마 + 데이터)로 나뉜다.
+> 👁️ 시각 레퍼런스: [fig-format §2.2 — fig-kiwi archive byte layout](./fig-format/index.html#fig-kiwi-archive)
 
 | | |
 |---|---|
@@ -59,6 +65,7 @@
 ### Stage 3️⃣ 압축 해제 (deflate-raw / zstd 자동 분기)
 
 > 첫 청크는 **deflate-raw**, 두 번째 청크는 **zstd** — 한 파일 안에 다른 알고리즘. 본 프로젝트의 핵심 발견.
+> 👁️ 시각 레퍼런스: [fig-format §2.3 — Compression auto-detect](./fig-format/index.html#compression)
 
 | | |
 |---|---|
@@ -71,6 +78,7 @@
 ### Stage 4️⃣ Kiwi 디코드 (스키마 → 메시지)
 
 > 첫 청크는 **스키마 정의 자체**(568개 타입), 두 번째 청크는 그 스키마로 인코딩된 **NodeChanges 메시지**.
+> 👁️ 시각 레퍼런스: [fig-format §3 — Schema chunk](./fig-format/index.html#layer2) / [§4 — Data chunk · MESSAGE 디코드](./fig-format/index.html#layer3)
 
 | | |
 |---|---|
@@ -83,6 +91,7 @@
 ### Stage 5️⃣ 노드 트리 재구성
 
 > 메시지의 `nodeChanges[]`는 평탄한 배열. parent GUID로 **트리 복원** + position 문자열로 **형제 정렬**.
+> 👁️ 시각 레퍼런스: [fig-format §4.3 — Tree reconstruction](./fig-format/index.html#tree-build)
 
 | | |
 |---|---|
@@ -461,6 +470,9 @@ npx tsx src/cli.ts --help
 ## 10. 참고
 
 - [PRD.md](./PRD.md) — 원본 요구사항
+- [`docs/fig-format/index.html`](./fig-format/index.html) — `.fig` 바이너리 구조 시각 레퍼런스 (ko/en, mermaid + byte-map)
+- [`docs/fig-format/figma-fig-format.md`](./fig-format/figma-fig-format.md) — 동일 내용의 580 라인 reverse-engineered 노트
+- [`docs/dev-guide.html`](./dev-guide.html) — 단일 파일 개발자 가이드 (자매 문서)
 - Evan Wallace, [Kiwi schema-based binary format](https://github.com/evanw/kiwi)
 - Albert Sikkema (2026-01), [Reverse-Engineering Figma Make Files](https://albertsikkema.com/ai/development/tools/reverse-engineering/2026/01/23/reverse-engineering-figma-make-files.html)
 - npm, [`fig-kiwi`](https://www.npmjs.com/package/fig-kiwi) — 참고용 (런타임 미사용)

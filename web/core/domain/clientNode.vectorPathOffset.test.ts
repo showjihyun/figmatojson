@@ -4,7 +4,7 @@ import { toClientNode } from './clientNode.js';
 import type { TreeNode } from '../../../src/types.js';
 
 /**
- * Spec: docs/specs/web-render-fidelity-round11.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round11.spec.md
  *
  * The vectorNetworkBlob decoder in `src/vector.ts` produces SVG path d= strings
  * whose coords live in `vectorData.normalizedSize` space (0..normalizedSize).

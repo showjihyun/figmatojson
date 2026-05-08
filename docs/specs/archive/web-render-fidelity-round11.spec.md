@@ -119,7 +119,7 @@ strokeAlign=CENTER 의 stroke outset 보정도 누락.
 
 - `docs/specs/vector-decode.spec.md` — vectorNetworkToPath 의 출력 좌표계
   (`normalizedSize` 기준) 정의
-- `docs/specs/web-render-fidelity-round2.spec.md` §2 — strokeAlign 보정
+- `docs/specs/archive/web-render-fidelity-round2.spec.md` §2 — strokeAlign 보정
   (background Rect 만 다룸)
-- `docs/specs/web-render-fidelity-round3.spec.md` — transform 분해 (rotation
+- `docs/specs/archive/web-render-fidelity-round3.spec.md` — transform 분해 (rotation
   vs translation-only fallback)

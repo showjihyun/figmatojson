@@ -1,7 +1,7 @@
 /**
  * Konva-rendered INNER_SHADOW emulation.
  *
- * Spec: docs/specs/web-render-fidelity-round6.spec.md §3
+ * Spec: docs/specs/archive/web-render-fidelity-round6.spec.md §3
  *
  * Konva.Shape doesn't natively support inner shadow, so we draw a
  * custom shape via sceneFunc that:

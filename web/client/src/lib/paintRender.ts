@@ -6,7 +6,7 @@
  *   - { kind: 'image' } — caller renders an ImageFill instead
  *   - null — paint unrenderable (e.g., gradient with no stops, hidden)
  *
- * Spec: docs/specs/web-render-fidelity-round6.spec.md §2.2
+ * Spec: docs/specs/archive/web-render-fidelity-round6.spec.md §2.2
  *
  * Each visible paint in fillPaints[] becomes one Konva element in the
  * stack. SOLID and gradient paints become Rects; IMAGE paints become

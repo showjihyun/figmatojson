@@ -2,7 +2,7 @@
  * Figma textCase / textDecoration → render-time string transform +
  * Konva.Text textDecoration prop value.
  *
- * Spec: docs/specs/web-render-fidelity-round5.spec.md §3, §4
+ * Spec: docs/specs/archive/web-render-fidelity-round5.spec.md §3, §4
  *
  * textCase is render-only — Figma keeps `textData.characters` in the
  * original case and applies the transform when displaying. CJK / Hangul

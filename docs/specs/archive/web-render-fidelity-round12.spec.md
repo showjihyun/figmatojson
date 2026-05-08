@@ -6,7 +6,7 @@
 | 구현 | `web/core/domain/clientNode.ts` (`toClientNode`: vector path scale 계산) + `web/client/src/Canvas.tsx` (`<Path>` 렌더 포인트) |
 | 테스트 | `web/core/domain/clientNode.vectorPathScale.test.ts` |
 | 부모 | round 11 |
-| 형제 | `docs/specs/vector-decode.spec.md` (path 좌표 source of truth), `docs/specs/web-render-fidelity-round11.spec.md` (path inset) |
+| 형제 | `docs/specs/vector-decode.spec.md` (path 좌표 source of truth), `docs/specs/archive/web-render-fidelity-round11.spec.md` (path inset) |
 
 ## 1. 배경
 
@@ -96,5 +96,5 @@ size 영역보다 큰 영역 (-20, -20)~(100, 100) 에 그려져 클립되거나
 
 ## 8. 참조
 
-- `docs/specs/web-render-fidelity-round11.spec.md` — path inset (size ≥ normalizedSize)
+- `docs/specs/archive/web-render-fidelity-round11.spec.md` — path inset (size ≥ normalizedSize)
 - `docs/specs/vector-decode.spec.md` — `vectorNetworkToPath` 출력 좌표계 (`normalizedSize` 기준)

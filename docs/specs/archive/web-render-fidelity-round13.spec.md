@@ -138,5 +138,5 @@ export function applyStrokeAlignToVectorPath(
 
 ## 6. 참조
 
-- `docs/specs/web-render-fidelity-round2.spec.md §I-SA5` — 본 라운드의 출발점
+- `docs/specs/archive/web-render-fidelity-round2.spec.md §I-SA5` — 본 라운드의 출발점
 - Konva docs — `Shape#fillAfterStrokeEnabled`

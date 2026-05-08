@@ -109,5 +109,5 @@ export function colorVarTrail(paint: unknown, root: unknown): ColorVarTrailResul
 
 ## 6. 참조
 
-- `docs/specs/web-render-fidelity-round15.spec.md` — single-hop 라벨 정책
-- `docs/specs/web-render-fidelity-round18-A.spec.md` — `resolveVariableChain` API
+- `docs/specs/archive/web-render-fidelity-round15.spec.md` — single-hop 라벨 정책
+- `docs/specs/archive/web-render-fidelity-round18-A.spec.md` — `resolveVariableChain` API

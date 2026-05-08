@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="ko" data-lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Figma `.fig` Binary Format — Structural Reference</title>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral', flowchart: { curve: 'basis' } });
+</script>
+<style>
+  :root {
+    --fg: #1f2329;
+    --muted: #6b7280;
+    --bg: #ffffff;
+    --card: #f7f8fa;
+    --border: #e5e7eb;
+    --accent: #2563eb;
+    --accent-soft: #dbeafe;
+    --magic-bg: #fef3c7;     /* magic / prelude */
+    --magic-fg: #92400e;
+    --header-bg: #dbeafe;    /* version, lengths */
+    --header-fg: #1e40af;
+    --schema-bg: #d1fae5;    /* schema chunk */
+    --schema-fg: #065f46;
+    --data-bg: #fce7f3;      /* data chunk */
+    --data-fg: #9d174d;
+    --thumbnail-bg: #ede9fe; /* preview chunk */
+    --thumbnail-fg: #5b21b6;
+    --code-bg: #1f2937;
+    --code-fg: #e5e7eb;
+    --max: 920px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Pretendard', 'Segoe UI', Roboto, system-ui, sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.6;
+    font-size: 15px;
+  }
+  .layout { display: grid; grid-template-columns: 240px 1fr; max-width: 1240px; margin: 0 auto; gap: 32px; padding: 0 24px; }
+  nav.toc { position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto; padding: 24px 8px 24px 0; border-right: 1px solid var(--border); font-size: 13px; }
+  nav.toc h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 16px 0 8px 4px; }
+  nav.toc ol { list-style: none; padding: 0; margin: 0 0 16px 0; }
+  nav.toc li { padding: 3px 4px; }
+  nav.toc a { color: var(--fg); text-decoration: none; display: block; padding: 4px 8px; border-radius: 6px; }
+  nav.toc a:hover { background: var(--card); color: var(--accent); }
+  nav.toc ol ol { padding-left: 12px; font-size: 12px; color: var(--muted); }
+  main { max-width: var(--max); padding: 24px 8px 80px; }
+  header.hero { padding: 28px 0 8px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+  header.hero h1 { font-size: 30px; margin: 0 0 8px; letter-spacing: -0.02em; }
+  header.hero .subtitle { color: var(--muted); margin: 0 0 16px; }
+  .lang-toggle { position: fixed; top: 16px; right: 16px; display: inline-flex; gap: 4px; padding: 4px; background: var(--card); border: 1px solid var(--border); border-radius: 999px; z-index: 100; }
+  .lang-toggle button { background: none; border: none; padding: 4px 12px; font-size: 12px; font-weight: 600; cursor: pointer; border-radius: 999px; color: var(--muted); }
+  .lang-toggle button.active { background: var(--accent); color: white; }
+  section { margin: 40px 0; }
+  h2 { font-size: 22px; margin: 0 0 8px; padding-top: 24px; border-top: 1px solid var(--border); }
+  h2:first-of-type { border-top: 0; padding-top: 0; }
+  h3 { font-size: 17px; margin: 20px 0 6px; }
+  h4 { font-size: 14px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  p { margin: 8px 0; }
+  ul, ol { margin: 6px 0 12px; padding-left: 22px; }
+  li { margin: 3px 0; }
+  code { background: var(--card); padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  pre { background: var(--code-bg); color: var(--code-fg); padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: 12.5px; line-height: 1.55; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { border-collapse: collapse; margin: 12px 0; font-size: 13px; width: 100%; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--card); font-weight: 600; }
+  td code { font-size: 12px; }
+  blockquote { border-left: 3px solid var(--accent); margin: 12px 0; padding: 4px 14px; color: var(--muted); background: var(--accent-soft); border-radius: 0 6px 6px 0; }
+  .mermaid { background: var(--card); padding: 16px; border-radius: 8px; margin: 14px 0; text-align: center; overflow-x: auto; }
+  .footnote { color: var(--muted); font-size: 13px; }
+
+  /* Byte layout visualization */
+  .bytemap { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; margin: 14px 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .bytemap-row { display: grid; grid-template-columns: 80px 1fr; border-bottom: 1px solid var(--border); }
+  .bytemap-row:last-child { border-bottom: 0; }
+  .bytemap-offset { background: var(--card); padding: 8px 10px; color: var(--muted); border-right: 1px solid var(--border); font-weight: 600; }
+  .bytemap-content { padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+  .byte-row { display: flex; gap: 2px; flex-wrap: wrap; }
+  .byte-cell { background: var(--bg); border: 1px solid var(--border); border-radius: 3px; padding: 3px 6px; min-width: 28px; text-align: center; font-size: 11px; }
+  .byte-cell.magic   { background: var(--magic-bg);    color: var(--magic-fg);   border-color: var(--magic-fg);   }
+  .byte-cell.header  { background: var(--header-bg);   color: var(--header-fg);  border-color: var(--header-fg);  }
+  .byte-cell.schema  { background: var(--schema-bg);   color: var(--schema-fg);  border-color: var(--schema-fg);  }
+  .byte-cell.data    { background: var(--data-bg);     color: var(--data-fg);    border-color: var(--data-fg);    }
+  .byte-cell.thumb   { background: var(--thumbnail-bg);color: var(--thumbnail-fg); border-color: var(--thumbnail-fg);}
+  .byte-cell.bigblock { padding: 6px 10px; min-width: 100px; font-style: italic; }
+  .byte-label { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  /* Layer cards */
+  .layer-stack { display: flex; flex-direction: column; gap: 8px; margin: 14px 0; }
+  .layer { padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); position: relative; }
+  .layer h4 { margin: 0 0 4px; color: var(--fg); text-transform: none; letter-spacing: 0; font-size: 14px; font-weight: 700; }
+  .layer-1 { background: var(--magic-bg);    border-color: var(--magic-fg); }
+  .layer-2 { background: var(--schema-bg);   border-color: var(--schema-fg); }
+  .layer-3 { background: var(--data-bg);     border-color: var(--data-fg); }
+  .layer-4 { background: var(--accent-soft); border-color: var(--accent); }
+  .layer-arrow { color: var(--muted); text-align: center; font-weight: 700; }
+
+  /* legend */
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; margin: 8px 0 16px; }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid; }
+
+  html[data-lang="ko"] .en { display: none; }
+  html[data-lang="en"] .ko { display: none; }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; padding: 0 16px; }
+    nav.toc { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border); padding: 16px 0; }
+  }
+</style>
+</head>
+<body>
+
+<div class="lang-toggle">
+  <button id="btn-ko" class="active" onclick="setLang('ko')">한국어</button>
+  <button id="btn-en" onclick="setLang('en')">English</button>
+</div>
+
+<div class="layout">
+
+<nav class="toc">
+  <h2 class="ko">목차</h2><h2 class="en">Contents</h2>
+  <ol>
+    <li><a href="#overview"><span class="ko">1. 한눈에 보기</span><span class="en">1. At a glance</span></a></li>
+    <li><a href="#layer1"><span class="ko">2. Layer 1 — 컨테이너</span><span class="en">2. Layer 1 — Container</span></a>
+      <ol>
+        <li><a href="#zip-wrapper">2.1 ZIP wrapper</a></li>
+        <li><a href="#fig-kiwi-archive">2.2 fig-kiwi archive</a></li>
+        <li><a href="#compression">2.3 Compression</a></li>
+      </ol>
+    </li>
+    <li><a href="#layer2"><span class="ko">3. Layer 2 — Schema</span><span class="en">3. Layer 2 — Schema</span></a>
+      <ol>
+        <li><a href="#schema-layout">3.1 Binary layout</a></li>
+        <li><a href="#schema-builtins">3.2 Built-in types</a></li>
+        <li><a href="#schema-kinds">3.3 ENUM / STRUCT / MESSAGE</a></li>
+      </ol>
+    </li>
+    <li><a href="#layer3"><span class="ko">4. Layer 3 — Data</span><span class="en">4. Layer 3 — Data</span></a>
+      <ol>
+        <li><a href="#message-decode">4.1 Tag-based decode</a></li>
+        <li><a href="#field-tag">4.2 Field-tag matching</a></li>
+        <li><a href="#tree-build">4.3 Tree reconstruction</a></li>
+      </ol>
+    </li>
+    <li><a href="#nodes"><span class="ko">5. 노드 모델</span><span class="en">5. Node model</span></a></li>
+    <li><a href="#ui-mapping"><span class="ko">6. Figma UI 매칭</span><span class="en">6. Figma UI mapping</span></a></li>
+    <li><a href="#out-of-scope"><span class="ko">7. data 안에 없는 것</span><span class="en">7. Outside the file</span></a></li>
+    <li><a href="#refs"><span class="ko">8. 참조</span><span class="en">8. References</span></a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="hero">
+  <h1><span class="ko">Figma <code>.fig</code> 바이너리 포맷 — 구조체 시각 레퍼런스</span><span class="en">Figma <code>.fig</code> Binary Format — Structural Reference</span></h1>
+  <p class="subtitle ko">ZIP 바이트부터 35,660개 노드 트리까지의 5-레이어 디코드. byte-level 레이아웃 + Kiwi self-describing schema + tag-based MESSAGE 디코딩 시각화.</p>
+  <p class="subtitle en">A five-layer decode from ZIP bytes to a 35,660-node tree. Byte-level layouts + Kiwi self-describing schema + tag-based MESSAGE decoding, visualized.</p>
+  <p class="footnote ko">자료 출처 — <code>docs/fig-format/figma-fig-format.md</code> (580 라인 reverse-engineered notes), <code>docs/SPEC.md</code> §1, <code>docs/SPEC-architecture.md</code> §2, <code>CONTEXT.md</code>. 자매 문서: <code>docs/dev-guide.html</code> (전체 개발자 가이드).</p>
+  <p class="footnote en">Sources — <code>docs/fig-format/figma-fig-format.md</code> (580-line reverse-engineered notes), <code>docs/SPEC.md</code> §1, <code>docs/SPEC-architecture.md</code> §2, <code>CONTEXT.md</code>. Sibling: <code>docs/dev-guide.html</code> (full developer guide).</p>
+</header>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     1. AT A GLANCE
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="overview">
+<h2><span class="ko">1. 한눈에 보기</span><span class="en">1. At a glance</span></h2>
+
+<div class="ko">
+<p><code>.fig</code> 파일은 <strong>5 레이어 디코드</strong>를 거쳐야 의미가 나온다. 가장 바깥은 표준 ZIP, 그 안의 <code>canvas.fig</code> 가 Figma 의 진짜 바이너리 (fig-kiwi). 이 archive 안엔 두 개의 압축 chunk — schema (568 type 정의) 와 data (35,660 노드의 평탄 message). data chunk 의 평탄 array 를 parent GUID 로 link 하면 우리가 보는 layer tree.</p>
+</div>
+<div class="en">
+<p>Decoding a <code>.fig</code> file takes <strong>five layers</strong>. The outermost is a standard ZIP. Inside, <code>canvas.fig</code> is Figma's actual binary (fig-kiwi format). The archive holds two compressed chunks — a schema (568 type definitions) and the data (a flat message of 35,660 nodes). Linking the flat array by parent GUID yields the layer tree everyone sees.</p>
+</div>
+
+<div class="layer-stack">
+  <div class="layer layer-1">
+    <h4>Layer 1 — Container</h4>
+    <div><span class="ko">ZIP STORE wrapper. <code>canvas.fig</code> + <code>meta.json</code> + <code>thumbnail.png</code> + <code>images/&lt;sha1&gt;</code></span><span class="en">ZIP STORE wrapper. <code>canvas.fig</code> + <code>meta.json</code> + <code>thumbnail.png</code> + <code>images/&lt;sha1&gt;</code></span></div>
+  </div>
+  <div class="layer-arrow">▼</div>
+  <div class="layer layer-1">
+    <h4>Layer 2 — fig-kiwi Archive</h4>
+    <div><span class="ko">8B "fig-kiwi" magic + 4B version + length-prefixed chunks (schema, data, optional thumbnail).</span><span class="en">8B "fig-kiwi" magic + 4B version + length-prefixed chunks (schema, data, optional thumbnail).</span></div>
+  </div>
+  <div class="layer-arrow">▼</div>
+  <div class="layer layer-2">
+    <h4>Layer 3 — Decompression</h4>
+    <div><span class="ko">Schema chunk: deflate-raw / deflate-zlib. Data chunk: <strong>zstd</strong>. magic byte 자동 분기 필수.</span><span class="en">Schema chunk: deflate-raw / deflate-zlib. Data chunk: <strong>zstd</strong>. Magic-byte auto-detect is mandatory.</span></div>
+  </div>
+  <div class="layer-arrow">▼</div>
+  <div class="layer layer-3">
+    <h4>Layer 4 — Kiwi schema + Message</h4>
+    <div><span class="ko">Schema → 568 type 정의 (ENUM/STRUCT/MESSAGE). Data → root <code>Message</code> 디코드 → <code>nodeChanges[]</code> 평탄 array.</span><span class="en">Schema → 568 type definitions (ENUM / STRUCT / MESSAGE). Data → root <code>Message</code> decode → flat <code>nodeChanges[]</code> array.</span></div>
+  </div>
+  <div class="layer-arrow">▼</div>
+  <div class="layer layer-4">
+    <h4>Layer 5 — Tree</h4>
+    <div><span class="ko">Parent GUID link + fractional-index sort → DOCUMENT/CANVAS/FRAME/… 트리. Figma 의 layer panel.</span><span class="en">Parent GUID link + fractional-index sort → DOCUMENT/CANVAS/FRAME/… tree — Figma's layer panel.</span></div>
+  </div>
+</div>
+
+<h3 class="ko">색상 범례</h3>
+<h3 class="en">Color legend</h3>
+<div class="legend">
+  <span class="legend-item"><span class="legend-swatch" style="background:var(--magic-bg);border-color:var(--magic-fg)"></span><span class="ko">magic / prelude</span><span class="en">magic / prelude</span></span>
+  <span class="legend-item"><span class="legend-swatch" style="background:var(--header-bg);border-color:var(--header-fg)"></span><span class="ko">version / length</span><span class="en">version / length</span></span>
+  <span class="legend-item"><span class="legend-swatch" style="background:var(--schema-bg);border-color:var(--schema-fg)"></span><span class="ko">schema chunk</span><span class="en">schema chunk</span></span>
+  <span class="legend-item"><span class="legend-swatch" style="background:var(--data-bg);border-color:var(--data-fg)"></span><span class="ko">data chunk</span><span class="en">data chunk</span></span>
+  <span class="legend-item"><span class="legend-swatch" style="background:var(--thumbnail-bg);border-color:var(--thumbnail-fg)"></span><span class="ko">thumbnail (선택)</span><span class="en">thumbnail (optional)</span></span>
+</div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     2. LAYER 1 — CONTAINER
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="layer1">
+<h2><span class="ko">2. Layer 1 — 컨테이너</span><span class="en">2. Layer 1 — Container</span></h2>
+
+<h3 id="zip-wrapper">2.1 ZIP wrapper</h3>
+
+<div class="ko"><p>현대 Figma export 는 <strong>STORE 모드 ZIP</strong> (압축 없음). 첫 4 byte 가 <code>50 4B 03 04</code> (ZIP magic) 이면 ZIP, <code>66 69 67 2D 6B 69 77 69</code> ("fig-kiwi") 이면 raw archive. <code>src/container.ts:loadContainer</code> 가 자동 분기.</p></div>
+<div class="en"><p>Modern Figma exports are <strong>STORE-mode ZIPs</strong> (no compression). The first 4 bytes — <code>50 4B 03 04</code> (ZIP magic) vs <code>66 69 67 2D 6B 69 77 69</code> ("fig-kiwi" magic) — determine the path. <code>src/container.ts:loadContainer</code> dispatches.</p></div>
+
+<pre><code>design.fig (ZIP STORE)
+├── canvas.fig          ← real binary (fig-kiwi)
+├── meta.json           ← file_name, background_color, exported_at
+├── thumbnail.png       ← small preview
+└── images/
+    ├── &lt;sha1-hash-1&gt;   ← raw bytes; magic-byte sniff for type
+    └── &lt;sha1-hash-2&gt;</code></pre>
+
+<h3 id="fig-kiwi-archive">2.2 fig-kiwi archive byte layout</h3>
+
+<div class="ko"><p>ZIP 안의 <code>canvas.fig</code> 가 진짜 바이너리. 8 byte ASCII magic + 4 byte LE version + length-prefixed chunks (보통 2개 — schema, data — + 선택적 thumbnail).</p></div>
+<div class="en"><p>The real binary lives in the ZIP entry <code>canvas.fig</code>. 8-byte ASCII magic + 4-byte LE version + length-prefixed chunks (typically 2 — schema, data — plus an optional thumbnail).</p></div>
+
+<div class="bytemap">
+  <div class="bytemap-row">
+    <div class="bytemap-offset">0x00</div>
+    <div class="bytemap-content">
+      <div class="byte-row">
+        <span class="byte-cell magic">66</span><span class="byte-cell magic">69</span>
+        <span class="byte-cell magic">67</span><span class="byte-cell magic">2D</span>
+        <span class="byte-cell magic">6B</span><span class="byte-cell magic">69</span>
+        <span class="byte-cell magic">77</span><span class="byte-cell magic">69</span>
+      </div>
+      <div class="byte-label">"fig-kiwi" — 8 byte ASCII magic</div>
+    </div>
+  </div>
+  <div class="bytemap-row">
+    <div class="bytemap-offset">0x08</div>
+    <div class="bytemap-content">
+      <div class="byte-row">
+        <span class="byte-cell header">6A</span>
+        <span class="byte-cell header">00</span>
+        <span class="byte-cell header">00</span>
+        <span class="byte-cell header">00</span>
+      </div>
+      <div class="byte-label">version = 106 (LE uint32) — modern Figma exports</div>
+    </div>
+  </div>
+  <div class="bytemap-row">
+    <div class="bytemap-offset">0x0C</div>
+    <div class="bytemap-content">
+      <div class="byte-row">
+        <span class="byte-cell header">N0</span><span class="byte-cell header">N0</span>
+        <span class="byte-cell header">N0</span><span class="byte-cell header">N0</span>
+      </div>
+      <div class="byte-label">chunk[0].size — schema chunk byte count (LE uint32)</div>
+    </div>
+  </div>
+  <div class="bytemap-row">
+    <div class="bytemap-offset">0x10</div>
+    <div class="bytemap-content">
+      <div class="byte-row">
+        <span class="byte-cell schema bigblock">…schema bytes (compressed)…</span>
+      </div>
+      <div class="byte-label">chunk[0] — Kiwi binary schema, ~26 KB compressed (~64 KB raw)</div>
+    </div>
+  </div>
+  <div class="bytemap-row">
+    <div class="bytemap-offset">0x10+N0</div>
+    <div class="bytemap-content">
+      <div class="byte-row">
+        <span class="byte-cell header">N1</span><span class="byte-cell header">N1</span>
+        <span class="byte-cell header">N1</span><span class="byte-cell header">N1</span>
+      </div>
+      <div class="byte-label">chunk[1].size — data chunk byte count (LE uint32)</div>
+    </div>
+  </div>
+  <div class="bytemap-row">
+    <div class="bytemap-offset">…</div>
+    <div class="bytemap-content">
+      <div class="byte-row">
+        <span class="byte-cell data bigblock">…data bytes (compressed)…</span>
+      </div>
+      <div class="byte-label">chunk[1] — encoded Message, ~3.8 MB compressed (~20 MB raw)</div>
+    </div>
+  </div>
+  <div class="bytemap-row">
+    <div class="bytemap-offset">…</div>
+    <div class="bytemap-content">
+      <div class="byte-row">
+        <span class="byte-cell thumb bigblock">…(optional thumbnail PNG)…</span>
+      </div>
+      <div class="byte-label">chunk[2] — preview PNG bytes (when present); chunks[3+] are reserved</div>
+    </div>
+  </div>
+</div>
+
+<h3 id="compression">2.3 압축 알고리즘 자동 감지</h3>
+<h3 class="en" style="display:none">2.3 Compression auto-detect</h3>
+
+<div class="ko"><p>각 chunk 가 어떤 압축인지 표시하는 헤더는 없고, 첫 byte 로 sniff. 본 프로젝트의 핵심 발견: <strong>schema 와 data 가 다른 알고리즘</strong>. fig-kiwi npm 패키지가 단일 deflate-raw 를 가정해 modern <code>.fig</code> 에서 깨지는 원인.</p></div>
+<div class="en"><p>There's no per-chunk header that tells you the algorithm — sniff the first byte. The project's core finding: <strong>schema and data use different algorithms</strong>. The <code>fig-kiwi</code> npm package assumes a single deflate-raw, which silently breaks modern <code>.fig</code>s.</p></div>
+
+<table>
+  <tr><th>magic</th><th class="ko">알고리즘</th><th class="en">Algorithm</th><th class="ko">전형적 위치</th><th class="en">Typical chunk</th></tr>
+  <tr><td><code>28 B5 2F FD</code></td><td colspan="2"><strong>zstd</strong> (Facebook)</td><td colspan="2">data chunk</td></tr>
+  <tr><td><code>78 01</code> / <code>78 9C</code> / <code>78 DA</code></td><td colspan="2">deflate-zlib</td><td colspan="2">schema chunk (modern)</td></tr>
+  <tr><td><span class="ko">그 외</span><span class="en">other</span></td><td colspan="2">deflate-raw (RFC 1951)</td><td colspan="2"><span class="ko">레거시 / 일부 fixture</span><span class="en">legacy / some fixtures</span></td></tr>
+</table>
+
+<pre><code>function detectCompression(buf) {
+  if (startsWith(buf, [0x28, 0xB5, 0x2F, 0xFD])) return 'zstd';
+  if (buf[0] === 0x78) return 'deflate-zlib';
+  return 'deflate-raw';
+}</code></pre>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     3. LAYER 2 — SCHEMA
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="layer2">
+<h2><span class="ko">3. Layer 2 — Schema chunk</span><span class="en">3. Layer 2 — Schema chunk</span></h2>
+
+<div class="ko"><p>압축을 풀면 또 binary. <a href="https://github.com/evanw/kiwi" target="_blank">Kiwi</a> 의 self-describing schema format (<code>.bkiwi</code>). Figma 의 schema 는 568 정의를 가짐.</p></div>
+<div class="en"><p>Decompress and you get more binary — <a href="https://github.com/evanw/kiwi" target="_blank">Kiwi</a>'s self-describing schema format (<code>.bkiwi</code>). Figma's schema currently holds 568 definitions.</p></div>
+
+<h3 id="schema-layout">3.1 Schema binary layout</h3>
+
+<pre><code>[definitionCount : varuint]
+└── for i in 0..definitionCount:
+    ├── [name       : null-terminated UTF-8 string]
+    ├── [kind       : 1 byte]                ─┐
+    ├── [fieldCount : varuint]                │  ENUM    = 0
+    └── for j in 0..fieldCount:               │  STRUCT  = 1
+        ├── [fieldName : string]              │  MESSAGE = 2
+        ├── [type      : varint]              │
+        ├── [isArray   : 1 byte (low bit)]    │
+        └── [value     : varuint]             │</code></pre>
+
+<h4>Hex sample — single GUID STRUCT</h4>
+
+<pre><code>01                          ← definitionCount = 1
+47 55 49 44 00              ← name = "GUID\0"
+01                          ← kind = STRUCT (1)
+02                          ← fieldCount = 2
+73 65 73 73 69 6F 6E 49 44 00  ← fieldName = "sessionID\0"
+07                          ← type = -4 (uint, varint zigzag of -4 = 0x07)
+00                          ← isArray = 0
+00                          ← value = 0
+6C 6F 63 61 6C 49 44 00     ← fieldName = "localID\0"
+07                          ← type = -4 (uint)
+00                          ← isArray = 0
+00                          ← value = 0
+                            ← total: 26 bytes</code></pre>
+
+<h3 id="schema-builtins">3.2 Built-in type table</h3>
+
+<div class="ko"><p><code>field.type</code> 이 음수일 때 가리키는 8 개 기본 타입. 양수면 다른 definition index.</p></div>
+<div class="en"><p>When <code>field.type</code> is negative, it points at one of 8 built-ins. Positive values index into the definition table itself.</p></div>
+
+<table>
+  <tr><th>index</th><th class="ko">타입</th><th class="en">Type</th><th class="ko">인코딩</th><th class="en">Encoding</th></tr>
+  <tr><td>-1</td><td colspan="2">bool</td><td colspan="2">1 byte</td></tr>
+  <tr><td>-2</td><td colspan="2">byte</td><td colspan="2">1 byte</td></tr>
+  <tr><td>-3</td><td colspan="2">int</td><td colspan="2">varint (zigzag)</td></tr>
+  <tr><td>-4</td><td colspan="2">uint</td><td colspan="2">varuint</td></tr>
+  <tr><td>-5</td><td colspan="2">float</td><td colspan="2">4 bytes (LE)</td></tr>
+  <tr><td>-6</td><td colspan="2">string</td><td colspan="2">null-terminated UTF-8</td></tr>
+  <tr><td>-7</td><td colspan="2">int64</td><td colspan="2">varint64</td></tr>
+  <tr><td>-8</td><td colspan="2">uint64</td><td colspan="2">varuint64</td></tr>
+</table>
+
+<h3 id="schema-kinds">3.3 ENUM / STRUCT / MESSAGE — 세 wire 패턴</h3>
+<h3 class="en" style="display:none">3.3 ENUM / STRUCT / MESSAGE — three wire patterns</h3>
+
+<div class="ko"><p>Kiwi 의 진화 능력은 이 세 종류로 결정. STRUCT 는 wire 가 가장 컴팩트하지만 새 field 추가 불가. MESSAGE 는 tag-based 라 자유롭게 진화 가능 — Figma 가 schema 를 늘려도 옛 .fig 가 계속 읽히는 비결.</p></div>
+<div class="en"><p>Kiwi's evolvability comes from these three. STRUCT is the most compact wire but can't grow new fields. MESSAGE is tag-based and free to evolve — the reason Figma can extend its schema and old <code>.fig</code> files still read correctly.</p></div>
+
+<table>
+  <tr><th class="ko">종류</th><th class="en">Kind</th><th>wire pattern</th><th class="ko">진화 가능성</th><th class="en">Evolvability</th></tr>
+  <tr><td><strong>ENUM</strong></td><td colspan="2"><code>[varuint]</code></td><td colspan="2"><span class="ko">새 value 추가 OK</span><span class="en">Add new values freely</span></td></tr>
+  <tr><td><strong>STRUCT</strong></td><td colspan="2"><code>[val][val][val] …</code> (no tag)</td><td colspan="2"><span class="ko">새 field 추가 ❌ — 사용중인 STRUCT 는 frozen</span><span class="en">Adding fields ❌ — STRUCTs in use are frozen</span></td></tr>
+  <tr><td><strong>MESSAGE</strong></td><td colspan="2"><code>[tag][val][tag][val]…[0]</code></td><td colspan="2"><span class="ko">새 field 자유 추가, optional, value 가 같으면 이름 바뀌어도 호환</span><span class="en">Add fields freely, optional, name can change as long as value stays</span></td></tr>
+</table>
+
+<div class="mermaid">
+flowchart LR
+  R[reader] --> K{kind?}
+  K -->|ENUM| E[read 1 varuint<br/>look up enum value]
+  K -->|STRUCT| S[read each field<br/>in declared order<br/>no tag, no sentinel]
+  K -->|MESSAGE| M[loop:<br/>read tag varuint<br/>tag = 0 → break<br/>else find field by tag,<br/>read value]
+  M -.unknown tag.-> SK[skip with type info]
+  E --> O[result value]
+  S --> O
+  M --> O
+  SK --> M
+</div>
+
+<blockquote class="ko">audit-oracle <code>VALUE_ALIASES</code> 는 정확히 이 진화 메커니즘의 부산물 — <code>SPACE_EVENLY (kiwi value=3) ↔ SPACE_BETWEEN (Figma 새 명명)</code>. 같은 binary value, schema 버전 간 rename. round-trip 시 binary 보존이라 semantic 영향 0.</blockquote>
+<blockquote class="en">audit-oracle's <code>VALUE_ALIASES</code> is exactly a side-effect of this evolution — <code>SPACE_EVENLY (kiwi value=3) ↔ SPACE_BETWEEN (Figma current name)</code>. Same binary value, renamed across schema versions. Round-trip preserves the binary so there's no semantic drift.</blockquote>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     4. LAYER 3 — DATA
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="layer3">
+<h2><span class="ko">4. Layer 3 — Data chunk</span><span class="en">4. Layer 3 — Data chunk</span></h2>
+
+<div class="ko"><p>압축을 풀면 root <code>Message</code> 객체 하나가 통째로. Schema 와 달리 도입부 헤더 없음 — schema 의 <code>name === "Message"</code> definition 을 root type 으로 약속.</p></div>
+<div class="en"><p>Decompress and you get exactly one root <code>Message</code> object — no leading header. By convention, the schema definition with <code>name === "Message"</code> is the root type.</p></div>
+
+<h3 id="message-decode">4.1 MESSAGE 디코딩 알고리즘</h3>
+<h3 class="en" style="display:none">4.1 MESSAGE decode algorithm</h3>
+
+<pre><code>function decodeMessage(bb, def, schema) {
+  const result = {};
+  while (true) {
+    const tag = bb.readVarUint();
+    if (tag === 0) break;                           // ★ 0 = sentinel, message end
+
+    const field = def.fields.find(f =&gt; f.value === tag);
+    if (!field) {
+      skipUnknownField(bb, schema);                 // forward compat
+      continue;
+    }
+    result[field.name] = field.isArray
+      ? decodeArray(bb, field.type, schema)
+      : decodeValue(bb, field.type, schema);
+  }
+  return result;
+}</code></pre>
+
+<h4>Hex sample — minimal Message</h4>
+
+<pre><code>// Message { type: NODE_CHANGES, sessionID: 42 }
+
+01                          ← tag = 1 ("type" field)
+00                          ← value = 0 (enum value for NODE_CHANGES)
+02                          ← tag = 2 ("sessionID" field)
+2A                          ← value = 42 (varuint)
+00                          ← tag = 0 → message end
+                            ← total: 5 bytes</code></pre>
+
+<h3 id="field-tag">4.2 Field-tag 매칭</h3>
+<h3 class="en" style="display:none">4.2 Field-tag matching</h3>
+
+<div class="ko"><p>data byte stream 의 각 byte 가 schema 의 어느 field 를 가리키는지 결정하는 메커니즘:</p></div>
+<div class="en"><p>How a byte in the data stream maps to a schema field:</p></div>
+
+<div class="mermaid">
+flowchart LR
+  D["data stream:<br/>03 …"] --> T["read tag varuint<br/>= 3"]
+  T --> S["schema lookup<br/>def.fields.find(f =&gt; f.value === 3)"]
+  S --> F["field { name: 'nodeChanges',<br/>           value: 3,<br/>           isArray: true,<br/>           type: NodeChange-idx }"]
+  F --> A["decodeArray of NodeChange<br/>→ result.nodeChanges = [...]"]
+
+  style D fill:#fce7f3
+  style F fill:#dcfce7
+</div>
+
+<blockquote class="ko"><strong>값(value) 이 같으면 이름이 바뀌어도 호환성 유지</strong> — 이게 Figma 가 schema 를 진화시키면서도 옛 .fig 를 계속 읽을 수 있는 비결. <code>field.value</code> = 영속적 wire-tag, <code>field.name</code> = 표시용 alias.</blockquote>
+<blockquote class="en"><strong>If the value matches, the name can change without breaking compat</strong> — that's how Figma evolves the schema while still reading old <code>.fig</code>s. <code>field.value</code> is the stable wire tag; <code>field.name</code> is the display alias.</blockquote>
+
+<h3 id="tree-build">4.3 Tree reconstruction</h3>
+
+<div class="ko"><p><code>message.nodeChanges[]</code> 는 평탄. 메타리치 fixture 기준 35,660 entries. 트리 복원은 두 단계:</p></div>
+<div class="en"><p><code>message.nodeChanges[]</code> is flat — 35,660 entries on the metarich fixture. Two passes to rebuild the tree:</p></div>
+
+<pre><code>// Pass 1: index every node by GUID
+const byId = new Map();
+for (const n of message.nodeChanges) {
+  byId.set(`${n.guid.sessionID}:${n.guid.localID}`, { ...n, children: [] });
+}
+
+// Pass 2: link children → parents
+for (const n of byId.values()) {
+  const pkey = n.parentIndex
+    ? `${n.parentIndex.guid.sessionID}:${n.parentIndex.guid.localID}` : null;
+  const parent = pkey ? byId.get(pkey) : null;
+  if (parent) parent.children.push(n);
+}
+
+// Pass 3: sort siblings by parentIndex.position string (fractional indexing)
+function sortChildren(n) {
+  n.children.sort((a, b) =&gt; a.parentIndex.position &lt; b.parentIndex.position ? -1 : 1);
+  for (const c of n.children) sortChildren(c);
+}</code></pre>
+
+<div class="mermaid">
+flowchart TB
+  subgraph flat["nodeChanges[] (flat array, 35,660 entries)"]
+    direction LR
+    n0[DOCUMENT<br/>0:0]
+    n1[CANVAS<br/>0:1]
+    n2[FRAME<br/>0:5]
+    n3[RECTANGLE<br/>0:12]
+    n4[TEXT<br/>0:33]
+    n5[CANVAS<br/>0:2]
+  end
+  flat --> link[Pass 1: index by GUID<br/>Pass 2: link parents<br/>Pass 3: sort siblings]
+  link --> tree
+  subgraph tree["Reconstructed tree (Figma's layer panel)"]
+    direction TB
+    DOC[DOCUMENT 0:0]
+    DOC --> P1[CANVAS 0:1]
+    DOC --> P2[CANVAS 0:2]
+    P1 --> F1[FRAME 0:5]
+    F1 --> R1[RECTANGLE 0:12]
+    F1 --> T1[TEXT 0:33]
+  end
+</div>
+
+<blockquote class="ko"><strong>왜 평탄 array?</strong> Figma 의 wire format 은 streaming edits 용. 모든 변경이 <code>NodeChange</code> 1 개로 다중 사용자 메시지에 append. "저장된 파일" 은 그 stream 의 materialized end state 일 뿐.</blockquote>
+<blockquote class="en"><strong>Why a flat array?</strong> Figma's wire format is built for streaming edits — every change is a <code>NodeChange</code> appended to a multiplayer message. The "saved file" is just the materialized end state of that stream.</blockquote>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     5. NODE MODEL
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="nodes">
+<h2><span class="ko">5. 노드 모델</span><span class="en">5. Node model</span></h2>
+
+<h3 class="ko">자주 등장하는 STRUCT</h3>
+<h3 class="en">Common STRUCTs</h3>
+
+<pre><code>STRUCT GUID         { uint sessionID;  uint localID; }
+STRUCT Vector       { float x;         float y; }
+STRUCT Color        { float r;         float g;        float b;   float a; }
+STRUCT Matrix       { float m00; float m01; float m02;
+                      float m10; float m11; float m12; }
+STRUCT ParentIndex  { GUID guid;       string position; }   // position = fractional index</code></pre>
+
+<h3 class="ko">노드 타입 카탈로그</h3>
+<h3 class="en">Node-type catalog</h3>
+
+<table>
+  <tr><th>kiwi name</th><th>Plugin/REST name</th><th class="ko">메모</th><th class="en">Notes</th></tr>
+  <tr><td><code>DOCUMENT</code></td><td><code>DOCUMENT</code></td><td colspan="2"><span class="ko">최상위 root</span><span class="en">Top-level root</span></td></tr>
+  <tr><td><code>CANVAS</code></td><td><code>PAGE</code></td><td colspan="2"><span class="ko">각 페이지</span><span class="en">One per page</span></td></tr>
+  <tr><td><code>FRAME</code></td><td><code>FRAME</code> / <code>GROUP</code></td><td colspan="2"><span class="ko"><code>resizeToFit=true</code> + 빈 fillPaints → GROUP 으로 Figma UI 가 표시</span><span class="en"><code>resizeToFit=true</code> + empty fillPaints → Figma UI shows it as GROUP</span></td></tr>
+  <tr><td><code>RECTANGLE</code> / <code>ROUNDED_RECTANGLE</code></td><td><code>RECTANGLE</code></td><td colspan="2"><span class="ko">corner-radius 변형은 별도 type</span><span class="en">Corner-radius is a separate type, not a property</span></td></tr>
+  <tr><td><code>ELLIPSE</code> / <code>LINE</code> / <code>STAR</code> / <code>REGULAR_POLYGON</code></td><td>same</td><td colspan="2"><span class="ko">기본 도형</span><span class="en">Primitive shapes</span></td></tr>
+  <tr><td><code>VECTOR</code></td><td><code>VECTOR</code></td><td colspan="2"><span class="ko">path 데이터는 <code>commandsBlob</code> / <code>vectorNetworkBlob</code> 에 (별도 binary)</span><span class="en">Path data lives in <code>commandsBlob</code> / <code>vectorNetworkBlob</code> (separate binary)</span></td></tr>
+  <tr><td><code>TEXT</code></td><td><code>TEXT</code></td><td colspan="2"><span class="ko"><code>textData</code> 에 characters + style override table</span><span class="en"><code>textData</code> holds characters + style override table</span></td></tr>
+  <tr><td><code>SYMBOL</code></td><td><code>COMPONENT</code></td><td colspan="2"><span class="ko">component master</span><span class="en">Component master</span></td></tr>
+  <tr><td><code>INSTANCE</code></td><td><code>INSTANCE</code></td><td colspan="2"><span class="ko">component instance — <code>componentRef</code> 가 master GUID</span><span class="en">Component instance — <code>componentRef</code> points at master GUID</span></td></tr>
+  <tr><td><code>BOOLEAN_OPERATION</code></td><td>same</td><td colspan="2">union / subtract / intersect / exclude</td></tr>
+  <tr><td><code>VARIABLE</code> / <code>VARIABLE_SET</code></td><td>—</td><td colspan="2"><span class="ko">트리 children 으로 노출 안 됨; plugin/REST 는 <code>figma.variables.*</code> 통해</span><span class="en">Not exposed as tree children; plugin/REST uses <code>figma.variables.*</code></span></td></tr>
+</table>
+
+<h3 class="ko">노드 한 개 형태 (RECTANGLE 예)</h3>
+<h3 class="en">One node example (RECTANGLE)</h3>
+
+<pre><code>{
+  guid:        { sessionID: 0, localID: 12 },
+  parentIndex: { guid: { sessionID: 0, localID: 5 }, position: "!" },
+  type:        "RECTANGLE",
+  name:        "Button BG",
+  visible:     true,
+  transform:   { m00: 1, m01: 0, m02: 100, m10: 0, m11: 1, m12: 200 },
+  size:        { x: 120, y: 40 },
+  cornerRadius: 8,
+  opacity:     1,
+  fillPaints:  [{ type: "SOLID", color: {r: 0.2, g: 0.5, b: 1, a: 1}, opacity: 1 }],
+  strokePaints: [],
+  strokeWeight: 1,
+  // …more fields
+}</code></pre>
+
+<h3 class="ko">INSTANCE 노드 (component instance)</h3>
+<h3 class="en">INSTANCE node (component instance)</h3>
+
+<pre><code>{
+  guid:         { sessionID: 0, localID: 87 },
+  type:         "INSTANCE",
+  name:         "Button/Primary",
+  componentRef: { sessionID: 0, localID: 23 },   // master's GUID
+  overrideKey:  12345,                           // override tracking
+  // master-derived expanded children, attached at decode time
+  _renderChildren: [ /* … */ ],
+  // only overridden properties carried
+  fillPaints:   [ /* override */ ],
+}</code></pre>
+
+<h3 class="ko">VECTOR 노드 (별도 blob 영역)</h3>
+<h3 class="en">VECTOR node (separate blob layer)</h3>
+
+<pre><code>{
+  guid:               { sessionID: 0, localID: 99 },
+  type:               "VECTOR",
+  vectorNetworkBlob:  &lt;Uint8Array&gt;,   // schema sees only "bytes" — another binary layer beneath
+  commandsBlob:       &lt;Uint8Array&gt;,   // packed SVG path opcodes (M/L/Q/C/Z)
+  fillPaints:         [ /* … */ ],
+}</code></pre>
+
+<blockquote class="ko"><strong>Vector path 의 wire</strong> — <code>commandsBlob</code> 안의 byte: <code>0x01 MOVE_TO</code> (8B), <code>0x02 LINE_TO</code> (8B), <code>0x03 QUAD_TO</code> (16B), <code>0x04 CUBIC_TO</code> (24B), <code>0x05 CLOSE</code> (0B). 모든 float 는 LE f32. 자세한 invariant 는 <code>docs/specs/vector-decode.spec.md</code>.</blockquote>
+<blockquote class="en"><strong>Vector path wire</strong> — opcodes inside <code>commandsBlob</code>: <code>0x01 MOVE_TO</code> (8B), <code>0x02 LINE_TO</code> (8B), <code>0x03 QUAD_TO</code> (16B), <code>0x04 CUBIC_TO</code> (24B), <code>0x05 CLOSE</code> (0B). All floats are LE f32. Full invariants live in <code>docs/specs/vector-decode.spec.md</code>.</blockquote>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     6. UI MAPPING
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="ui-mapping">
+<h2><span class="ko">6. Figma UI ↔ schema 매칭</span><span class="en">6. Figma UI ↔ schema mapping</span></h2>
+
+<table>
+  <tr><th class="ko">Figma 화면 영역</th><th class="en">Figma UI area</th><th class="ko">data chunk 안의 source</th><th class="en">Data-chunk source</th></tr>
+  <tr><td><span class="ko">상단 Pages 탭</span><span class="en">Pages tab (top)</span></td><td colspan="2"><code>CANVAS</code> <span class="ko">type 노드들 (각 페이지 = 한 sub-root)</span><span class="en">type nodes — one per page</span></td></tr>
+  <tr><td><span class="ko">왼쪽 Layers panel</span><span class="en">Left Layers panel</span></td><td colspan="2"><span class="ko">모든 노드의 <code>guid</code>, <code>name</code>, <code>type</code>, <code>visible</code>, parent-child</span><span class="en">Every node's <code>guid</code>, <code>name</code>, <code>type</code>, <code>visible</code>, parent-child</span></td></tr>
+  <tr><td><span class="ko">가운데 Canvas</span><span class="en">Center Canvas</span></td><td colspan="2"><span class="ko">위 속성들로부터 *런타임* 계산 (픽셀 저장 안 됨)</span><span class="en">Computed at runtime from those props (pixels are not stored)</span></td></tr>
+  <tr><td><span class="ko">오른쪽 Inspector</span><span class="en">Right Inspector</span></td><td colspan="2"><span class="ko">선택된 노드의 <code>transform</code>, <code>size</code>, <code>fillPaints</code>, <code>strokePaints</code>, <code>effects</code>, <code>cornerRadius</code>, <code>opacity</code>, <code>layoutMode + stack*</code></span><span class="en">Selected node's <code>transform</code>, <code>size</code>, <code>fillPaints</code>, <code>strokePaints</code>, <code>effects</code>, <code>cornerRadius</code>, <code>opacity</code>, <code>layoutMode + stack*</code></span></td></tr>
+  <tr><td><span class="ko">Components panel</span><span class="en">Components panel</span></td><td colspan="2"><code>SYMBOL</code> <span class="ko">type (master) + <code>INSTANCE</code> 의 <code>componentRef</code></span><span class="en">type (master) + <code>INSTANCE.componentRef</code></span></td></tr>
+  <tr><td><span class="ko">Variables panel</span><span class="en">Variables panel</span></td><td colspan="2"><code>VARIABLE</code> / <code>VARIABLE_SET</code> <span class="ko">type 노드</span><span class="en">type nodes</span></td></tr>
+  <tr><td><span class="ko">Prototype 탭</span><span class="en">Prototype tab</span></td><td colspan="2"><code>reactions</code>, <code>prototypeStartNode</code>, <span class="ko">transition 속성</span><span class="en">transition props</span></td></tr>
+  <tr><td><span class="ko">Auto-layout 컨트롤</span><span class="en">Auto-layout controls</span></td><td colspan="2"><code>layoutMode</code>, <code>stackSpacing</code>, <code>stackPadding*</code>, <code>stackAlign*</code></td></tr>
+</table>
+
+<blockquote class="ko"><strong>"<code>.fig</code> 는 이미지 파일이 아니다."</strong> 캔버스의 픽셀은 저장되지 않는다 — 저장되는 건 그리기 명령일 뿐, 클라이언트가 매번 새로 그려낸다. 같은 <code>.fig</code> 라도 zoom / pan / dark mode / 폰트 fallback 에 따라 화면이 다른 이유.</blockquote>
+<blockquote class="en"><strong>"A <code>.fig</code> is not an image file."</strong> Canvas pixels are not stored — only drawing instructions. The client re-renders every time. Same <code>.fig</code> looks different depending on zoom, pan, dark mode, and font fallback.</blockquote>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     7. OUT OF SCOPE
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="out-of-scope">
+<h2><span class="ko">7. data 안에 *없는* 것들</span><span class="en">7. What's <em>not</em> in the data chunk</span></h2>
+
+<table>
+  <tr><th class="ko">항목</th><th class="en">Item</th><th class="ko">어디에 있나</th><th class="en">Where it lives</th></tr>
+  <tr><td><span class="ko">이미지 픽셀 (PNG/JPG bytes)</span><span class="en">Image pixels (PNG/JPG bytes)</span></td><td colspan="2"><span class="ko">ZIP 의 <code>images/&lt;sha1&gt;</code> 또는 Figma 서버</span><span class="en">ZIP's <code>images/&lt;sha1&gt;</code> or Figma server</span></td></tr>
+  <tr><td><span class="ko">Font glyph (실제 폰트 파일)</span><span class="en">Font glyphs (actual font files)</span></td><td colspan="2"><span class="ko">OS / Google Fonts / Figma font server. 이름만 저장됨</span><span class="en">OS / Google Fonts / Figma font server — only the name is stored</span></td></tr>
+  <tr><td><span class="ko">Vector path 의 풀린 형태</span><span class="en">Resolved vector geometry</span></td><td colspan="2"><code>commandsBlob</code> <span class="ko">안 별도 packed binary</span><span class="en">— packed binary one layer below the schema</span></td></tr>
+  <tr><td><span class="ko">협업 history, 코멘트</span><span class="en">Collaboration history, comments</span></td><td colspan="2"><span class="ko">Figma server-side (Postgres + DynamoDB)</span><span class="en">Figma server-side (Postgres + DynamoDB)</span></td></tr>
+  <tr><td><span class="ko">Hover/selection state</span><span class="en">Hover / selection state</span></td><td colspan="2"><span class="ko">런타임 전용, 저장 안 됨</span><span class="en">Runtime-only, never stored</span></td></tr>
+  <tr><td><code>absoluteRenderBounds</code> <span class="ko">등 derived 값</span><span class="en">and other derived values</span></td><td colspan="2"><span class="ko">런타임 계산, plugin API 가 노출만 함</span><span class="en">Runtime-computed; plugin API merely exposes them</span></td></tr>
+  <tr><td><span class="ko">Preview thumbnail</span><span class="en">Preview thumbnail</span></td><td colspan="2"><span class="ko">별도 chunk (chunk[2]) 또는 ZIP 의 <code>thumbnail.png</code></span><span class="en">Separate <code>chunk[2]</code> or ZIP's <code>thumbnail.png</code></span></td></tr>
+</table>
+
+<div class="ko"><p>이 분리가 <code>audit-oracle.spec.md §7</code> 의 "비대상" 항목과 정확히 겹친다 — <em>.fig 파일 자체의 scope 밖</em> 이거나 <em>schema 의 시야를 벗어난 binary blob</em>.</p></div>
+<div class="en"><p>This split lines up exactly with <code>audit-oracle.spec.md §7</code>'s "out of scope" — anything <em>outside the file</em> or <em>past the schema's view</em>.</p></div>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     8. REFERENCES
+     ═══════════════════════════════════════════════════════════════════════ -->
+<section id="refs">
+<h2><span class="ko">8. 참조</span><span class="en">8. References</span></h2>
+
+<h3 class="ko">프로젝트 내부 (이 문서의 source)</h3>
+<h3 class="en">In-repo (sources of this document)</h3>
+<ul>
+  <li><code>docs/fig-format/figma-fig-format.md</code> — <span class="ko">580 라인 reverse-engineered 노트 (한국어)</span><span class="en">580-line reverse-engineered notes (Korean)</span></li>
+  <li><code>docs/SPEC.md</code> — <span class="ko">CLI 9 단계 상세</span><span class="en">CLI 9-stage details</span></li>
+  <li><code>docs/SPEC-architecture.md</code> §2 — <span class="ko">바이너리 → 분석 → 변환 흐름</span><span class="en">binary → analysis → transformation flow</span></li>
+  <li><code>docs/specs/vector-decode.spec.md</code> — <span class="ko">vector path opcode invariant</span><span class="en">vector path opcode invariants</span></li>
+  <li><code>docs/specs/audit-oracle.spec.md</code> — <span class="ko">VALUE_ALIASES / 비대상 정의</span><span class="en">VALUE_ALIASES / out-of-scope</span></li>
+  <li><code>CONTEXT.md</code> — <span class="ko">전체 도메인 사전</span><span class="en">full domain glossary</span></li>
+  <li><code>docs/dev-guide.html</code> — <span class="ko">개발자 가이드 (이 문서의 자매)</span><span class="en">developer guide (this doc's sibling)</span></li>
+</ul>
+
+<h3 class="ko">외부 자료</h3>
+<h3 class="en">External</h3>
+<ul>
+  <li><a href="https://github.com/evanw/kiwi" target="_blank">evanw/kiwi</a> — Kiwi binary format upstream</li>
+  <li><a href="https://github.com/evanw/kiwi/blob/master/js/binary.ts" target="_blank">evanw/kiwi/js/binary.ts</a> — <code>decodeBinarySchema</code> reference impl</li>
+  <li><a href="https://madebyevan.com/figma/fig-file-parser/" target="_blank">madebyevan.com/figma/fig-file-parser</a> — Evan's own browser-side <code>.fig</code> parser</li>
+  <li><a href="https://www.npmjs.com/package/fig-kiwi" target="_blank">fig-kiwi (npm)</a> — <code>readFigFile</code> / <code>writeFigFile</code> (single-deflate-raw assumption — see §2.3 above)</li>
+  <li><a href="https://github.com/allan-simon/figma-kiwi-protocol" target="_blank">allan-simon/figma-kiwi-protocol</a> — WebSocket frame coverage</li>
+</ul>
+
+<blockquote class="ko"><strong>주의</strong>: kiwi schema (568 types) 는 Figma 가 임의로 바꿀 수 있는 internal format. 어느 날 schema 가 진화해도 wire-level forward compat 는 유지되지만, <em>이름</em> 으로 의존하는 코드는 깨질 수 있다. <code>audit-oracle</code> 의 <code>VALUE_ALIASES</code> 가 정확히 그 패치 layer.</blockquote>
+<blockquote class="en"><strong>Note</strong>: the Kiwi schema (568 types) is an internal format Figma may change at will. Wire-level forward compat is preserved across evolution, but code that depends on <em>names</em> can break. <code>audit-oracle</code>'s <code>VALUE_ALIASES</code> is exactly that patch layer.</blockquote>
+
+</section>
+
+</main>
+</div>
+
+<script>
+function setLang(lang) {
+  document.documentElement.setAttribute('data-lang', lang);
+  document.documentElement.setAttribute('lang', lang);
+  document.getElementById('btn-ko').classList.toggle('active', lang === 'ko');
+  document.getElementById('btn-en').classList.toggle('active', lang === 'en');
+  try { localStorage.setItem('figma-fig-format-lang', lang); } catch (e) {}
+}
+(() => {
+  try {
+    const saved = localStorage.getItem('figma-fig-format-lang');
+    if (saved === 'en' || saved === 'ko') setLang(saved);
+  } catch (e) {}
+})();
+</script>
+
+</body>
+</html>

@@ -1,7 +1,7 @@
 /**
  * Figma gradient paint → Konva fill props.
  *
- * Spec: docs/specs/web-render-fidelity-round4.spec.md §2
+ * Spec: docs/specs/archive/web-render-fidelity-round4.spec.md §2
  *
  * Figma defines its gradient in a "unit gradient space" where t goes
  * (0, 0.5) → (1, 0.5) along the centerline. The paint's `transform`

@@ -127,5 +127,5 @@ if (result?.end.kind === 'leaf') {
 
 ## 7. 참조
 
-- `docs/specs/web-render-fidelity-round15.spec.md` §I-3 (single hop policy)
+- `docs/specs/archive/web-render-fidelity-round15.spec.md` §I-3 (single hop policy)
 - `docs/specs/audit-raw-coverage.spec.md` §4.2 I-P6 (audit broken-chain 정의)

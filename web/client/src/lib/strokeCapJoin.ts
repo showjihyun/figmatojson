@@ -1,7 +1,7 @@
 /**
  * Figma strokeCap / strokeJoin → Konva lineCap / lineJoin.
  *
- * Spec: docs/specs/web-render-fidelity-round3.spec.md §4
+ * Spec: docs/specs/archive/web-render-fidelity-round3.spec.md §4
  *
  * Returns undefined for default / unknown values so the caller spreads
  * the prop and Konva picks its own default (butt / miter).

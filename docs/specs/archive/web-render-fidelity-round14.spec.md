@@ -61,5 +61,5 @@ HPAI / 메타리치 모두 Figma 의 component-set variant 명명 규칙
 
 ## 5. 참조
 
-- `docs/specs/web-render-fidelity-round10.spec.md` — variant label spec (Canvas)
+- `docs/specs/archive/web-render-fidelity-round10.spec.md` — variant label spec (Canvas)
 - `web/client/src/lib/variantLabel.ts` — 헬퍼 본체 (변경 없음)

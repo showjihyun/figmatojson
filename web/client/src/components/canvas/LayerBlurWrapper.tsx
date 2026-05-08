@@ -4,7 +4,7 @@
  * a tree of Konva shapes (Konva can't blur live shapes, only cached
  * bitmaps).
  *
- * Spec: docs/specs/web-render-fidelity-round9.spec.md §2
+ * Spec: docs/specs/archive/web-render-fidelity-round9.spec.md §2
  *
  * Performance caveat: cache() rasterizes all descendants whenever
  * `radius` changes. Only nodes with an active LAYER_BLUR end up

@@ -1,7 +1,7 @@
 /**
  * Figma transform matrix → Konva rotation prop.
  *
- * Spec: docs/specs/web-render-fidelity-round3.spec.md §2
+ * Spec: docs/specs/archive/web-render-fidelity-round3.spec.md §2
  *
  * Figma stores a 2x3 affine matrix in `node.transform`:
  *   [m00 m01 m02]    [scaleX*cos(θ)  -scaleY*sin(θ)  tx]

@@ -2,7 +2,7 @@
  * Figma-style variant property label, drawn above each variant child of a
  * Component Set / state group container.
  *
- * Spec: docs/specs/web-render-fidelity-round10.spec.md §4
+ * Spec: docs/specs/archive/web-render-fidelity-round10.spec.md §4
  *
  * Pure visual overlay — no event handling. Inherits clip / rotation /
  * opacity from the variant container Group.

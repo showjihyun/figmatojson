@@ -1,7 +1,7 @@
 /**
  * Resolve Figma per-corner radii → Konva.Rect cornerRadius prop.
  *
- * Spec: docs/specs/web-render-fidelity-round5.spec.md §2
+ * Spec: docs/specs/archive/web-render-fidelity-round5.spec.md §2
  *
  * Konva.Rect accepts cornerRadius as either a number (uniform) or a
  * 4-tuple [tl, tr, br, bl] (clockwise from top-left). We pick uniform

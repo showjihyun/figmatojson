@@ -107,5 +107,5 @@ So: keep both, but ringfence them.
   unblocks.
 - `web/scripts/build-audit-inventory.mjs` + `audit-round11-screenshots.mjs`
   + `figma-fetch.mjs` — the three scripts that materialize the harness.
-- `docs/specs/web-render-fidelity-round*.spec.md` — the per-round
-  fixes built on top.
+- `docs/specs/archive/web-render-fidelity-round*.spec.md` — the per-round
+  fixes built on top (closed rounds; see `archive/INDEX.md`).

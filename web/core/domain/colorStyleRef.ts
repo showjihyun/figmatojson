@@ -2,7 +2,7 @@
  * Helpers that resolve Figma library color/text-style references on a node
  * back to the asset's display name.
  *
- * Spec: docs/specs/web-render-fidelity-round15.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round15.spec.md
  *
  * .fig nodes carry both raw RGBA *and* an optional alias guid into a
  * VARIABLE / style-asset node elsewhere in the document. These helpers
@@ -112,7 +112,7 @@ function resolveStyleAsset(node: unknown, root: unknown): Record<string, unknown
  * dead-end / depth-cap detection. Returns the last-resolved node + the
  * GUID trail + an end-state classification.
  *
- * Spec: docs/specs/web-render-fidelity-round18-A.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round18-A.spec.md
  *
  * Single-mode only — entries[0]. Multi-mode chain (light/dark themes)
  * is intentionally out of scope.
@@ -198,7 +198,7 @@ export function resolveVariableChain(
  * "A → B → C", together with the underlying chain end-state (cycle /
  * dead-end / depth-cap / leaf) for marker rendering.
  *
- * Spec: docs/specs/web-render-fidelity-round18-B.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round18-B.spec.md
  *
  * Reuses `resolveVariableChain`. Adds round-15-style gating: returns null
  * when paint has no `colorVar` alias OR when the alias target isn't a

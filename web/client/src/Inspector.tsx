@@ -59,7 +59,7 @@ const findByGuid = findById;
  * end-state marker (cycle ⟲ / dead-end ⚠ / depth-cap …). Returns null
  * when the trail is empty (caller skips rendering the row entirely).
  *
- * Spec: docs/specs/web-render-fidelity-round18-B.spec.md §I-8.
+ * Spec: docs/specs/archive/web-render-fidelity-round18-B.spec.md §I-8.
  */
 function formatAliasTrail(trail: ColorVarTrailResult | null): string | null {
   if (!trail || trail.entries.length === 0) return null;
