@@ -37,7 +37,7 @@
 
 ---
 
-## 1. 한눈에 보기
+## 1. 파이프라인 개요
 
 ```
 ┌────────────────┐       ┌─────────────┐       ┌──────────────────┐
@@ -57,7 +57,7 @@
 
 > **읽는 법**: 각 stage = `[입력] → 처리 → [출력 (memory) + 출력 (disk)]`. **굵게** 표시된 path는 disk에 남는다.
 
-### 2.0 한눈에 보기 (stage IO matrix)
+### 2.0 Stage IO 한눈에 보기
 
 | # | 단계 | 모듈 | 입력 타입 | 출력 타입 | 핵심 |
 |--:|---|---|---|---|---|
@@ -277,9 +277,10 @@ extracted/<figName>/
 
 ---
 
-## 4. 자동 검증 (V-01 ~ V-08)
+## 4. 자동 검증 — 활성 7개 (V-05 reserved)
 
 > 구현: `src/verify.ts`. Stage 9에서 일괄 실행 후 `output/<figName>/verification_report.md` 생성.
+> V-01·02·03·04·06·07·08은 매 extract마다 실행. V-05(결정성)는 명세상 정의되어 있으나 `runChecks()`의 호출 목록에서 제외 — 결정성은 외부 audit 하니스가 담당.
 
 | ID | 항목 | 무엇을 본다 | Sample 결과 |
 |---|---|---|---|
@@ -292,7 +293,7 @@ extracted/<figName>/
 | **V-07** | Kiwi 스키마 sanity | 정의 수 + 두 청크의 압축 알고리즘 라벨 | 🟢 568 defs, schema=deflate-raw, **data=zstd** |
 | **V-08** | Export 산출물 | 모든 manifest entry가 disk에 실재 + sha256 일치 | 🟢 1,621 files, 83 MB |
 
-> V-05는 verify.ts 주석에는 정의되어 있으나 `runChecks()`의 호출 목록에서 빠져 있음. 결정성 검증은 외부 round-trip 스크립트(`audit-*`, [`specs/audit-harness.spec.md`](./specs/audit-harness.spec.md))로 위임.
+결정성 검증(V-05 자리)은 외부 round-trip 스크립트가 담당: [`specs/audit-harness.spec.md`](./specs/audit-harness.spec.md), [`HARNESS.md`](./HARNESS.md).
 
 ---
 
@@ -300,7 +301,7 @@ extracted/<figName>/
 
 ### 5.1 이 SPEC이 다루는 모듈 (Stage 1~9)
 
-| 파일 | 역할 | LOC |
+| 파일 | 역할 | LOC† |
 |---|---|---:|
 | `src/cli.ts` | CLI 진입점 + 7-subcommand 디스패처 | 961 |
 | `src/container.ts` | Stage 1 — ZIP / raw 자동 분기 | 107 |
@@ -313,8 +314,10 @@ extracted/<figName>/
 | `src/normalize.ts` | Stage 8 — REST API 호환 별칭 | 134 |
 | `src/export.ts` | Stage 8 — 산출물 disk export | 352 |
 | `src/intermediate.ts` | `extracted/.../_info.json` 등 중간 산출물 dumper | 385 |
-| `src/verify.ts` | Stage 9 — V-01 ~ V-08 + 보고서 작성 | 339 |
-| `src/types.ts` | 공통 타입 정의 | — |
+| `src/verify.ts` | Stage 9 — 자동 검증 + 보고서 작성 | 339 |
+| `src/types.ts` | 공통 타입 정의 (`ContainerResult`, `FigArchive`, `BuildTreeResult` 등) | — |
+
+† LOC는 v2.0 작성 시점(2026-05-08) 스냅샷. 정확한 수치는 `wc -l`로 확인.
 
 ### 5.2 다른 자매 문서가 다루는 모듈 (cross-ref)
 
@@ -328,10 +331,7 @@ extracted/<figName>/
 | `src/html-export.ts`, `src/html-export-templates.ts` | [`specs/html-dashboard.spec.md`](./specs/html-dashboard.spec.md) |
 | `src/editable-html.ts`, `src/editable-html-css.ts` | [`specs/editable-html.spec.md`](./specs/editable-html.spec.md) |
 | `src/tokens.ts` | [`specs/tokens.spec.md`](./specs/tokens.spec.md) |
-
-### 5.3 Web editor 모듈 (`web/`)
-
-`web/core/{domain,ports,application}` + `web/server/adapters/{driven,driving/http}` + `web/client/src/`. Clean+Hexagonal layering 상세는 [`SPEC-architecture.md`](./SPEC-architecture.md) 참조.
+| `web/**` (Web editor — Clean+Hexagonal) | [`SPEC-architecture.md`](./SPEC-architecture.md) |
 
 ---
 
@@ -391,6 +391,19 @@ npm run extract:bvp             # docs/bvp.fig
 
 전체 옵션은 각 서브커맨드의 `--help`.
 
+### 7.3 처음 한 번 돌려보기
+
+```bash
+npm install                                          # 1. 의존성
+npm run typecheck                                    # 2. 타입체크 (baseline 0)
+npm run extract:sample                               # 3. sample fig 추출
+#  → output/메타리치 화면 UI Design/, extracted/메타리치 화면 UI Design/
+#  → verification_report.md PASS 확인
+npx tsx src/cli.ts extract /path/to/your.fig ./out   # 4. 임의 파일
+```
+
+테스트는 `npm test` (CLI) + `cd web && npm test` (Web). 갯수 / 커버리지는 [`README.md`](../README.md) 참조.
+
 ---
 
 ## 8. 비기능: 비동기 / 성능
@@ -438,47 +451,13 @@ extract 파이프라인은 가능한 한 비동기·non-blocking으로 동작한
 
 ---
 
-## 10. 빠른 시작
+## 10. 참고 (외부·보조)
 
-```bash
-# 1. 의존성 설치
-npm install
+§0의 OUT-of-scope 표가 자매 SPEC·CONTEXT·fig-format·HARNESS·archive로의 cross-ref를 모두 담고 있다. 본 절은 해당 표가 다루지 않는 외부·보조 자료만 모은다.
 
-# 2. 타입체크
-npm run typecheck
-
-# 3. 추출 (sample)
-npm run extract:sample
-#  → output/메타리치 화면 UI Design/, extracted/메타리치 화면 UI Design/ 생성
-#  → verification_report.md PASS 확인
-
-# 4. 임의 파일 추출
-npx tsx src/cli.ts extract /path/to/your.fig ./my-output
-
-# 5. 도움말
-npx tsx src/cli.ts --help
-```
-
-테스트는 `npm test` (CLI) + `cd web && npm test` (Web). 갯수 / 커버리지 현황은 [`README.md`](../README.md) 참조.
-
----
-
-## 11. 참고
-
-**Project docs**
-
-- [`PRD.md`](./PRD.md) — 원본 요구사항
-- [`CONTEXT.md`](../CONTEXT.md) — 도메인 용어 단일 소스
-- [`SDD.md`](./SDD.md) — Spec-Driven Development 방법론
-- [`HARNESS.md`](./HARNESS.md) — 5-layer 검증 하니스
-- [`SPEC-architecture.md`](./SPEC-architecture.md) · [`SPEC-roundtrip.md`](./SPEC-roundtrip.md) · [`SPEC-repack.md`](./SPEC-repack.md) · [`SPEC-figma-to-pencil.md`](./SPEC-figma-to-pencil.md)
 - [`adr/`](./adr/) — 0001 pen ID format · 0002 round-trip equality tiers · 0003 rendering strategy · 0004 shared modules
-- [`fig-format/figma-fig-format.md`](./fig-format/figma-fig-format.md) — `.fig` byte-level reverse-engineered 노트
-- [`dev-guide.html`](./dev-guide.html) — 단일 파일 개발자 가이드 (한·영, 8 mermaid)
-- [`specs/`](./specs/) — 60+ 활성 feature spec · [`specs/archive/`](./specs/archive/) — round 2 ~ 18-B 기록
-
-**External**
-
+- [`dev-guide.html`](./dev-guide.html) — 단일 파일 개발자 가이드 (한·영, 8 mermaid diagrams)
+- [`PRD.md`](./PRD.md) — 원본 요구사항
 - Evan Wallace, [Kiwi schema-based binary format](https://github.com/evanw/kiwi)
 - Albert Sikkema (2026-01), [Reverse-Engineering Figma Make Files](https://albertsikkema.com/ai/development/tools/reverse-engineering/2026/01/23/reverse-engineering-figma-make-files.html)
 - npm, [`fig-kiwi`](https://www.npmjs.com/package/fig-kiwi) — 참고용 (런타임 미사용)
