@@ -69,7 +69,7 @@
 | 6 | 이미지 ref 매핑 | `assets.ts` | 트리 + `images` Map | `Map<hash, Set<ownerGuid>>` | magic byte → 확장자 추론 |
 | 7 | 벡터 추출 | `vector.ts` | 트리 + `message.blobs[]` | SVG path × N | best-effort (sample 95%) |
 | 8 | 정규화 + Export | `normalize.ts`, `export.ts` | 트리 + refs + decoded | `output/<figName>/**` | REST API 호환 별칭 + 페이지별 분리 |
-| 9 | 검증 보고서 | `verify.ts` | 위 모든 결과 | `verification_report.md` | V-01~V-04 · V-06~V-08 (V-05 reserved) |
+| 9 | 검증 보고서 | `verify.ts` | 위 모든 결과 | `verification_report.md` | 활성 7 체크 (V-01·02·03·04·06·07·08); V-05 reserved |
 
 > Stage 6은 메모리만 사용. Stage 8이 ref 매핑을 토대로 disk에 일괄 저장한다.
 
@@ -79,23 +79,25 @@
 
 | | |
 |---|---|
-| **모듈** | `src/container.ts` |
+| **모듈** | `src/container.ts` (107 LOC) — 진입점에서 유일하게 `readFileSync` 사용 (§8 예외) |
 | **입력** | `<input>.fig` 파일 경로 |
-| **처리** | 1. 파일 첫 4 byte로 ZIP/raw 자동 분기 (ZIP magic `50 4B 03 04` 또는 fig-kiwi magic `66 69 67 2D 6B 69 77 69`)<br>2. ZIP이면 `adm-zip`으로 entries 순회 → `canvas.fig`, `meta.json`, `thumbnail.png`, `images/<hash>` 분리<br>3. raw fig-kiwi이면 그대로 `canvasFig`로 사용 |
-| **출력 (memory)** | `ContainerResult { isZipWrapped, canvasFig, metaJson, thumbnail, images }` |
+| **처리** | 1. 첫 N byte로 분기:<br>&nbsp;&nbsp;• 4 byte = `50 4B 03 04` (ZIP magic) → `loadZipContainer`<br>&nbsp;&nbsp;• 8 byte = `66 69 67 2D 6B 69 77 69` (`fig-kiwi`) → raw 단일 바이너리로 처리<br>&nbsp;&nbsp;• 그 외 → 첫 16 byte hex 포함한 명시적 에러<br>2. ZIP이면 `adm-zip`으로 entries 순회. 인식하는 entry: `canvas.fig`, `meta.json`, `thumbnail.png`, `images/<hash>`. **그 외는 silently skip** (forward-compat).<br>3. `canvas.fig`가 없으면 found-entries 목록과 함께 FAIL. `meta.json` 파싱 실패 시도 명시적 에러. |
+| **출력 (memory)** | `ContainerResult { isZipWrapped: boolean, canvasFig: Uint8Array, metaJson?: FigMetaJson, thumbnail?: Uint8Array, images: Map<hash, Uint8Array> }` |
 | **출력 (disk)** | **`extracted/<figName>/01_container/`** (세부 §3.2) |
+| **불변** | raw fig-kiwi 입력일 때 `images.size === 0` |
 
 ### Stage 2️⃣ fig-kiwi 아카이브 청크 분해
 
-> `canvas.fig`는 Evan Wallace의 **Kiwi 직렬화 포맷** + 청크 컨테이너. 두 청크(스키마 + 데이터).
+> `canvas.fig`는 Evan Wallace의 **Kiwi 직렬화 포맷** + 청크 컨테이너. 두 청크(스키마 + 데이터). 추가 청크는 forward-compat용으로 보존.
 
 | | |
 |---|---|
-| **모듈** | `src/archive.ts` |
+| **모듈** | `src/archive.ts` (62 LOC) |
 | **입력** | `canvas.fig` byte (Stage 1) |
-| **처리** | 1. 8 byte `fig-kiwi` magic 검증<br>2. 4 byte LE uint32 → archive version (예: 106)<br>3. 루프: `[4 byte LE size][size bytes data]` → `chunks[]` 추출 |
-| **출력 (memory)** | `FigArchive { prelude, version, chunks[] }` |
-| **출력 (disk)** | **`extracted/.../02_archive/chunks/00_schema.bin`** (압축, ~26 KB)<br>**`extracted/.../02_archive/chunks/01_data.bin`** (압축, ~3.7 MB) |
+| **처리** | 1. `data.length < 12` → 즉시 fail<br>2. 첫 8 byte를 UTF-8 디코드해 `"fig-kiwi"`와 비교<br>3. byte 8~11: LE uint32 → `archive.version` (sample: 106)<br>4. 루프 `offset` 12부터: `[4 byte LE size][size bytes payload]` → `chunks[]` 추가<br>&nbsp;&nbsp;• `size === 0`이면 `Uint8Array(0)`로 보존(skip 아님)<br>&nbsp;&nbsp;• `offset + size > data.length`면 fail (chunk index/offset 포함 메시지)<br>5. 마지막 chunk 후 trailing byte는 stderr 경고만 출력하고 진행 (forward-compat) |
+| **출력 (memory)** | `FigArchive { prelude: "fig-kiwi", version: number, chunks: Uint8Array[] }` |
+| **출력 (disk)** | **`extracted/.../02_archive/chunks/00_schema.bin`** (압축, sample: 26 KB)<br>**`extracted/.../02_archive/chunks/01_data.bin`** (압축, sample: 3.72 MB) |
+| **불변** | 정상 sample에서 `chunks.length === 2`. `chunks[0]` = schema, `chunks[1]` = data — Stage 4의 전제. |
 
 ### Stage 3️⃣ 압축 해제 (deflate-raw / zstd 자동 분기)
 
@@ -103,23 +105,25 @@
 
 | | |
 |---|---|
-| **모듈** | `src/decompress.ts` |
-| **입력** | 두 압축 chunk byte |
-| **처리** | 1. Magic byte로 알고리즘 자동 감지<br>&nbsp;&nbsp;• `28 B5 2F FD` → zstd<br>&nbsp;&nbsp;• `78 xx` → deflate-zlib<br>&nbsp;&nbsp;• 그 외 → deflate-raw<br>2. 감지된 알고리즘으로 시도, 실패 시 다른 알고리즘 fallback |
-| **출력 (memory)** | `Uint8Array` × 2 (uncompressed schema + data) |
-| **출력 (disk)** | **`extracted/.../03_decompressed/schema.kiwi.bin`** (~64 KB, deflate-raw 해제)<br>**`extracted/.../03_decompressed/data.kiwi.bin`** (~20 MB, **zstd** 해제) |
+| **모듈** | `src/decompress.ts` (67 LOC) |
+| **입력** | 압축된 chunk byte (Stage 2의 `chunks[i]` × 2회 호출) |
+| **처리** | 1. `detectCompression(buf)` — 정확한 분기 규칙:<br>&nbsp;&nbsp;• 첫 4 byte = `28 B5 2F FD` → `zstd`<br>&nbsp;&nbsp;• `buf[0] === 0x78` *and* `((buf[0] << 8) \| buf[1]) % 31 === 0` (zlib FCHECK 검증) → `deflate-zlib`<br>&nbsp;&nbsp;• 그 외 → `deflate-raw`<br>2. fallback 순서는 detect 결과에 따라 결정:<br>&nbsp;&nbsp;• zstd → `[zstd, deflate-raw, deflate-zlib]`<br>&nbsp;&nbsp;• deflate-zlib → `[deflate-zlib, deflate-raw, zstd]`<br>&nbsp;&nbsp;• deflate-raw → `[deflate-raw, deflate-zlib, zstd]`<br>3. 모든 알고리즘 실패 시 last error 포함한 명시적 throw. 빈 buffer는 그대로 반환. |
+| **출력 (memory)** | `Uint8Array` × 2 (uncompressed schema + data). `DecodedFig.schemaCompression`과 `dataCompression`에 감지 라벨 보존 |
+| **출력 (disk)** | **`extracted/.../03_decompressed/schema.kiwi.bin`** (sample: 64 KB, `deflate-raw` 해제)<br>**`extracted/.../03_decompressed/data.kiwi.bin`** (sample: 20 MB, **`zstd`** 해제) |
+| **불변** | sample(v106)에서 schema=`deflate-raw`, data=`zstd` — V-07이 라벨 검증 |
 
 ### Stage 4️⃣ Kiwi 디코드 (스키마 → 메시지)
 
-> 첫 청크는 **스키마 정의 자체**(568개 타입), 두 번째 청크는 그 스키마로 인코딩된 **NodeChanges 메시지**.
+> 첫 청크는 **스키마 정의 자체**(sample 568개 타입), 두 번째 청크는 그 스키마로 인코딩된 **NodeChanges 메시지**. v106 fig는 chunk 2개로 충분하지만, 추가 chunk가 있으면 `extraChunks`로 보존.
 
 | | |
 |---|---|
-| **모듈** | `src/decoder.ts` |
-| **입력** | uncompressed schema + data byte (Stage 3) |
-| **처리** | 1. `kiwi.decodeBinarySchema(schemaBytes)` → Schema 객체<br>2. `kiwi.compileSchema(schema)` → CompiledSchema (decoder 클래스)<br>3. `compiled.decodeMessage(dataBytes)` → 메시지 객체 (root: `NODE_CHANGES`) |
-| **출력 (memory)** | `DecodedFig { schema, message, ... }` |
-| **출력 (disk)** | **`extracted/.../04_decoded/schema.json`** (~812 KB, 사람이 읽는 스키마 정의)<br>`extracted/.../04_decoded/message.json` (~150 MB, **`--include-raw-message` 시에만**) |
+| **모듈** | `src/decoder.ts` (85 LOC) |
+| **입력** | `archive.chunks` (Stage 2). 전제: `chunks.length >= 2` — 위반 시 throw |
+| **처리** | 1. `chunks[0]` 압축 해제 → `rawSchemaBytes`<br>2. `kiwi.decodeBinarySchema(rawSchemaBytes)` → `Schema` 객체<br>3. `kiwi.compileSchema(schema)` → `compiled` (encode/decode 메서드 보유, V-02에서 재사용)<br>4. `chunks[1]` 압축 해제 → `rawDataBytes`<br>5. `compiled.decodeMessage(rawDataBytes)` → message<br>6. **rootType은 휴리스틱으로 추출** — `schema.rootType` 필드가 있으면 그것, 없으면 `definitions[]` 첫 `MESSAGE` 종류의 `name` (sample에서 결과: `NODE_CHANGES`) |
+| **출력 (memory)** | `DecodedFig { archiveVersion, archive, schema, compiled, message, rawSchemaBytes, rawDataBytes, schemaCompression, dataCompression, extraChunks, schemaStats: { definitionCount, rootType? } }` |
+| **출력 (disk)** | **`extracted/.../04_decoded/schema.json`** (sample 812 KB, `definitions[]`)<br>`extracted/.../04_decoded/message.json` (sample ~150 MB, **`--include-raw-message` 시에만**) |
+| **불변** | `rawSchemaBytes`와 `compiled`는 V-02 schema round-trip + message re-encode 시 재사용된다 |
 
 ### Stage 5️⃣ 노드 트리 재구성
 
@@ -127,11 +131,12 @@
 
 | | |
 |---|---|
-| **모듈** | `src/tree.ts` |
-| **입력** | `message.nodeChanges[]` (sample: 35,660개) |
-| **처리** | 1. 각 노드를 `(sessionID:localID)` 키로 Map에 저장<br>2. 각 노드의 `parentIndex.guid`로 부모 찾고 children에 추가<br>3. `parentIndex.position` 문자열로 형제 정렬 (Figma의 fractional indexing — 자세한 spec: [`specs/parent-index-position.spec.md`](./specs/parent-index-position.spec.md))<br>4. `DOCUMENT` 타입 = root, parent 못 찾은 노드 = orphans |
-| **출력 (memory)** | `BuildTreeResult { document, allNodes, orphans }` |
-| **출력 (disk)** | **`extracted/.../05_tree/nodes-flat.json`** (~3.6 MB, 평탄 테이블 — grep 가능)<br>`extracted/.../05_tree/orphans.json` (있을 때만) |
+| **모듈** | `src/tree.ts` (90 LOC) |
+| **입력** | `message.nodeChanges[]` (sample: 35,660 nodes) |
+| **처리** | 정확히 3 pass:<br>**Pass 1** — 각 nodeChange를 `guidKey(sessionID:localID)` 키로 Map에 저장. `guid` 없거나 빈 키는 skip.<br>**Pass 2** — `parentIndex.guid`로 부모 lookup. 분기:<br>&nbsp;&nbsp;• parent guid 없음/빈키 + `type === 'DOCUMENT'` → 첫 번째 발견 노드만 `document`, 이후 DOCUMENT는 `orphans`<br>&nbsp;&nbsp;• parent guid 없음/빈키 + 다른 type → `orphans`<br>&nbsp;&nbsp;• parent guid 있고 lookup 성공 → 부모의 `children` 배열에 추가<br>&nbsp;&nbsp;• parent guid 있고 lookup 실패 → `orphans`<br>**Pass 3** — `position` 문자열을 lexicographic 순으로 비교해 형제 정렬 (Figma의 fractional indexing). document 트리와 orphans 모두 재귀 정렬. 자세한 spec: [`specs/parent-index-position.spec.md`](./specs/parent-index-position.spec.md). |
+| **출력 (memory)** | `BuildTreeResult { document: TreeNode \| null, allNodes: Map<string, TreeNode>, orphans: TreeNode[] }`. 각 `TreeNode`는 `{ guid, guidStr, type, name?, parentGuid?, position?, children, data }`를 가지며 `data`는 원본 nodeChange (raw 보존). |
+| **출력 (disk)** | **`extracted/.../05_tree/nodes-flat.json`** (sample 3.6 MB, grep용 평탄 테이블)<br>`extracted/.../05_tree/orphans.json` (orphans.length > 0일 때만) |
+| **불변** | `document`가 null이면 V-03 FAIL. dangling parent / cycle은 V-03 FAIL. orphans는 WARN/FAIL 트리거 아님. |
 
 ### Stage 6️⃣ 이미지 참조 매핑
 
@@ -139,11 +144,26 @@
 
 | | |
 |---|---|
-| **모듈** | `src/assets.ts` |
+| **모듈** | `src/assets.ts` (131 LOC) |
 | **입력** | 트리 root + Stage 1의 `images` Map |
-| **처리** | 1. 모든 노드 데이터 재귀 walk<br>2. `image.hash`, `imageRef`, `hash` 필드에서 SHA-1 해시 수집 (자세한 spec: [`specs/asset-walk.spec.md`](./specs/asset-walk.spec.md))<br>3. `hash → Set<owner-guid>` 매핑 생성<br>4. magic byte로 이미지 확장자 추론 (PNG / JPG / WebP / GIF / SVG / PDF) |
-| **출력 (memory)** | `Map<hash, Set<guid>>` |
-| **출력 (disk)** | (Stage 8에서 `output/assets/images/<hash>.<ext>`로 일괄 저장) |
+| **처리** | 1. `collectImageRefs(root)` — 노드 트리 재귀 walk. 각 객체에서 **3 패턴** 수집 (spec: [`specs/asset-walk.spec.md`](./specs/asset-walk.spec.md)):<br>&nbsp;&nbsp;• `obj.image.hash` (Uint8Array \| string)<br>&nbsp;&nbsp;• 자기 자신의 `obj.hash` (Image 메시지가 직접 등장하는 경우)<br>&nbsp;&nbsp;• `obj.imageRef` (REST API 호환 필드)<br>2. hash가 `Uint8Array`면 `Buffer.from(...).toString('hex')`로 hex 변환. 문자열이면 `toLowerCase()`.<br>3. `Map<hash, Set<owner-guid>>` 생성. 동일 hash는 set에 누적.<br>4. `detectImageExt(buf)` — Stage 8에서 호출. magic 패턴: |
+
+**`detectImageExt` magic 표:**
+
+| 확장자 | byte 패턴 |
+|---|---|
+| `png` | `89 50 4E 47 0D 0A 1A 0A` (8 byte) |
+| `jpg` | `FF D8 FF` (3 byte) |
+| `gif` | `47 49 46 38` (`GIF8`, 4 byte) |
+| `pdf` | `25 50 44 46` (`%PDF`, 4 byte) |
+| `webp` | `RIFF` (0~3) + `WEBP` (8~11) |
+| `svg` | 첫 16 byte를 ASCII 디코드해 `^\s*<\?xml` 또는 `^\s*<svg`(case-insensitive) 매칭 |
+| `bin` | 위 어디에도 매칭 안 되거나 `length < 4` |
+
+| | |
+|---|---|
+| **출력 (memory)** | `Map<hash, Set<owner-guid>>` |
+| **출력 (disk)** | 이 단계 자체는 없음 — Stage 8에서 `output/<figName>/assets/images/<hash>.<ext>`로 일괄 저장 |
 
 ### Stage 7️⃣ 벡터 추출 (best-effort)
 
@@ -151,21 +171,24 @@
 
 | | |
 |---|---|
-| **모듈** | `src/vector.ts` |
-| **입력** | 트리 + `message.blobs[]` |
-| **처리** | 1. VECTOR / STAR / LINE / ELLIPSE / REGULAR_POLYGON 노드 순회<br>2. `fillGeometry`/`strokeGeometry`의 `commandsBlob` → `blobs[]` 인덱스<br>3. blob byte → path command 디코드:<br>&nbsp;&nbsp;• `0x01` MOVE_TO + 2×float32<br>&nbsp;&nbsp;• `0x02` LINE_TO + 2×float32<br>&nbsp;&nbsp;• `0x03` CUBIC + 6×float32<br>&nbsp;&nbsp;• `0x04` QUAD + 4×float32<br>&nbsp;&nbsp;• `0x05` CLOSE<br>4. 두 시작 offset(0, 1) 시도하고 더 많은 명령을 디코드한 쪽 채택<br>5. fill / stroke 색상까지 SVG에 반영 |
-| **출력 (disk)** | **`output/<figName>/assets/vectors/<node-id>.svg`** (sample: 1,599 / 1,681 ≈ 95% 성공) |
+| **모듈** | `src/vector.ts` (480 LOC) |
+| **입력** | 트리 + `message.blobs[]` (각 blob: `{ bytes: Uint8Array }`) |
+| **처리** | 1. 7종 vector type 순회: `VECTOR`, `STAR`, `LINE`, `ELLIPSE`, `REGULAR_POLYGON`, `BOOLEAN_OPERATION`, `ROUNDED_RECTANGLE`<br>2. 노드 데이터에서 blob 인덱스 후보 수집:<br>&nbsp;&nbsp;• `vectorData.vectorNetworkBlob` (전체 path)<br>&nbsp;&nbsp;• `fillGeometry[*].commandsBlob` (fill 영역)<br>&nbsp;&nbsp;• `strokeGeometry[*].commandsBlob` (stroke 영역)<br>3. blob byte → path command 디코드 (LE float32):<br>&nbsp;&nbsp;• `0x01` MOVE_TO + 2 × f32 (x, y)<br>&nbsp;&nbsp;• `0x02` LINE_TO + 2 × f32<br>&nbsp;&nbsp;• `0x03` CUBIC + 6 × f32 (c1x, c1y, c2x, c2y, x, y)<br>&nbsp;&nbsp;• `0x04` QUAD + 4 × f32 (cx, cy, x, y)<br>&nbsp;&nbsp;• `0x05` CLOSE (no args)<br>4. **시작 offset 0/1 둘 다 시도**, 더 많은 명령을 성공적으로 디코드한 쪽 채택. byte 0이 winding flag(0x00)인 경우 1 offset 쪽이 승리 — 이 휴리스틱으로 sample의 95%가 디코드된다.<br>5. fillGeometry / strokeGeometry의 `windingRule` + `styleID`로 fill/stroke 색상까지 SVG에 반영 |
+| **출력 (memory)** | `VectorExtractionResult[] { nodeId, nodeName?, svg?, error?, blobIndices }` |
+| **출력 (disk)** | **`output/<figName>/assets/vectors/<node-id>.svg`** (sample: 1,599 / 1,681 ≈ 95% 성공). 디코드 실패 노드는 SVG 파일 없이 `error` 필드만 보존 |
+| **불변** | 알 수 없는 cmd byte를 만나면 디코드 중단 + raw bytes를 메타로 보존 (sample 95%는 모든 cmd가 0x01~0x05) |
 
 ### Stage 8️⃣ 정규화 + Export
 
-> Kiwi 원본 키 보존 + REST API 호환 별칭 추가, 페이지별로 분리. REST 정규화 spec: [`specs/rest-api-normalize.spec.md`](./specs/rest-api-normalize.spec.md).
+> Kiwi 원본 키 보존 + REST API 호환 별칭 추가 ("실용형(b)" 정책 — 양쪽 모두 grep 가능). 페이지별로 분리. REST 정규화 spec: [`specs/rest-api-normalize.spec.md`](./specs/rest-api-normalize.spec.md).
 
 | | |
 |---|---|
-| **모듈** | `src/normalize.ts`, `src/export.ts` |
-| **입력** | 트리 + 이미지 refs + 디코드 결과 |
-| **처리** | 1. 트리 노드를 `NormalizedNode`로 변환:<br>&nbsp;&nbsp;• `id` (S:L 문자열), `parentId` 추가<br>&nbsp;&nbsp;• `fillPaints` → `fills` 별칭<br>&nbsp;&nbsp;• `strokePaints` → `strokes` 별칭<br>&nbsp;&nbsp;• `size + transform` → `absoluteBoundingBox`<br>&nbsp;&nbsp;• `Uint8Array` → hex 문자열, `BigInt` → 문자열<br>2. CANVAS 노드별로 페이지 분리<br>3. 이미지 magic 추론 후 disk 저장<br>4. SHA-256 manifest 생성 |
-| **출력 (disk)** | `output/<figName>/document.json` (전체 트리, `--no-document` 시 생략)<br>**`output/<figName>/pages/<idx>_<name>.json`** (CANVAS별)<br>**`output/<figName>/assets/images/<hash>.<ext>`**<br>**`output/<figName>/assets/vectors/<id>.svg`**<br>**`output/<figName>/assets/thumbnail.png`**<br>**`output/<figName>/schema.json`** (~812 KB)<br>**`output/<figName>/metadata.json`**<br>**`output/<figName>/manifest.json`** (모든 산출물 인덱스 + sha256) |
+| **모듈** | `src/normalize.ts` (134 LOC), `src/export.ts` (352 LOC) |
+| **입력** | 트리 + 이미지 refs + `DecodedFig` |
+| **처리** | 1. `normalizeNode()` 재귀 — `TreeNode` → `NormalizedNode`:<br>&nbsp;&nbsp;• `id` = `guidStr` (`S:L` 문자열), `guid`도 보존<br>&nbsp;&nbsp;• `parentId` = parent의 `guidKey`<br>&nbsp;&nbsp;• `data.visible`이 boolean이면 그대로 복사<br>&nbsp;&nbsp;• 별칭 추가 (있을 때만): `fillPaints` → `fills`, `strokePaints` → `strokes`, `effects` → `effects` (그대로)<br>&nbsp;&nbsp;• `absoluteBoundingBox` (best-effort): `size`가 있으면 `{ x: transform.m02 ?? 0, y: transform.m12 ?? 0, width: size.x, height: size.y }`. **transform의 회전/스케일은 무시** — translation 컴포넌트(m02/m12)만 사용.<br>&nbsp;&nbsp;• `raw`에 원본 데이터 보존 — `Uint8Array` → hex 문자열(via `hashToHex`), `BigInt` → `.toString()`. 그 외는 deep copy.<br>2. CANVAS 노드별로 페이지 분리 (sample: 6개 CANVAS)<br>3. Stage 6 ref Map의 각 hash에 대해 `detectImageExt(buf)` 호출 후 disk 저장<br>4. 모든 산출물의 SHA-256 manifest 생성 |
+| **출력 (disk)** | `output/<figName>/document.json` (전체 트리, `--no-document` 시 생략)<br>**`output/<figName>/pages/<idx>_<name>.json`** (CANVAS별)<br>**`output/<figName>/assets/images/<hash>.<ext>`**<br>**`output/<figName>/assets/vectors/<id>.svg`**<br>**`output/<figName>/assets/thumbnail.png`**<br>**`output/<figName>/schema.json`** (sample 812 KB)<br>**`output/<figName>/metadata.json`**<br>**`output/<figName>/manifest.json`** (산출물 인덱스 + sha256) |
+| **불변** | bbox가 회전된 노드의 시각적 bounding box를 정확히 표현하지는 않는다 — 사용 측은 `raw.transform`을 직접 봐야 함 |
 
 ### Stage 9️⃣ 검증 보고서
 
@@ -282,16 +305,16 @@ extracted/<figName>/
 > 구현: `src/verify.ts`. Stage 9에서 일괄 실행 후 `output/<figName>/verification_report.md` 생성.
 > V-01·02·03·04·06·07·08은 매 extract마다 실행. V-05(결정성)는 명세상 정의되어 있으나 `runChecks()`의 호출 목록에서 제외 — 결정성은 외부 audit 하니스가 담당.
 
-| ID | 항목 | 무엇을 본다 | Sample 결과 |
-|---|---|---|---|
-| **V-01** | 입력 무결성 | ZIP CRC + `canvas.fig` magic 재확인 | 🟢 `fig-kiwi` (✓), 3,924,602 bytes |
-| **V-02** | 디코딩 round-trip | schema decode → re-encode → byte-level diff | 🟢 byte-level identical (sample: 64,341 byte schema) |
-| **V-03** | 트리 일관성 | 모든 child의 parent 존재, 순환 없음 | 🟢 35,660 nodes, orphans=0, cycles=0 |
-| **V-04** | 에셋 일관성 | imageRef ↔ `images/` cross-check, missing/unused 카운트 | 🟢 12/12 매칭, missing=0, unused=0 |
-| **V-05** | 결정성 (선택) | 동일 입력 2회 처리 → 출력 SHA-256 동일 | (현재 `runChecks`에서 미실행 — 명세상 reserved) |
-| **V-06** | meta.json 일치 | meta.json 값 ↔ document root 메타 비교 (file_name, background_color) | 🟢 일치 |
-| **V-07** | Kiwi 스키마 sanity | 정의 수 + 두 청크의 압축 알고리즘 라벨 | 🟢 568 defs, schema=deflate-raw, **data=zstd** |
-| **V-08** | Export 산출물 | 모든 manifest entry가 disk에 실재 + sha256 일치 | 🟢 1,621 files, 83 MB |
+| ID | 항목 | 무엇을 본다 | Status 규칙 | Sample 결과 |
+|---|---|---|---|---|
+| **V-01** | 입력 무결성 | `canvasFig`의 첫 8 byte = `fig-kiwi` magic 재확인 | magic 일치 → PASS, 아니면 FAIL | 🟢 `fig-kiwi` (✓), `isZipWrapped=true`, 3,924,602 bytes |
+| **V-02** | 디코딩 round-trip | (a) schema: `decoded.schema` → `kiwi.encodeBinarySchema()` → byte-level diff with `rawSchemaBytes`. (b) message: `compiled.encodeMessage(decoded.message)` 시도 (성공 여부 + size 보고) | (a)+(b) 모두 OK → PASS, 둘 중 하나만 실패 → WARN, 둘 다 실패 → WARN | 🟢 schema bytes match (sample: 64,341 byte). message re-encode size 보고 |
+| **V-03** | 트리 일관성 | (a) `document` 존재, (b) dangling parent 카운트 (자식이 가리키는 parent guid가 Map에 없는 경우), (c) DFS로 cycle 카운트 | dangling=0 ∧ cycles=0 ∧ document 존재 → PASS. dangling=0 ∧ cycles=0 인데 document 없음 → WARN. 그 외 → FAIL. **orphans 수는 status에 영향 없음** (informational) | 🟢 nodes=35,660, document=✓, dangling=0, cycles=0, orphans=0 |
+| **V-04** | 에셋 일관성 | hash 비교(소문자 정규화 후): missing = imageRefs ∖ images, unused = images ∖ imageRefs | 둘 다 0 → PASS, missing>0 OR unused>0 → WARN. 양쪽 모두 비어있으면 → SKIP | 🟢 12/12 매칭, missing=0, unused=0 |
+| **V-05** | 결정성 (reserved) | 명세: 동일 입력 2회 처리 → 출력 SHA-256 동일 | `runChecks()`에서 호출되지 않음 — 외부 audit 하니스가 담당 | — |
+| **V-06** | meta.json 일치 | meta.json의 `file_name` / `background_color` ↔ document root 메타 비교 | 일치 → PASS, 불일치 → WARN | 🟢 일치 |
+| **V-07** | Kiwi 스키마 sanity | (a) `schema.definitions.length`, (b) 두 청크의 `Compression` 라벨 | definitions ≥ 100 → PASS, 그 외 → WARN | 🟢 568 defs, schema=`deflate-raw`, data=**`zstd`** |
+| **V-08** | Export 산출물 | manifest의 각 entry → disk에 파일 존재 + 재계산한 sha256과 일치 | 모두 일치 → PASS, 누락/불일치 1건 이상 → FAIL | 🟢 1,621 files, 83 MB |
 
 결정성 검증(V-05 자리)은 외부 round-trip 스크립트가 담당: [`specs/audit-harness.spec.md`](./specs/audit-harness.spec.md), [`HARNESS.md`](./HARNESS.md).
 
