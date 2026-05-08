@@ -30,6 +30,7 @@
 | Web editor (Clean+Hexagonal, Konva canvas) | [`SPEC-architecture.md`](./SPEC-architecture.md) |
 | 도메인 용어 (Kiwi Record / Tree Node / Master / Instance / Pen ID / Effective Visibility …) | [`CONTEXT.md`](../CONTEXT.md) |
 | `.fig` 와이어 포맷 byte-level 시각 레퍼런스 | [`fig-format/figma-fig-format.md`](./fig-format/figma-fig-format.md) |
+| 외부 audit 하니스 (5 스크립트, 결정성·byte-compare·oracle) | [`specs/audit-harness.spec.md`](./specs/audit-harness.spec.md) · [`HARNESS.md`](./HARNESS.md) |
 | 라운드별 작업 히스토리 (round 2 ~ 18-B) | [`specs/archive/`](./specs/archive/) |
 
 다른 6개 CLI 서브커맨드(`repack`, `pen-export`, `editable-html`, `html-report`, `round-trip-html`, `tokens`)는 §7에 한 줄씩만 인덱싱하고 상세는 위 자매 문서로 위임.
@@ -55,6 +56,22 @@
 ## 2. 9-Stage Pipeline
 
 > **읽는 법**: 각 stage = `[입력] → 처리 → [출력 (memory) + 출력 (disk)]`. **굵게** 표시된 path는 disk에 남는다.
+
+### 2.0 한눈에 보기 (stage IO matrix)
+
+| # | 단계 | 모듈 | 입력 타입 | 출력 타입 | 핵심 |
+|--:|---|---|---|---|---|
+| 1 | 컨테이너 분해 | `container.ts` | `<input>.fig` 경로 | `ContainerResult` (canvasFig + meta + thumbnail + images) | ZIP / raw 자동 분기 |
+| 2 | fig-kiwi 청크 분해 | `archive.ts` | `canvas.fig` byte | `FigArchive { prelude, version, chunks[] }` | 8B magic + 4B version + length-prefixed chunks |
+| 3 | 압축 해제 | `decompress.ts` | 두 압축 chunk | `Uint8Array × 2` | **schema=deflate-raw, data=zstd** auto-detect |
+| 4 | Kiwi 디코드 | `decoder.ts` | uncompressed schema + data | `DecodedFig { schema, message }` | rootType `NODE_CHANGES`, 568 type defs |
+| 5 | 트리 재구성 | `tree.ts` | `message.nodeChanges[]` | `BuildTreeResult { document, allNodes, orphans }` | parent GUID + fractional-index 정렬 |
+| 6 | 이미지 ref 매핑 | `assets.ts` | 트리 + `images` Map | `Map<hash, Set<ownerGuid>>` | magic byte → 확장자 추론 |
+| 7 | 벡터 추출 | `vector.ts` | 트리 + `message.blobs[]` | SVG path × N | best-effort (sample 95%) |
+| 8 | 정규화 + Export | `normalize.ts`, `export.ts` | 트리 + refs + decoded | `output/<figName>/**` | REST API 호환 별칭 + 페이지별 분리 |
+| 9 | 검증 보고서 | `verify.ts` | 위 모든 결과 | `verification_report.md` | V-01~V-04 · V-06~V-08 (V-05 reserved) |
+
+> Stage 6은 메모리만 사용. Stage 8이 ref 매핑을 토대로 disk에 일괄 저장한다.
 
 ### Stage 1️⃣ 컨테이너 분해
 
@@ -158,7 +175,7 @@
 |---|---|
 | **모듈** | `src/verify.ts` |
 | **입력** | 모든 단계 결과 |
-| **처리** | §4의 V-01 ~ V-08 체크를 순차 실행 후 마크다운 보고서 작성 |
+| **처리** | §4의 활성 7개 체크(V-01·02·03·04·06·07·08) 순차 실행 후 마크다운 보고서 작성. V-05(결정성)는 `runChecks()`에서 제외 — §4 footnote 참조 |
 | **출력 (disk)** | **`output/<figName>/verification_report.md`** |
 
 ---
@@ -167,14 +184,15 @@
 
 `<figName>` = 입력 `.fig` basename에서 `.fig` 확장자 제거한 문자열 (한글·공백 OK). 예: `메타리치 화면 UI Design`.
 
-### 3.1 `output/<figName>/` — 사용자 소비용 (~87 MB / sample)
+### 3.1 `output/<figName>/` — 사용자 소비용
 
 > 사람이 읽고 검색하기 좋은 형태. REST API와 호환되는 별칭 포함.
+> 아래 사이즈는 sample(`docs/메타리치 화면 UI Design.fig`, 6 페이지·35,660 노드, `--no-document --minify`) 기준 ≈ 87 MB.
 
 ```
 output/<figName>/
 ├── pages/                                   # 페이지별 트리 (CANVAS 단위 분리)
-│   ├── 00_design setting.json     2.5 MB
+│   ├── 00_design setting.json     2.5 MB    # ← sample 페이지 크기. 실제는 입력 fig에 따라 다름
 │   ├── 01_Internal Only Canvas.json 258 KB
 │   ├── 02_WEB.json                67.5 MB
 │   ├── 03_MOBILE.json              3.6 MB
@@ -196,9 +214,10 @@ output/<figName>/
 
 > `document.json` (전체 트리 단일 파일)은 `--no-document` 플래그로 생략 가능 (페이지 파일과 중복).
 
-### 3.2 `extracted/<figName>/` — 디버그·재패키징용 (~34 MB / sample)
+### 3.2 `extracted/<figName>/` — 디버그·재패키징용
 
 > 파이프라인 stage-by-stage breadcrumb. 각 폴더에 `_info.json` 메타파일.
+> 아래 사이즈는 동일 sample 기준 ≈ 34 MB.
 
 ```
 extracted/<figName>/
@@ -265,7 +284,7 @@ extracted/<figName>/
 | ID | 항목 | 무엇을 본다 | Sample 결과 |
 |---|---|---|---|
 | **V-01** | 입력 무결성 | ZIP CRC + `canvas.fig` magic 재확인 | 🟢 `fig-kiwi` (✓), 3,924,602 bytes |
-| **V-02** | 디코딩 round-trip | schema decode → re-encode → byte-level diff (≤ 64,341 byte) | 🟢 byte-level identical |
+| **V-02** | 디코딩 round-trip | schema decode → re-encode → byte-level diff | 🟢 byte-level identical (sample: 64,341 byte schema) |
 | **V-03** | 트리 일관성 | 모든 child의 parent 존재, 순환 없음 | 🟢 35,660 nodes, orphans=0, cycles=0 |
 | **V-04** | 에셋 일관성 | imageRef ↔ `images/` cross-check, missing/unused 카운트 | 🟢 12/12 매칭, missing=0, unused=0 |
 | **V-05** | 결정성 (선택) | 동일 입력 2회 처리 → 출력 SHA-256 동일 | (현재 `runChecks`에서 미실행 — 명세상 reserved) |
@@ -376,17 +395,17 @@ npm run extract:bvp             # docs/bvp.fig
 
 ## 8. 비기능: 비동기 / 성능
 
-본 파이프라인은 가능한 한 비동기·non-blocking으로 동작한다. 단일 `.fig` 처리 시간뿐 아니라 다중 `.fig`/페이지/검증 작업을 동시 실행할 때의 처리량을 결정짓는 핵심 비기능 요구사항.
+extract 파이프라인은 가능한 한 비동기·non-blocking으로 동작한다. 단일 `.fig` 처리 시간뿐 아니라 다중 `.fig`를 동시 실행할 때의 처리량을 결정짓는 핵심 비기능 요구사항. 본 절의 규칙은 `src/` 전체에 적용되지만, 검증 기준은 extract 파이프라인을 대상으로 한다 (다른 서브커맨드의 성능 SLA는 자매 SPEC 참조).
 
 ### 8.1 적용 규칙 (MUST)
 
 | 규칙 | 적용 대상 | 구현 |
 |---|---|---|
-| **파일 I/O는 async** | `.fig` 읽기, `.pen.json`/`.json` 쓰기, 이미지 추출 | `fs/promises` (`readFile` / `writeFile`) — `*Sync`는 단일 파일 보장 컨텍스트만 |
-| **페이지·이미지·벡터 병렬화** | pen-export 페이지 변환, vector SVG 추출, asset 배치 | `Promise.all` 로 페이지/리소스 동시 처리 |
-| **CPU-heavy 작업 컨커런시 한계** | kiwi 디코드, 트리 빌드 등 단일 페이지 내부 | event-loop block 회피 위해 페이지 단위 split, 필요 시 `worker_threads` |
-| **다중 `.fig` / 다중 검증은 풀-병렬** | `npm run extract:all`, 매칭 비교, round-trip 검증 | `Promise.all` + 파일별 worker. 메모리 압박 시 `os.availableParallelism()`로 cap |
-| **블로킹 hash·encode는 stream으로** | sha256, deflate-raw 인코딩 | `crypto.createHash` / `zlib.createDeflateRaw` stream API 우선; 일괄 hash는 < 10 MB |
+| **파일 I/O는 async** | `.fig` 읽기, JSON 쓰기, 이미지·벡터 추출 | `fs/promises` (`readFile` / `writeFile`) — `*Sync`는 단일 파일 보장 컨텍스트만 |
+| **페이지·이미지·벡터 병렬화** | Stage 7 SVG 추출, Stage 8 page split, asset 저장 | `Promise.all` 로 페이지·리소스 동시 처리 |
+| **CPU-heavy 작업의 컨커런시 한계** | Stage 4 kiwi 디코드, Stage 5 트리 빌드 | event-loop block 회피 위해 페이지 단위 split, 필요 시 `worker_threads` |
+| **다중 `.fig` 풀-병렬** | `npm run extract:all`, 라운드트립 검증 | `Promise.all` + 파일별 worker. 메모리 압박 시 `os.availableParallelism()`로 cap |
+| **블로킹 hash·encode는 stream으로** | manifest sha256, deflate-raw 인코딩 | `crypto.createHash` / `zlib.createDeflateRaw` stream API 우선; 일괄 hash는 < 10 MB |
 
 ### 8.2 회피 패턴 (MUST NOT)
 
@@ -395,23 +414,27 @@ npm run extract:bvp             # docs/bvp.fig
 - 페이지·`.fig` 단위 외 nested `Promise.all` 폭주 — file descriptor 고갈 위험
 - `JSON.stringify` 대용량 객체 → main thread block; 대용량은 stream JSON or worker
 
-### 8.3 검증 기준
+### 8.3 검증 기준 (extract 파이프라인)
 
-- pen-export 4페이지 동시 변환 시 `Promise.all` 병렬 실행
-- 매칭 비교는 페이지 수만큼 병렬
-- 단일 `.fig` end-to-end ≤ 1 s (35,660 노드 기준), 다중 `.fig` 시 wall-clock 시간이 최대 N배가 아니라 **1.5N배 미만**
+- 단일 `.fig` end-to-end ≤ 1 s (sample 35,660 노드 기준)
+- 다중 `.fig` wall-clock ≤ **1.5 N배** (단순 N배 직렬이 아닌 병렬 이득)
+- Stage 1~9 어느 단계도 sync I/O loop를 페이지·이미지 단위로 돌리지 않음
 
 ---
 
-## 9. 알려진 제약
+## 9. 알려진 제약 (extract 파이프라인 한정)
 
-| 제약 | 영향 | 대응 |
-|---|---|---|
-| `fzstd@0.1.1`이 decode-only | repack `kiwi` 모드는 deflate-raw로 통일 (사이즈 +18%) | zstd encoder 도입 가능 (`@bokuweb/zstd-wasm` 등) |
-| Vector 디코드 95% 성공 | 82개 노드는 `fillGeometry` 없이 `BOOLEAN_OPERATION` 등 합성 | v1 best-effort — Stage 7에서 fill/stroke만 SVG화 |
-| Figma 클라우드 임포트 미검증 | repack한 `.fig`를 Figma가 받아주는지 미확인 | 사용자 임포트 시도 후 결과 공유 |
-| 알 수 없는 노드 타입 3종 | `VARIABLE_SET`(6), `BRUSH`(25), `CODE_LIBRARY`(1) | 데이터는 raw 보존, 트리에는 포함 |
-| `.pen` 매칭 99.6% (1,397 중 5 mismatch) | (a) 1개 Button INSTANCE의 `fit_content(48)` trigger 미식별, (b) 1개 Vector path scaling 차이, (c) breadcrum frame의 master 표현 차이 | 운영 영향 미미 — 후속 PR 보류. 자세한 audit: [`specs/audit-oracle.spec.md`](./specs/audit-oracle.spec.md) |
+| 제약 | 단계 | 영향 | 대응 |
+|---|---|---|---|
+| Vector 디코드 best-effort | Stage 7 | sample 1,681 vector 중 82개(≈ 5%)는 `BOOLEAN_OPERATION` 등 합성으로 `fillGeometry` 부재 → SVG 출력 없음 | v1 한계로 명시. `commandsBlob` 디코더 자체는 결정적 (95%는 byte-level identical) |
+| 알 수 없는 노드 타입 3종 | Stage 5 | `VARIABLE_SET`(sample 6개), `BRUSH`(25), `CODE_LIBRARY`(1) | 트리에 포함하되 정규화는 raw 보존. JSON으로는 무손실 |
+| `--include-raw-message` 시 메모리 ~150 MB | Stage 4 | 큰 fig에서 OOM 가능 | 기본 OFF. 디버그 시에만 활성 |
+| Stage 7 fallback offset(0/1) 휴리스틱 | Stage 7 | 새 fig-kiwi 버전이 다른 prefix를 도입할 경우 둘 다 실패 가능 | sample(v106)에서는 0/1 시도로 충분. 위반 시 `vector-decode.spec.md` 갱신 |
+
+**Repack / pen-export / 클라우드 임포트 등 cross-domain 제약**은 자매 SPEC으로 위임:
+- `fzstd@0.1.1` decode-only → repack 사이즈 영향: [`SPEC-repack.md`](./SPEC-repack.md)
+- `.pen` 매칭 99.6% (5 mismatch): [`SPEC-figma-to-pencil.md`](./SPEC-figma-to-pencil.md) · [`specs/audit-oracle.spec.md`](./specs/audit-oracle.spec.md)
+- repack한 `.fig`의 Figma Cloud 임포트 검증: [`SPEC-roundtrip.md`](./SPEC-roundtrip.md)
 
 ---
 
@@ -436,7 +459,7 @@ npx tsx src/cli.ts extract /path/to/your.fig ./my-output
 npx tsx src/cli.ts --help
 ```
 
-테스트 실행 — CLI: `npm test` (162 tests). Web: `cd web && npm test` (622 tests).
+테스트는 `npm test` (CLI) + `cd web && npm test` (Web). 갯수 / 커버리지 현황은 [`README.md`](../README.md) 참조.
 
 ---
 
