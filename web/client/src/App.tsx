@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { Download, FileUp, FolderOpen, Redo2, Save, Undo2 } from 'lucide-react';
 import { Inspector } from './Inspector';
 import { LeftSidebar } from './components/sidebar/LeftSidebar';
+import { findById } from '@core/domain/tree';
 
 // Lazy-load the Konva-backed canvas. Pulls the ~334 kB konva chunk only
 // after the user opens a document — the upload-empty landing screen never
@@ -43,20 +44,74 @@ export function App() {
   // Stable identity so the memoized Canvas/NodeShape tree doesn't see a new
   // `onSelect` prop on every App render — that would defeat React.memo and
   // re-render every NodeShape on selection clicks.
+  //
+  // Guard against `_isInstanceChild` selection (spec web-left-sidebar.spec.md
+  // I-F6.2): a guid that lives only inside some INSTANCE's `_renderChildren`
+  // expansion is unreachable from any page tree via `.children`. Selecting
+  // it would make the Inspector show "Selected node X not found in current
+  // page". Canvas onShapeClick + LayerTree onRowClick already bubble such
+  // clicks to the outer INSTANCE, but other callers (Inspector cross-link
+  // navigation, chat agent tools, future code paths) could still slip a
+  // raw master-child guid through. We resolve those centrally here by
+  // walking the doc to find the INSTANCE whose `_renderChildren` contains
+  // the guid and substituting its guid instead.
+  const findOuterInstanceFor = useCallback((target: string): string | null => {
+    if (!doc) return null;
+    let result: string | null = null;
+    const walk = (n: unknown, ancestorInstance: string | null): void => {
+      if (result || !n || typeof n !== 'object') return;
+      const node = n as {
+        id?: string;
+        guid?: { sessionID?: number; localID?: number };
+        type?: string;
+        children?: unknown[];
+        _renderChildren?: unknown[];
+        _isInstanceChild?: boolean;
+      };
+      const nid = node.id ?? (node.guid ? `${node.guid.sessionID}:${node.guid.localID}` : null);
+      if (nid === target) {
+        // Found the target — return whichever ancestor INSTANCE wraps it.
+        result = ancestorInstance;
+        return;
+      }
+      const nextAncestor =
+        node.type === 'INSTANCE' && !node._isInstanceChild && nid
+          ? nid
+          : ancestorInstance;
+      if (Array.isArray(node.children)) {
+        for (const c of node.children) walk(c, nextAncestor);
+      }
+      if (Array.isArray(node._renderChildren)) {
+        for (const c of node._renderChildren) walk(c, nextAncestor);
+      }
+    };
+    walk(doc, null);
+    return result;
+  }, [doc]);
+
   const handleSelect = useCallback(
     (guid: string | null, mode: 'replace' | 'toggle' = 'replace') => {
+      // If the requested guid isn't reachable in any page tree via `.children`
+      // (i.e. it's a master-subtree descendant living only in some INSTANCE's
+      // _renderChildren), substitute the outer INSTANCE's guid. Null guid
+      // (clear-selection) passes through unchanged.
+      let effectiveGuid = guid;
+      if (guid !== null && doc && !findById(doc, guid)) {
+        const outer = findOuterInstanceFor(guid);
+        if (outer) effectiveGuid = outer;
+      }
       setSelectedGuids((prev) => {
-        if (guid === null) return new Set();
+        if (effectiveGuid === null) return new Set();
         if (mode === 'toggle') {
           const next = new Set(prev);
-          if (next.has(guid)) next.delete(guid);
-          else next.add(guid);
+          if (next.has(effectiveGuid)) next.delete(effectiveGuid);
+          else next.add(effectiveGuid);
           return next;
         }
-        return new Set([guid]);
+        return new Set([effectiveGuid]);
       });
     },
-    [],
+    [doc, findOuterInstanceFor],
   );
   // Convenience accessor for the inspector / single-selection consumers.
   const selectedGuid = selectedGuids.size === 1 ? [...selectedGuids][0]! : null;

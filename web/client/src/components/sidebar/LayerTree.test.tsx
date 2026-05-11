@@ -745,6 +745,71 @@ describe('LayerTree — instance master expansion (spec I-F6, I-F6.1, I-F6.2)', 
     expect(screen.getByText('Date Picker')).toBeTruthy();
   });
 
+  it('I-F14 — double-click on a row INSIDE an instance expansion (outerInstanceGuid set) suppresses drill (expand-only)', () => {
+    // Repro of "Selected node X not found in current page" when drilling
+    // into Date Picker → Month drop down → first icon button. The FRAME
+    // "Month drop down" has direct children but those children are
+    // themselves `_isInstanceChild` (master subtree descendants), so
+    // dispatching onSelect with the first child's guid would set
+    // selectedGuid to a master child guid the Inspector can't find in
+    // the current page tree. The drill must be suppressed.
+    const PAGE_WITH_DRILL_TRAP: DocNode = {
+      guid: { sessionID: 0, localID: 100 },
+      type: 'CANVAS',
+      name: 'Page 1',
+      children: [
+        instance(9289, 'Docked input date picker [desktop]', [
+          masterChild(9209, 'FRAME', 'Date Picker', [
+            masterChild(9210, 'FRAME', 'Selection Row', [
+              masterChild(9211, 'FRAME', 'Month drop down', [
+                masterChild(9212, 'INSTANCE', 'Icon button - standard'),
+              ]),
+            ]),
+          ]),
+        ]),
+      ],
+    };
+
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE_WITH_DRILL_TRAP}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    // Expand down to Month drop down so it's the row we double-click
+    fireEvent.click(
+      screen.getByText('Docked input date picker [desktop]')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Date Picker')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Selection Row')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    onSelect.mockClear();
+
+    // Double-click "Month drop down" — has direct children (the master's
+    // own `.children`), but the row itself is inside the master expansion
+    // (outerInstanceGuid = 1:9289). The drill must NOT call onSelect with
+    // the first child's guid (1:9212 — _isInstanceChild). Expand-only.
+    const monthRow = screen.getByText('Month drop down').closest('[role="treeitem"]')!;
+    fireEvent.doubleClick(monthRow);
+
+    expect(onSelect).not.toHaveBeenCalled();
+    // Expand fired so the icon button is now in the DOM.
+    expect(screen.getByText('Icon button - standard')).toBeTruthy();
+  });
+
   it('I-F14 — double-click on INSTANCE with only _renderChildren expands but keeps selection on outer INSTANCE', () => {
     const onSelect = vi.fn();
     render(

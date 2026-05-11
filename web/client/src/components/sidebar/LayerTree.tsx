@@ -139,14 +139,23 @@ const LayerRow = memo(function LayerRow({
     if (expandKey) toggleExpand(expandKey);
   };
   // I-F14 — Figma-like double-click drill-in. Expands the row (if not yet)
-  // and moves selection one level deeper to the first direct child. Master
-  // expansion children can't be selected directly (I-F6.2), so for INSTANCE
-  // rows whose only children come from `_renderChildren`, double-click just
-  // expands without moving selection.
+  // and moves selection one level deeper to the first direct child. Two
+  // guards prevent the drill from selecting an unselectable node:
+  //   1. INSTANCE rows whose only children come from `_renderChildren` (no
+  //      `.children`) — the master expansion children can't be selected
+  //      directly (I-F6.2), so we expand without moving selection.
+  //   2. Rows ALREADY inside an instance expansion (outerInstanceGuid set)
+  //      — their direct children are also `_isInstanceChild` (master
+  //      subtree descendants), so dispatching `onSelect(firstChildGuid)`
+  //      would set selectedGuid to a master child guid that the Inspector
+  //      can't find in the current page tree ("Selected node X not found
+  //      in current page"). Same single-click bubble rule (I-F6.2) applies
+  //      to the drill — expand only.
   const onRowDoubleClick = (e: React.MouseEvent): void => {
     e.stopPropagation();
     if (expandKey && hasChildren && !isExpanded) toggleExpand(expandKey);
     if (directChildren.length === 0) return;
+    if (outerInstanceGuid) return;
     const firstChild = directChildren[0];
     if (!firstChild) return;
     const childGuid = guidStrOf(firstChild);

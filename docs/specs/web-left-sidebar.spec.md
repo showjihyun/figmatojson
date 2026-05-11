@@ -101,8 +101,9 @@ Each row (`LayerRow`):
 - I-F6.3 Chevron click on `_isInstanceChild` rows works normally — only the row-body click bubbles. Users can drill into the visual structure without changing selection.
 - I-F14 **Double-click drill-in** (Figma-like). Double-click on a row body:
   - Expands the row if it has any children (idempotent — already-expanded stays expanded).
-  - If the row has *direct* children (`node.children.length > 0`), selection moves to the first direct child via `onSelect(firstChildGuid, 'replace')`. This is the "go one level deeper" behavior.
-  - If the row only has master expansion children (`_renderChildren`, no `.children`), selection stays on the outer node — master expansion descendants can't be selected directly (I-F6.2), so drilling has nowhere to land.
+  - If the row has *direct* children (`node.children.length > 0`) AND the row itself is NOT inside an instance expansion (`outerInstanceGuid` undefined), selection moves to the first direct child via `onSelect(firstChildGuid, 'replace')`. This is the "go one level deeper" behavior.
+  - If the row only has master expansion children (`_renderChildren`, no `.children`), selection stays on the outer node — master expansion descendants can't be selected directly (I-F6.2).
+  - **If the row is itself a master-expansion descendant (`outerInstanceGuid` set)**, the drill is suppressed too — its `directChildren[0]` is also `_isInstanceChild`, so dispatching its raw guid would produce "Selected node X not found in current page" in the Inspector. Same I-F6.2 bubble rule applies to the drill: expand only.
   - Leaf rows (no children at all) are a no-op for drill-in; the preceding single-click already selected them.
   - Double-click does NOT fire on the chevron button (the button's own `onClick` stops propagation).
 - I-F7 All nodes are collapsed by default. Only depth 0 (direct children of the page) are visible initially.
