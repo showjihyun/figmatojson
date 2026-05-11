@@ -56,14 +56,15 @@ logs/
 # Local scratch / audit / debug scripts (regenerable, not part of project state)
 _tmp_*
 
-# Audit-round11 LLM-context tiles (regenerable via crop-audit-tiles.mjs)
-docs/audit-round11/**/_tiles/
-
-# Round 17 raw-coverage / properties-coverage outputs (measurement only,
-# regenerable via audit-raw-coverage.mjs + audit-properties-coverage.mjs).
+# Internal company data — must never be committed (audit data dumps).
+# Spec files in docs/specs/audit-*.spec.md are meta-documentation and are kept.
+docs/bvp.fig
+docs/audit-bvp/
+docs/audit-round11/
+docs/audit-roundtrip/
 docs/audit-raw-coverage/
 
-# Personal sample fixtures (not for repo — bvp.fig is the public sample).
+# Personal sample fixtures.
 docs/메타리치 화면 UI Design.fig
 docs/메타리치 화면 UI Design.pen
 docs/스크린샷*.png
