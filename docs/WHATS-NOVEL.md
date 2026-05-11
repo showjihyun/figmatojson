@@ -150,7 +150,7 @@ We want to emphasize — **we do not claim to have done everything**:
 
 1. **We also borrow heavily**: `pako` (deflate), `fzstd` (zstd), and `kiwi-schema` (Evan Wallace) are the core codecs. Without them we could not have started.
 2. **Prior art acknowledged**: Albert Sikkema's dual-compression discovery (2026-01) is correct and cited in our SPEC.md §10. easylogic's 2024-09 Korean article reaches the same steps.
-3. **Partial coverage acknowledged**: Vector decode 95% (BOOLEAN_OPERATION etc. — 5% — unparsed); only VISIBLE on `componentPropNodeField` (TEXT / INSTANCE_SWAP unsupported); stroke / effects override unsupported.
+3. **Partial coverage acknowledged**: Vector decode 95% (BOOLEAN_OPERATION etc. — 5% — unparsed); `componentPropNodeField` handles VISIBLE + TEXT_DATA (the latter added in round 33 — Material 3 Date Picker day cells, action button labels, dropdown labels all flow through it); INSTANCE_SWAP still unsupported; stroke / effects override unsupported.
 4. **Figma cloud import unverified**: We have not confirmed that Figma accepts the `.fig` we produce. (Round-trip verification passes through our own parser.)
 5. **Verified on a single corpus only**: Edge cases not present in our fixture may exist in other design files. Adding new corpora is future work.
 6. **Commercial tools (Anima / Builder.io / Plasmic) are closed source**, so we cannot verify how they handle this. People in that space typically use Figma's Plugin API, but we cannot assert that *without seeing their code directly*.

@@ -21,10 +21,12 @@ import {
   collectStackOverridesFromInstance,
   collectSwapTargetsAtPathFromInstance,
   collectTextOverridesFromInstance,
+  collectTextPropAssignmentsFromInstance,
   collectTextStyleOverridesFromInstance,
   collectVisibilityOverridesFromInstance,
   collectVisualStyleOverridesFromInstance,
   mergeOverridesForNested,
+  textFromPropRefs,
   type Transform2D,
 } from '../../../src/instanceOverrides.js';
 import type { TreeNode } from '../../../src/types.js';
@@ -132,6 +134,7 @@ export function toClientNode(
         const fillOverrides = collectFillOverridesFromInstance(sd?.symbolOverrides);
         const visOverrides = collectVisibilityOverridesFromInstance(sd?.symbolOverrides);
         const propAssignments = collectPropAssignmentsFromInstance(data);
+        const textPropAssignments = collectTextPropAssignmentsFromInstance(data);
         const propAssignmentsByPath = collectPropAssignmentsAtPathFromInstance(sd?.symbolOverrides);
         const swapTargetsByPath = collectSwapTargetsAtPathFromInstance(sd?.symbolOverrides);
         const derivedSizesByPath = collectDerivedSizesFromInstance(data);
@@ -156,7 +159,7 @@ export function toClientNode(
         // variant-stamped values instead of master defaults.
         const stackOverridesByPath = collectStackOverridesFromInstance(sd?.symbolOverrides);
         const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath, visualStyleOverridesByPath),
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath, visualStyleOverridesByPath, textPropAssignments),
         );
         if (expanded.length > 0) {
           // Spec web-instance-autolayout-reflow: when the INSTANCE size
@@ -524,6 +527,11 @@ export function toClientChildForRender(
   derivedTransformsByPath: Map<string, Transform2D> = new Map(),
   textStyleOverridesByPath: Map<string, Record<string, unknown>> = new Map(),
   visualStyleOverridesByPath: Map<string, Record<string, unknown>> = new Map(),
+  // I-C8 — TEXT_DATA prop bindings (Map<defIdKey, characters>) propagated
+  // inward like `propAssignments`. A TEXT descendant of this expansion
+  // whose `componentPropRefs` carry `componentPropNodeField === 'TEXT_DATA'`
+  // gets its `characters` replaced when the defID matches.
+  textPropAssignments: Map<string, string> = new Map(),
 ): DocumentNode {
   if (depth > 8) {
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
@@ -572,7 +580,7 @@ export function toClientChildForRender(
     name: n.name,
     _isInstanceChild: true,
     children: n.children.map((c) =>
-      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, childPathFromOuter, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath, visualStyleOverridesByPath),
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, childPathFromOuter, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath, visualStyleOverridesByPath, textPropAssignments),
     ),
   };
   if (VECTOR_TYPES.has(n.type)) {
@@ -586,8 +594,21 @@ export function toClientChildForRender(
     }
   }
   if (n.type === 'TEXT') {
+    // Path-keyed text override (designer-typed literal via symbolOverrides)
+    // wins over prop-binding (the master-defined property hookup), since
+    // path-key is the more specific intent.
     const ov = textOverrides.get(currentKey);
-    if (typeof ov === 'string') out._renderTextOverride = ov;
+    if (typeof ov === 'string') {
+      out._renderTextOverride = ov;
+    } else {
+      // I-C8 — TEXT_DATA prop binding: master TEXT carries a propRef whose
+      // defID matches a key in textPropAssignments. The assignment's
+      // characters become the rendered text. Without this, master defaults
+      // like "00" / "Label" leak through every day cell + action button in
+      // Material 3 Date Pickers.
+      const propOv = textFromPropRefs(data, textPropAssignments);
+      if (typeof propOv === 'string') out._renderTextOverride = propOv;
+    }
   }
   // Nested INSTANCE: merge outer overrides (already path-keyed against the
   // outer master's tree, may contain entries that target descendants of
@@ -655,6 +676,13 @@ export function toClientChildForRender(
         const mergedPropAssignments = innerPropAssignments.size > 0
           ? new Map([...effectivePropAssignments, ...innerPropAssignments])
           : effectivePropAssignments;
+        // I-C8 — same defID-keyed flat-overwrite merge for TEXT_DATA
+        // assignments. Inner INSTANCE's own assignments override the outer
+        // ones inside this nested expansion.
+        const innerTextPropAssignments = collectTextPropAssignmentsFromInstance(data);
+        const mergedTextPropAssignments = innerTextPropAssignments.size > 0
+          ? new Map([...textPropAssignments, ...innerTextPropAssignments])
+          : textPropAssignments;
         // Spec §3.4 I-P11: also collect path-keyed prop assignments from
         // the inner INSTANCE's own symbolOverrides, prefixed with currentPath
         // so they reach descendants of the inner expansion. Outer
@@ -730,7 +758,7 @@ export function toClientChildForRender(
         // affects its own reflow below.
         const innerStackOv = collectStackOverridesFromInstance((data as { symbolData?: { symbolOverrides?: Array<Record<string, unknown>> } }).symbolData?.symbolOverrides);
         const nestedExpanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes, mergedDerivedTransforms, mergedTextStyle, mergedVisualStyle),
+          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes, mergedDerivedTransforms, mergedTextStyle, mergedVisualStyle, mergedTextPropAssignments),
         );
         // Round 20: AUTO-grow primarySizing also fires for nested INSTANCEs
         // (the dashboard "Excel 다운로드" button is a nested INSTANCE inside

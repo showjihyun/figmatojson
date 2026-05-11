@@ -174,6 +174,47 @@ describe('LayerTree', () => {
     expect(screen.getByText('No document open')).toBeTruthy();
   });
 
+  it('I-F14 — double-click on a row with direct children expands AND selects first child', () => {
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    // Header is collapsed initially; its first child is TEXT "Title" (guid 0:11)
+    const headerRow = screen.getByText('Header').closest('[role="treeitem"]')!;
+    expect(headerRow.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.doubleClick(headerRow);
+
+    // Drilled in: now expanded and first child selected
+    expect(headerRow.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText('Title')).toBeTruthy();
+    expect(onSelect).toHaveBeenCalledWith('0:11', 'replace');
+  });
+
+  it('I-F14 — double-click on a leaf row (no children) is a no-op for drill', () => {
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    const footerRow = screen.getByText('Footer').closest('[role="treeitem"]')!;
+    fireEvent.doubleClick(footerRow);
+    // jsdom `fireEvent.doubleClick` does NOT auto-fire click — only dblclick.
+    // The dblclick handler has nothing to drill into and nothing to expand,
+    // so onSelect should not be called.
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it('renders <unnamed> for nodes with empty/null name', () => {
     const page: DocNode = {
       guid: { sessionID: 0, localID: 100 },
@@ -531,5 +572,247 @@ describe('LayerTree — auto-reveal on selection (spec I-F11.5–I-F11.8)', () =
     expect(screen.getByText('typography')).toBeTruthy();
     // No scroll because there's no selected row to focus on.
     expect(scrollSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('LayerTree — instance master expansion (spec I-F6, I-F6.1, I-F6.2)', () => {
+  // Page contains one INSTANCE whose `.children` is empty and whose
+  // `_renderChildren` holds the master subtree. Mirrors the production
+  // shape produced by `toClientNode` + `toClientChildForRender`: every
+  // expansion descendant carries `_isInstanceChild: true`, and master
+  // descendant guids live in a different page (NOT in this page tree).
+  function instance(localID: number, name: string, expanded: DocNode[]): DocNode {
+    return {
+      guid: { sessionID: 0, localID },
+      type: 'INSTANCE',
+      name,
+      children: [], // empty — the fallback to _renderChildren is the whole point
+      _renderChildren: expanded,
+    } as DocNode;
+  }
+  function masterChild(localID: number, type: string, name: string, children?: DocNode[]): DocNode {
+    return {
+      guid: { sessionID: 1, localID }, // sessionID:1 to mark "master page" guids
+      type,
+      name,
+      children,
+      _isInstanceChild: true,
+    } as DocNode;
+  }
+
+  const MASTER_TREE = [
+    masterChild(9177, 'FRAME', 'Docked input date picker [desktop]', [
+      masterChild(9180, 'SYMBOL', 'Day', [
+        masterChild(9209, 'FRAME', 'Date Picker'),
+      ]),
+    ]),
+  ];
+
+  const PAGE_WITH_INSTANCE: DocNode = {
+    guid: { sessionID: 0, localID: 100 },
+    type: 'CANVAS',
+    name: 'Page 1',
+    children: [
+      instance(9289, 'Docked input date picker [desktop]', MASTER_TREE),
+    ],
+  };
+
+  it('I-F6 — exposes _renderChildren when .children is empty', () => {
+    render(
+      <LayerTree
+        page={PAGE_WITH_INSTANCE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    // The INSTANCE row shows a chevron (has expandable children)
+    const instanceRow = screen.getByText('Docked input date picker [desktop]').closest('[role="treeitem"]')!;
+    const instanceChevron = instanceRow.querySelector('button[aria-label="Expand"]');
+    expect(instanceChevron).not.toBeNull();
+
+    // Master children hidden until expanded
+    expect(screen.queryByText('Day')).toBeNull();
+
+    // Expand INSTANCE → master's outer FRAME (depth 1) becomes visible — its
+    // display name matches the INSTANCE's, so the row count goes 1 → 2.
+    fireEvent.click(instanceChevron!);
+    expect(screen.getAllByText('Docked input date picker [desktop]').length).toBe(2);
+
+    // Expand the master FRAME row → SYMBOL "Type=Day" rendered as "Day" appears
+    const masterFrameRow = screen.getAllByText('Docked input date picker [desktop]')[1]!
+      .closest('[role="treeitem"]')!;
+    fireEvent.click(masterFrameRow.querySelector('button[aria-label="Expand"]')!);
+    expect(screen.getByText('Day')).toBeTruthy();
+
+    // Expand SYMBOL "Day" → "Date Picker" leaf visible
+    fireEvent.click(
+      screen.getByText('Day').closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    expect(screen.getByText('Date Picker')).toBeTruthy();
+  });
+
+  it('I-F6.1 — master expansion rows carry italic + muted styling', () => {
+    render(
+      <LayerTree
+        page={PAGE_WITH_INSTANCE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByText('Docked input date picker [desktop]')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+
+    // First match is the master's outer FRAME (depth 1 inside expansion)
+    const masterFrameRow = screen.getAllByText('Docked input date picker [desktop]')[1]!
+      .closest('[role="treeitem"]')!;
+    expect(masterFrameRow.getAttribute('data-instance-child')).toBe('true');
+    expect(masterFrameRow.className).toContain('italic');
+    expect(masterFrameRow.className).toContain('text-muted-foreground');
+  });
+
+  it('I-F6.2 — row-body click on _isInstanceChild selects the outer INSTANCE guid (not master child)', () => {
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE_WITH_INSTANCE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    // Drill down 3 levels: INSTANCE → master FRAME → SYMBOL "Day"
+    fireEvent.click(
+      screen.getByText('Docked input date picker [desktop]')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getAllByText('Docked input date picker [desktop]')[1]!
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Day').closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+
+    onSelect.mockClear();
+    // Click "Date Picker" (master child guid 1:9209)
+    fireEvent.click(screen.getByText('Date Picker').closest('[role="treeitem"]')!);
+
+    // Should NOT select 1:9209 (master child) — bubbles to outer INSTANCE 0:9289
+    expect(onSelect).toHaveBeenCalledWith('0:9289', 'replace');
+    expect(onSelect).not.toHaveBeenCalledWith('1:9209', expect.anything());
+  });
+
+  it('I-F6.3 — chevron click on _isInstanceChild row does NOT call onSelect (still expand-only)', () => {
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE_WITH_INSTANCE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    // Drill: INSTANCE → master FRAME → expose "Day"
+    fireEvent.click(
+      screen.getByText('Docked input date picker [desktop]')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getAllByText('Docked input date picker [desktop]')[1]!
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    onSelect.mockClear();
+
+    // Chevron on the _isInstanceChild "Day" SYMBOL toggles expand without selection
+    const dayRow = screen.getByText('Day').closest('[role="treeitem"]')!;
+    fireEvent.click(dayRow.querySelector('button[aria-label="Expand"]')!);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(screen.getByText('Date Picker')).toBeTruthy();
+  });
+
+  it('I-F14 — double-click on INSTANCE with only _renderChildren expands but keeps selection on outer INSTANCE', () => {
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE_WITH_INSTANCE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    const instanceRow = screen.getByText('Docked input date picker [desktop]').closest('[role="treeitem"]')!;
+    fireEvent.doubleClick(instanceRow);
+
+    // Expanded — master subtree row is now in DOM (the inner FRAME duplicate)
+    expect(screen.getAllByText('Docked input date picker [desktop]').length).toBe(2);
+    // INSTANCE has no .children (master expansion children come from
+    // _renderChildren). The drill leg therefore doesn't move selection;
+    // jsdom's fireEvent.doubleClick doesn't auto-fire click either, so
+    // onSelect should not be called at all.
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('I-F6.1 composite expand key — two instances of the same master keep independent expand state', () => {
+    const PAGE_DUAL: DocNode = {
+      guid: { sessionID: 0, localID: 100 },
+      type: 'CANVAS',
+      name: 'Page 1',
+      children: [
+        instance(9289, 'Docked A', MASTER_TREE),
+        instance(9388, 'Docked B', MASTER_TREE),
+      ],
+    };
+
+    render(
+      <LayerTree
+        page={PAGE_DUAL}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    // Drill into instance A: expand A → expand A's outer master FRAME
+    fireEvent.click(
+      screen.getByText('Docked A')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Docked input date picker [desktop]')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+
+    // "Day" SYMBOL under A is now visible. Instance B is still collapsed, so
+    // its own master expansion never rendered — exactly one row of "Day".
+    expect(screen.getAllByText('Day').length).toBe(1);
+
+    // Now expand B → its master expansion mounts, with "Day" hidden until
+    // we expand B's outer FRAME (separate state, not bound to A's).
+    fireEvent.click(
+      screen.getByText('Docked B')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    // B's outer master FRAME shows up but its "Day" is collapsed — A still
+    // has its "Day" visible. Net: exactly one "Day" still in DOM.
+    expect(screen.getAllByText('Day').length).toBe(1);
   });
 });

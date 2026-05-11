@@ -29,6 +29,10 @@ interface DocNode {
   type?: string;
   name?: string;
   children?: DocNode[];
+  /** INSTANCE master subtree attached during decode (I-F6 / I-F6.1). */
+  _renderChildren?: DocNode[];
+  /** True for every node inside an INSTANCE's _renderChildren expansion. */
+  _isInstanceChild?: boolean;
 }
 
 interface LayerTreeProps {
@@ -61,7 +65,7 @@ interface LayerRowProps {
   node: DocNode;
   depth: number;
   expanded: Set<string>;
-  toggleExpand: (guid: string) => void;
+  toggleExpand: (key: string) => void;
   selectedGuids: Set<string>;
   onSelect: LayerTreeProps['onSelect'];
   /**
@@ -70,6 +74,17 @@ interface LayerRowProps {
    */
   revealGuid: string | null;
   revealRef: React.RefObject<HTMLDivElement | null>;
+  /**
+   * Set on every descendant of an INSTANCE's `_renderChildren` expansion.
+   * Two consequences (spec I-F6.1 / I-F6.2):
+   *   - This row's expand key is `${outerInstanceGuid}/${guid}` (composite)
+   *     so two instances of the same master keep independent expand state.
+   *   - Row-body click selects `outerInstanceGuid` instead of the row's own
+   *     guid (the master child guid lives in a different page tree).
+   * `undefined` for normal rows (the INSTANCE itself + everything outside
+   * an instance expansion).
+   */
+  outerInstanceGuid?: string;
 }
 
 const LayerRow = memo(function LayerRow({
@@ -81,25 +96,61 @@ const LayerRow = memo(function LayerRow({
   onSelect,
   revealGuid,
   revealRef,
+  outerInstanceGuid,
 }: LayerRowProps) {
   const guid = guidStrOf(node);
-  const children = Array.isArray(node.children) ? node.children : [];
-  // Spec I-F6: instance master expansions (`_renderChildren`) are NOT
-  // exposed in the tree — only direct children. So we look at `children`
-  // alone, mirroring Figma's left-panel behavior.
+  // Spec I-F6: fall back to `_renderChildren` when `.children` is empty so
+  // INSTANCE master subtrees are visible in the tree (same as Figma).
+  const directChildren = Array.isArray(node.children) ? node.children : [];
+  const fallbackChildren =
+    directChildren.length === 0 && Array.isArray(node._renderChildren)
+      ? node._renderChildren
+      : [];
+  const children = directChildren.length > 0 ? directChildren : fallbackChildren;
   const hasChildren = children.length > 0;
-  const isExpanded = guid ? expanded.has(guid) : false;
+  // I-F6.1 — composite expand key for rows inside an instance expansion so
+  // two instances of the same master don't share expand state.
+  const expandKey = guid
+    ? outerInstanceGuid
+      ? `${outerInstanceGuid}/${guid}`
+      : guid
+    : '';
+  const isExpanded = expandKey ? expanded.has(expandKey) : false;
   const isSelected = guid ? selectedGuids.has(guid) : false;
+  // When we're entering the master expansion of THIS INSTANCE, descendant
+  // rows pick up `outerInstanceGuid = guid` (the INSTANCE itself). Otherwise
+  // descendants inherit the current value.
+  const enteringExpansion =
+    directChildren.length === 0 && fallbackChildren.length > 0;
+  const childOuterInstanceGuid = enteringExpansion ? guid : outerInstanceGuid;
 
   const Icon = iconFor(node.type);
 
   const onRowClick = (e: React.MouseEvent): void => {
-    if (!guid) return;
-    onSelect(guid, e.shiftKey ? 'toggle' : 'replace');
+    // I-F6.2 — `_isInstanceChild` rows bubble selection up to the outer
+    // INSTANCE; the row's own guid (master child) wouldn't be findable in
+    // the current page tree.
+    const selectGuid = outerInstanceGuid ?? guid;
+    if (!selectGuid) return;
+    onSelect(selectGuid, e.shiftKey ? 'toggle' : 'replace');
   };
   const onChevronClick = (e: React.MouseEvent): void => {
     e.stopPropagation();
-    if (guid) toggleExpand(guid);
+    if (expandKey) toggleExpand(expandKey);
+  };
+  // I-F14 — Figma-like double-click drill-in. Expands the row (if not yet)
+  // and moves selection one level deeper to the first direct child. Master
+  // expansion children can't be selected directly (I-F6.2), so for INSTANCE
+  // rows whose only children come from `_renderChildren`, double-click just
+  // expands without moving selection.
+  const onRowDoubleClick = (e: React.MouseEvent): void => {
+    e.stopPropagation();
+    if (expandKey && hasChildren && !isExpanded) toggleExpand(expandKey);
+    if (directChildren.length === 0) return;
+    const firstChild = directChildren[0];
+    if (!firstChild) return;
+    const childGuid = guidStrOf(firstChild);
+    if (childGuid) onSelect(childGuid, 'replace');
   };
 
   // Round 14 — strip variant `prop=` prefixes (e.g. "size=XL, State=default,
@@ -122,11 +173,17 @@ const LayerRow = memo(function LayerRow({
         aria-selected={isSelected}
         aria-expanded={hasChildren ? isExpanded : undefined}
         data-guid={guid}
+        data-instance-child={node._isInstanceChild ? 'true' : undefined}
         onClick={onRowClick}
+        onDoubleClick={onRowDoubleClick}
         className={cn(
           'flex items-center gap-1 h-7 cursor-pointer select-none text-xs',
           'hover:bg-accent/50',
           isSelected && 'bg-accent',
+          // I-F6.1 — muted+italic for instance master expansion rows so the
+          // user can tell at a glance these are informational (clicking
+          // bubbles to the outer INSTANCE, not the master child).
+          node._isInstanceChild && 'italic text-muted-foreground',
         )}
         style={{ paddingLeft: 8 + depth * 12 }}
       >
@@ -155,7 +212,10 @@ const LayerRow = memo(function LayerRow({
       </div>
       {isExpanded && hasChildren && children.map((c, i) => (
         <LayerRow
-          key={guidStrOf(c) || `${guid}-${i}`}
+          // Key needs to disambiguate across instance expansions too — two
+          // INSTANCEs of the same master would otherwise produce duplicate
+          // React keys for their identical-guid descendants.
+          key={`${childOuterInstanceGuid ?? ''}|${guidStrOf(c) || `${guid}-${i}`}`}
           node={c}
           depth={depth + 1}
           expanded={expanded}
@@ -164,6 +224,7 @@ const LayerRow = memo(function LayerRow({
           onSelect={onSelect}
           revealGuid={revealGuid}
           revealRef={revealRef}
+          outerInstanceGuid={childOuterInstanceGuid}
         />
       ))}
     </>

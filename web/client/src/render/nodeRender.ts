@@ -55,7 +55,8 @@ import {
 import { applyTextCase, konvaTextDecoration } from '../lib/textTransform.js';
 import { effectiveTextStyle } from '@core/domain/colorStyleRef';
 import { hasStyledRuns, splitTextRuns } from '../lib/textStyleRuns.js';
-import { solidFillCss, strokeFromPaints } from '@core/domain/color';
+import { solidFillCss, strokeFromPaints, rgbaToCss } from '@core/domain/color';
+import { pickTopPaint } from '../lib/paint.js';
 import { imageHashHex } from '@core/domain/image';
 
 /** Vector types that carry a precomputed `_path` SVG string after toClientNode. */
@@ -341,20 +342,24 @@ function planVector(node: Record<string, unknown>): NodeVectorPlan {
  * when no usable SOLID paint exists — the same default Canvas's inline
  * branch has used since round 1, kept identical so 1B doesn't shift any
  * pixel that wasn't already shifted in 1A.
+ *
+ * Fixes vs the round-1 baseline:
+ *   - Picks the TOPMOST visible non-IMAGE paint (via `pickTopPaint`), not
+ *     the first — matches Figma's bottom-up paint stack. Multi-paint TEXT
+ *     nodes (e.g. M3 state-layered text) now render with the overlay color.
+ *   - Applies `paint.opacity` on top of `color.a`. The earlier branch
+ *     dropped `paint.opacity` entirely, so translucent text paints rendered
+ *     opaque.
  */
 function textBaseFillColor(node: Record<string, unknown>): string {
   const fills = node.fillPaints;
   if (!Array.isArray(fills)) return '#ddd';
-  const first = (fills as Array<Record<string, unknown>>).find(
-    (p) => (p as { type?: string }).type === 'SOLID' && (p as { visible?: boolean }).visible !== false,
-  );
-  if (!first || !first.color) return '#ddd';
-  const c = first.color as { r?: number; g?: number; b?: number; a?: number };
-  const r = Math.round((c.r ?? 0) * 255);
-  const g = Math.round((c.g ?? 0) * 255);
-  const b = Math.round((c.b ?? 0) * 255);
-  const a = c.a ?? 1;
-  return `rgba(${r},${g},${b},${a})`;
+  const top = pickTopPaint(fills as Array<{ type?: string; visible?: boolean }>);
+  if (!top || (top as { type?: string }).type !== 'SOLID') return '#ddd';
+  const p = top as { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number };
+  if (!p.color) return '#ddd';
+  const op = typeof p.opacity === 'number' ? p.opacity : 1;
+  return rgbaToCss(p.color, op);
 }
 
 function planTextSimple(node: Record<string, unknown>, ctx: RenderContext): NodeTextSimplePlan {
@@ -576,18 +581,12 @@ function resolveStyledRunFill(
 ): string {
   const fps = run.override.fillPaints;
   if (!Array.isArray(fps)) return baseFill;
-  const first = (fps as Array<Record<string, unknown>>).find(
-    (p) =>
-      (p as { type?: string }).type === 'SOLID' &&
-      (p as { visible?: boolean }).visible !== false,
-  );
-  if (!first || !first.color) return baseFill;
-  const c = first.color as { r?: number; g?: number; b?: number; a?: number };
-  const r = Math.round((c.r ?? 0) * 255);
-  const g = Math.round((c.g ?? 0) * 255);
-  const b = Math.round((c.b ?? 0) * 255);
-  const a = c.a ?? 1;
-  return `rgba(${r},${g},${b},${a})`;
+  const top = pickTopPaint(fps as Array<{ type?: string; visible?: boolean }>);
+  if (!top || (top as { type?: string }).type !== 'SOLID') return baseFill;
+  const p = top as { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number };
+  if (!p.color) return baseFill;
+  const op = typeof p.opacity === 'number' ? p.opacity : 1;
+  return rgbaToCss(p.color, op);
 }
 
 function planTextStyled(node: Record<string, unknown>, ctx: RenderContext): NodeTextStyledPlan {

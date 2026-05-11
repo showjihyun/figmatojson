@@ -247,7 +247,7 @@ describe('nodeRender', () => {
         emptyCtx(),
       );
       if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
-      expect(plan.fill).toBe('rgba(51,102,153,0.8)');
+      expect(plan.fill).toBe('rgba(51,102,153,0.800)');
     });
 
     it('passes typography fields through their helpers', () => {
@@ -488,9 +488,9 @@ describe('nodeRender', () => {
         emptyCtx(),
       );
       if (plan.kind !== 'text-styled') throw new Error('expected text-styled');
-      expect(plan.runs[0].fill).toBe('rgba(128,128,128,1)');     // base
-      expect(plan.runs[1].fill).toBe('rgba(255,0,0,1)');          // override
-      expect(plan.runs[2].fill).toBe('rgba(128,128,128,1)');     // missing → base
+      expect(plan.runs[0].fill).toBe('rgba(128,128,128,1.000)');     // base
+      expect(plan.runs[1].fill).toBe('rgba(255,0,0,1.000)');          // override
+      expect(plan.runs[2].fill).toBe('rgba(128,128,128,1.000)');     // missing → base
     });
 
     it('cumulative offsetX is computed via ctx.measureText on each non-final run', () => {

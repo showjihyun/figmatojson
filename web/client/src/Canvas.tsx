@@ -370,6 +370,17 @@ function NodeShapeImpl({
   };
 
   const onShapeClick = (e: Konva.KonvaEventObject<MouseEvent | TouchEvent>): void => {
+    // INSTANCE master subtree expansions (`_isInstanceChild`) carry the
+    // master's child guids, which live in the master's page tree — NOT in
+    // the page that contains the outer INSTANCE. Selecting one of them
+    // produced "Selected node X not found in current page" because
+    // findById walks `.children` and the master child is reachable only
+    // via the INSTANCE's `_renderChildren`. Skip both cancelBubble and
+    // onSelect here so Konva propagates the click up to the outer INSTANCE
+    // NodeShape, whose handler runs next (its `_isInstanceChild` is false)
+    // and selects the INSTANCE itself. Mirrors the hover-bubble behavior
+    // already in place at L337 (`hoverEnabled = !node._isInstanceChild`).
+    if (node._isInstanceChild) return;
     e.cancelBubble = true;
     // shiftKey only exists on MouseEvent / KeyboardEvent — touch users get
     // single-select fallback, which is fine.

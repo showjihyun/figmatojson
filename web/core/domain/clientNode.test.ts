@@ -16,8 +16,10 @@ import {
   collectStackOverridesFromInstance,
   collectSwapTargetsAtPathFromInstance,
   collectTextOverridesFromInstance,
+  collectTextPropAssignmentsFromInstance,
   collectTextStyleOverridesFromInstance,
   collectVisualStyleOverridesFromInstance,
+  textFromPropRefs,
 } from '../../../src/instanceOverrides.js';
 import type { TreeNode } from '../../../src/types.js';
 
@@ -488,6 +490,95 @@ describe('collectPropAssignmentsFromInstance (spec §3.4 I-C6/I-C7)', () => {
   });
 });
 
+describe('collectTextPropAssignmentsFromInstance (spec §3.4 I-C8)', () => {
+  // Mirror of the bool collector — but for TEXT_DATA binding (value.textValue).
+  it('returns an empty map when componentPropAssignments is undefined or non-array', () => {
+    expect(collectTextPropAssignmentsFromInstance({}).size).toBe(0);
+    expect(collectTextPropAssignmentsFromInstance({ componentPropAssignments: null }).size).toBe(0);
+    expect(collectTextPropAssignmentsFromInstance({ componentPropAssignments: [] }).size).toBe(0);
+  });
+
+  it('reads characters from value.textValue.characters (direct binding)', () => {
+    const m = collectTextPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        { defID: { sessionID: 2473, localID: 20 }, value: { textValue: { characters: '26' } } },
+      ],
+    });
+    expect(m.size).toBe(1);
+    expect(m.get('2473:20')).toBe('26');
+  });
+
+  it('reads characters from varValue.value.textValue.characters (variant default)', () => {
+    const m = collectTextPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        { defID: { sessionID: 7, localID: 36 }, varValue: { value: { textValue: { characters: 'Cancel' } } } },
+      ],
+    });
+    expect(m.get('7:36')).toBe('Cancel');
+  });
+
+  it('prefers value.textValue over varValue when both are present', () => {
+    const m = collectTextPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        {
+          defID: { sessionID: 0, localID: 1 },
+          value: { textValue: { characters: 'direct' } },
+          varValue: { value: { textValue: { characters: 'var-default' } } },
+        },
+      ],
+    });
+    expect(m.get('0:1')).toBe('direct');
+  });
+
+  it('skips entries that bind a boolean (those are the VISIBLE-field cousin)', () => {
+    const m = collectTextPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        { defID: { sessionID: 0, localID: 1 }, value: { boolValue: true } },
+      ],
+    });
+    expect(m.size).toBe(0);
+  });
+});
+
+describe('textFromPropRefs (spec §3.4 I-C8)', () => {
+  it('returns the assignment characters when a TEXT_DATA propRef matches a defID', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 2473, localID: 20 }, componentPropNodeField: 'TEXT_DATA' },
+      ],
+    };
+    const out = textFromPropRefs(data, new Map([['2473:20', '17']]));
+    expect(out).toBe('17');
+  });
+
+  it('returns undefined when propRef field is VISIBLE (not TEXT_DATA)', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 7, localID: 34 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    };
+    expect(textFromPropRefs(data, new Map([['7:34', 'foo']]))).toBeUndefined();
+  });
+
+  it('returns undefined when defID is absent from the assignments map (figma default kept)', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 99, localID: 99 }, componentPropNodeField: 'TEXT_DATA' },
+      ],
+    };
+    expect(textFromPropRefs(data, new Map([['1:1', 'x']]))).toBeUndefined();
+  });
+
+  it('returns undefined for an empty assignments map (short-circuit)', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 0, localID: 1 }, componentPropNodeField: 'TEXT_DATA' },
+      ],
+    };
+    expect(textFromPropRefs(data, new Map())).toBeUndefined();
+  });
+});
+
 describe('toClientChildForRender — component-property visibility binding (spec §3.4 I-P6/I-P7/I-P8)', () => {
   it('hides a master descendant whose componentPropRefs[VISIBLE] resolves to false', () => {
     // The alret-64_376 / input-box-9_42 case: an icon in the button master
@@ -564,6 +655,54 @@ describe('toClientChildForRender — component-property visibility binding (spec
     const child = (out.children as Array<{ visible?: boolean }>)[0];
     // Spec v3 only handles VISIBLE — other fields are punted (§3.4 비고).
     expect(child.visible).not.toBe(false);
+  });
+
+  // I-C8 (round 33): TEXT_DATA prop binding — defID-keyed text override.
+  it('TEXT_DATA prop binding: master TEXT gets _renderTextOverride from textPropAssignments', () => {
+    // The Material 3 Date Picker case: each day INSTANCE carries
+    // componentPropAssignments[].value.textValue.characters = "17" (etc.),
+    // and the master's "Date" TEXT carries componentPropRefs[TEXT_DATA]
+    // with the same defID. Without I-C8, every cell read "00" (master default).
+    const dateText = makeNode('TEXT', 9152, {
+      textData: { characters: '00' },
+      componentPropRefs: [
+        { defID: { sessionID: 2473, localID: 20 }, componentPropNodeField: 'TEXT_DATA' },
+      ],
+    });
+    const wrapper = makeNode('FRAME', 9151, {}, [dateText]);
+
+    const textPropAssignments = new Map<string, string>([['2473:20', '17']]);
+    const out = toClientChildForRender(
+      wrapper, [], new Map(), new Map(), new Map(), new Map(), 0, [], new Map(), new Map(), new Map(), new Map(), new Map(), new Map(), new Map(), textPropAssignments,
+    );
+    const child = (out.children as Array<{ _renderTextOverride?: string }>)[0];
+    expect(child._renderTextOverride).toBe('17');
+    // Master TEXT node's own data is unchanged — sibling day cells must
+    // be able to expand the same master with different characters.
+    expect((dateText.data as { textData?: { characters?: string } }).textData?.characters).toBe('00');
+  });
+
+  it('TEXT_DATA prop binding: path-keyed textOverrides win over prop-binding', () => {
+    // Designer hand-set a literal via symbolOverrides → that wins over the
+    // master-defined property hookup. Both can resolve; path-key is more
+    // specific.
+    const dateText = makeNode('TEXT', 9152, {
+      textData: { characters: '00' },
+      componentPropRefs: [
+        { defID: { sessionID: 2473, localID: 20 }, componentPropNodeField: 'TEXT_DATA' },
+      ],
+    });
+    const wrapper = makeNode('FRAME', 9151, {}, [dateText]);
+
+    const textPropAssignments = new Map<string, string>([['2473:20', 'from-prop']]);
+    // Round-25 FRAME-skip: the wrapper FRAME isn't included in the path,
+    // so the TEXT's path-key is "0:9152".
+    const textOverrides = new Map<string, string>([['0:9152', 'from-path-key']]);
+    const out = toClientChildForRender(
+      wrapper, [], new Map(), textOverrides, new Map(), new Map(), 0, [], new Map(), new Map(), new Map(), new Map(), new Map(), new Map(), new Map(), textPropAssignments,
+    );
+    const child = (out.children as Array<{ _renderTextOverride?: string }>)[0];
+    expect(child._renderTextOverride).toBe('from-path-key');
   });
 
   it('explicit symbolOverrides[].visible wins over prop-binding default', () => {

@@ -95,7 +95,16 @@ Each row (`LayerRow`):
 ### 4.3 Expand / Collapse
 - I-F4 Expand state is component-local `Set<guidStr>`. Cleared on page switch (I-F2).
 - I-F5 chevron click is separated from row click — chevron only toggles expand; the row body click triggers selection.
-- I-F6 Zero-children nodes have no chevron — even `children.length === 0 && _renderChildren?.length` does not show one (instance master descendants are not exposed in the tree — same as Figma).
+- I-F6 INSTANCE master expansions are exposed in the tree. When a row has `children.length === 0` but `_renderChildren?.length > 0` (an INSTANCE whose master subtree was attached during decode), the renderer walks `_renderChildren` instead so the user can see what's inside the component — same as Figma's left-panel behavior, which shows instance children expandable.
+- I-F6.1 Rows produced from an instance master expansion (every node carrying `_isInstanceChild: true`) are rendered with muted/italic styling to mark them as informational (the master's identity, not the instance's own subtree). Their `expanded` key is composite — `<outerInstanceGuid>/<rowGuid>` — so two instances of the same master keep independent expand state.
+- I-F6.2 Click on an `_isInstanceChild` row → `onSelect(outerInstanceGuid, ...)`, not the row's own guid. The master subtree's guids live in a different page tree (the component's source page), so direct selection would produce "Selected node X not found in current page" in the Inspector. Bubble-to-outer matches the Canvas click rule (Canvas.tsx `onShapeClick` already early-returns on `_isInstanceChild`).
+- I-F6.3 Chevron click on `_isInstanceChild` rows works normally — only the row-body click bubbles. Users can drill into the visual structure without changing selection.
+- I-F14 **Double-click drill-in** (Figma-like). Double-click on a row body:
+  - Expands the row if it has any children (idempotent — already-expanded stays expanded).
+  - If the row has *direct* children (`node.children.length > 0`), selection moves to the first direct child via `onSelect(firstChildGuid, 'replace')`. This is the "go one level deeper" behavior.
+  - If the row only has master expansion children (`_renderChildren`, no `.children`), selection stays on the outer node — master expansion descendants can't be selected directly (I-F6.2), so drilling has nowhere to land.
+  - Leaf rows (no children at all) are a no-op for drill-in; the preceding single-click already selected them.
+  - Double-click does NOT fire on the chevron button (the button's own `onClick` stops propagation).
 - I-F7 All nodes are collapsed by default. Only depth 0 (direct children of the page) are visible initially.
 
 ### 4.4 Selection sync

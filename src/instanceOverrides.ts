@@ -325,6 +325,84 @@ export function collectPropAssignmentsFromInstance(
 }
 
 /**
+ * Pull TEXT-data component-property assignments off an INSTANCE node's
+ * `data`. Mirror of `collectPropAssignmentsFromInstance` but for the
+ * `textValue` shape — each entry is a `defID → characters` mapping that
+ * the expansion walk uses to override master-subtree TEXT descendants
+ * whose `componentPropRefs[].componentPropNodeField === 'TEXT_DATA'`
+ * carries a matching defID.
+ *
+ * Why this exists — Material 3 (and Figma's general "component property"
+ * mechanism) binds the user-visible text of a TEXT layer to a string
+ * property on the master. Each INSTANCE then carries the actual string
+ * in `componentPropAssignments[].value.textValue.characters`. Without
+ * this collector + lookup, the master's default "00" / "Label" leaks
+ * through and every day cell in a Date Picker reads "00", every button
+ * reads "Label", etc.
+ *
+ * Spec: docs/specs/web-instance-render-overrides.spec.md §3.4 I-C8.
+ */
+export function collectTextPropAssignmentsFromInstance(
+  instData: Record<string, unknown> | undefined,
+): Map<string, string> {
+  const m = new Map<string, string>();
+  const cpa = instData?.componentPropAssignments as
+    | Array<{
+        defID?: { sessionID?: number; localID?: number };
+        value?: { textValue?: { characters?: string } };
+        varValue?: { value?: { textValue?: { characters?: string } } };
+      }>
+    | undefined;
+  if (!Array.isArray(cpa)) return m;
+  for (const a of cpa) {
+    const d = a.defID;
+    if (!d || typeof d.sessionID !== 'number' || typeof d.localID !== 'number') continue;
+    // Direct value first (explicit on this INSTANCE), fall back to varValue
+    // (variant default propagated through the property chain). Either is a
+    // valid source — match the bool collector's resolution order.
+    const directS = a.value?.textValue?.characters;
+    const varS = a.varValue?.value?.textValue?.characters;
+    const s = typeof directS === 'string' ? directS : (typeof varS === 'string' ? varS : undefined);
+    if (typeof s !== 'string') continue;
+    m.set(`${d.sessionID}:${d.localID}`, s);
+  }
+  return m;
+}
+
+/**
+ * Resolve a TEXT node's `componentPropRefs` against a textPropAssignments
+ * map. Returns the assigned characters when the node has a propRef whose
+ * `componentPropNodeField === 'TEXT_DATA'` and whose defID resolves to an
+ * assignment, otherwise `undefined`.
+ *
+ * Mirror of `isHiddenByPropBinding` for the TEXT_DATA field. Called from
+ * `toClientChildForRender` after the path-keyed text-override lookup; the
+ * path-keyed override wins when both are present (path-key is the more
+ * specific intent — the designer hand-set a literal string).
+ */
+export function textFromPropRefs(
+  data: Record<string, unknown>,
+  textPropAssignments: Map<string, string>,
+): string | undefined {
+  if (textPropAssignments.size === 0) return undefined;
+  const refs = data?.componentPropRefs as
+    | Array<{
+        defID?: { sessionID?: number; localID?: number };
+        componentPropNodeField?: string;
+      }>
+    | undefined;
+  if (!Array.isArray(refs)) return undefined;
+  for (const r of refs) {
+    if (r?.componentPropNodeField !== 'TEXT_DATA') continue;
+    const d = r.defID;
+    if (!d || typeof d.sessionID !== 'number' || typeof d.localID !== 'number') continue;
+    const v = textPropAssignments.get(`${d.sessionID}:${d.localID}`);
+    if (typeof v === 'string') return v;
+  }
+  return undefined;
+}
+
+/**
  * Pull path-keyed variant-swap targets out of an outer INSTANCE's
  * `symbolOverrides[]`. Each entry that carries `overriddenSymbolID`
  * contributes a `pathKey → swapTargetGuidStr` mapping. Used by the
