@@ -62,3 +62,8 @@ docs/audit-round11/**/_tiles/
 # Round 17 raw-coverage / properties-coverage outputs (measurement only,
 # regenerable via audit-raw-coverage.mjs + audit-properties-coverage.mjs).
 docs/audit-raw-coverage/
+
+# Personal sample fixtures (not for repo — bvp.fig is the public sample).
+docs/메타리치 화면 UI Design.fig
+docs/메타리치 화면 UI Design.pen
+docs/스크린샷*.png
