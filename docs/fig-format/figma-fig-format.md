@@ -1,49 +1,47 @@
-# Figma `.fig` 파일 구조 (Reverse-Engineered)
+# The Figma `.fig` file structure (reverse-engineered)
 
-> Figma 가 공식 문서화하지 않은 internal binary format 의 reverse-engineered 그림.
-> Evan Wallace (전 Figma CTO) 가 만든 [kiwi](https://github.com/evanw/kiwi) binary
-> schema 라이브러리를 컨테이너로 사용. 이 문서는 .fig 파일을 raw bytes 부터 시작해
-> Figma 의 화면 요소까지 어떻게 도달하는지 *세 단계의 디코딩* 으로 정리한다.
+> A reverse-engineered picture of Figma's internal binary format, which they have not officially documented.
+> It uses the [kiwi](https://github.com/evanw/kiwi) binary schema library — built by Evan Wallace (former Figma CTO) — as its container. This document walks through how a .fig file is decoded *in three stages*, from raw bytes all the way to Figma's on-screen elements.
 
 ---
 
-## 0. 한눈에 보기
+## 0. At a glance
 
-`.fig` 파일은 세 layer 의 디코딩을 거쳐야 의미가 나온다:
+A `.fig` file requires three layers of decoding before it carries meaning:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Layer 1: 파일 컨테이너                                        │
+│  Layer 1: File container                                     │
 │  [magic 8B][version 4B][length-prefixed chunks ...]          │
 └──────────────────────────────────────────────────────────────┘
               │
               ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  Layer 2: Schema chunk 해석                                   │
-│  압축 해제 → kiwi binary schema → 558개 type 정의              │
+│  Layer 2: Schema chunk interpretation                        │
+│  decompress → kiwi binary schema → 558 type definitions      │
 └──────────────────────────────────────────────────────────────┘
               │
               ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  Layer 3: Data chunk 해석                                     │
-│  압축 해제 → schema 로 디코드 → Message + 노드 트리             │
+│  Layer 3: Data chunk interpretation                          │
+│  decompress → decode with schema → Message + node tree       │
 └──────────────────────────────────────────────────────────────┘
               │
               ▼
        Figma UI (Layers / Canvas / Inspector)
 ```
 
-**핵심 원칙 3가지:**
+**Three core principles:**
 
-1. **Self-describing**: schema 자체가 파일에 동봉됨 → forward/backward compat
-2. **Linearly serializable**: 모든 디코드가 single forward scan, no look-ahead
-3. **Tag-based wire format**: optional field 와 새 field 추가가 자유로움
+1. **Self-describing**: the schema itself is bundled in the file → forward/backward compat
+2. **Linearly serializable**: every decode is a single forward scan, no look-ahead
+3. **Tag-based wire format**: optional fields and new field additions are free
 
 ---
 
-## 1. Layer 1 — 파일 컨테이너
+## 1. Layer 1 — File container
 
-### 전체 레이아웃
+### Overall layout
 
 ```
 offset  size    field
@@ -54,12 +52,12 @@ offset  size    field
 0x10    N0      chunk[0] bytes
 0x10+N0 4       chunk[1] length
 ...     N1      chunk[1] bytes
-        4       chunk[2] length      (있을 수도 없을 수도)
+        4       chunk[2] length      (may or may not be present)
         N2      chunk[2] bytes
-        ...                          (EOF 까지 반복)
+        ...                          (repeats until EOF)
 ```
 
-### 디코더 의사코드
+### Decoder pseudocode
 
 ```javascript
 const magic = readBytes(8);                  // "fig-kiwi"
@@ -72,18 +70,18 @@ while (offset < bytes.length) {
 if (chunks.length < 2) throw 'invalid';
 ```
 
-### 약속된 chunk 의미
+### Conventional chunk meanings
 
-| index | 내용 | 필수 여부 |
+| index | Content | Required? |
 |---|---|---|
-| `chunk[0]` | Schema (kiwi binary) | 필수 |
-| `chunk[1]` | Data (Message) | 필수 |
-| `chunk[2]` | Preview thumbnail (PNG bytes) | 옵션 |
-| `chunk[3+]` | 미래 확장용 | 현재 알려진 사용 없음 |
+| `chunk[0]` | Schema (kiwi binary) | required |
+| `chunk[1]` | Data (Message) | required |
+| `chunk[2]` | Preview thumbnail (PNG bytes) | optional |
+| `chunk[3+]` | reserved for future expansion | no known usage at present |
 
-### 압축
+### Compression
 
-각 chunk 는 **독립적으로 압축**되어 있다. 어느 알고리즘인지 표시하는 헤더는 없고, sniff 방식:
+Each chunk is **compressed independently**. There is no header indicating the algorithm; sniffing is used:
 
 ```javascript
 function decompress(chunk) {
@@ -94,11 +92,11 @@ function decompress(chunk) {
 
 ---
 
-## 2. Layer 2 — Schema chunk 해석
+## 2. Layer 2 — Schema chunk interpretation
 
-압축을 풀면 **또 binary**. 이게 kiwi 의 self-describing schema format (`.bkiwi` 와 동일).
+After decompression you still get **binary**. This is kiwi's self-describing schema format (same as `.bkiwi`).
 
-### 2.1 전체 구조
+### 2.1 Overall structure
 
 ```
 [definitionCount : varuint]
@@ -113,43 +111,43 @@ function decompress(chunk) {
         └── [value     : varuint]             │
 ```
 
-### 2.2 각 필드의 의미
+### 2.2 Field meanings
 
-| 필드 | 의미 |
+| Field | Meaning |
 |---|---|
-| `definitionCount` | 이 schema 에 들어있는 type 의 갯수. Figma .fig 는 보통 ~558. |
-| `name` | type 이름. 예: `"GUID"`, `"NodeChange"`, `"Message"` |
-| `kind` | `ENUM` (0), `STRUCT` (1), `MESSAGE` (2) 중 하나 |
-| `field.type` | 음수 → built-in type index, 양수 → 다른 definition 의 index |
-| `field.isArray` | 이 field 가 array `T[]` 인지 |
-| `field.value` | **MESSAGE 의 wire tag**, 또는 ENUM 의 binary value |
+| `definitionCount` | Number of types in this schema. Figma .fig typically has ~558. |
+| `name` | Type name. E.g. `"GUID"`, `"NodeChange"`, `"Message"` |
+| `kind` | One of `ENUM` (0), `STRUCT` (1), `MESSAGE` (2) |
+| `field.type` | Negative → built-in type index, positive → index into other definitions |
+| `field.isArray` | Whether this field is an array `T[]` |
+| `field.value` | **MESSAGE wire tag**, or the binary value for an ENUM |
 
 ### 2.3 Built-in type table
 
-`field.type` 이 음수일 때 가리키는 8개 기본 타입:
+The 8 base types that `field.type` references when negative:
 
-| index | 타입 | 인코딩 |
+| index | Type | Encoding |
 |---|---|---|
 | -1 | bool | 1 byte |
 | -2 | byte | 1 byte |
 | -3 | int | varint (zigzag) |
 | -4 | uint | varuint |
-| -5 | float | 4 bytes (LE, 일부 zigzag 변형) |
+| -5 | float | 4 bytes (LE, some zigzag variants) |
 | -6 | string | null-terminated UTF-8 |
 | -7 | int64 | varint64 |
 | -8 | uint64 | varuint64 |
 
-### 2.4 세 종류 type 의 wire 차이 (★중요)
+### 2.4 Wire differences across the three kinds (★ important)
 
-| 종류 | wire 패턴 | 진화 가능성 |
+| Kind | Wire pattern | Evolvability |
 |---|---|---|
-| **ENUM** | `[varuint]` | 새 value 추가 가능 |
-| **STRUCT** | `[val][val][val]…` (no tag) | **새 field 추가 불가** (이미 사용 중인 struct) |
-| **MESSAGE** | `[tag][val][tag][val]…[0]` | 새 field 자유 추가, optional |
+| **ENUM** | `[varuint]` | new values can be added |
+| **STRUCT** | `[val][val][val]…` (no tag) | **no new fields** (struct is already in use) |
+| **MESSAGE** | `[tag][val][tag][val]…[0]` | new fields can be added freely, optional |
 
-이 차이가 Layer 3 의 디코더 분기를 결정한다.
+This difference determines the decoder's branching at Layer 3.
 
-### 2.5 디코드 결과 (in-memory schema 객체)
+### 2.5 Decoded result (in-memory schema object)
 
 ```javascript
 {
@@ -175,7 +173,7 @@ function decompress(chunk) {
       ]
     },
     {
-      name: "Message",     // ← root type, 약속된 이름
+      name: "Message",     // ← root type, conventional name
       kind: "MESSAGE",
       fields: [
         { name: "type",         type: <MsgType idx>,    isArray: false, value: 1 },
@@ -184,14 +182,14 @@ function decompress(chunk) {
         // ...
       ]
     },
-    // ... ~555개 더
+    // ... ~555 more
   ]
 }
 ```
 
-### 2.6 Schema chunk hex 샘플 (가상)
+### 2.6 Schema chunk hex sample (fictional)
 
-`GUID` STRUCT 하나만 정의된 가장 단순한 schema 의 byte stream:
+The byte stream of the simplest possible schema, with only a single `GUID` STRUCT defined:
 
 ```
 01                          ← definitionCount = 1
@@ -208,34 +206,33 @@ function decompress(chunk) {
 00                          ← value = 0
 ```
 
-총 26 bytes. 실제 Figma .fig 의 schema chunk 는 이런 definition 이 ~558개 줄줄이 이어진 binary.
+26 bytes in total. A real Figma .fig schema chunk is a binary stream with ~558 such definitions concatenated.
 
 ---
 
-## 3. Layer 3 — Data chunk 해석
+## 3. Layer 3 — Data chunk interpretation
 
-압축을 풀면 **단일 root Message 객체** 하나가 통째로 들어있다. Schema 와 달리
-도입부 헤더가 없다.
+After decompression you get **a single root Message object** as a whole. Unlike the schema, there is no introductory header.
 
-### 3.1 시작 지점
+### 3.1 Entry point
 
-decoder 는 schema 에서 `name == "Message"` 인 definition 을 찾아 그 type 으로 디코드 시작.
+The decoder finds the definition named `Message` in the schema and starts decoding using that type.
 
 ```javascript
 const rootDef = schema.definitions.find(d => d.name === "Message");
 const message = decodeMessage(dataBytes, rootDef, schema);
 ```
 
-이 약속만이 schema 외부에서 합의된 유일한 convention.
+This convention is the only thing agreed upon outside the schema itself.
 
-### 3.2 MESSAGE 디코딩 알고리즘
+### 3.2 MESSAGE decoding algorithm
 
 ```javascript
 function decodeMessage(bb, def, schema) {
   const result = {};
   while (true) {
     const tag = bb.readVarUint();
-    if (tag === 0) break;                           // ★ 0 = sentinel, message 끝
+    if (tag === 0) break;                           // ★ 0 = sentinel, end of message
 
     const field = def.fields.find(f => f.value === tag);
     if (!field) {
@@ -251,70 +248,66 @@ function decodeMessage(bb, def, schema) {
 }
 ```
 
-### 3.3 STRUCT vs MESSAGE 디코딩 분기
+### 3.3 STRUCT vs MESSAGE decoding branches
 
-| 만난 type | 디코딩 방식 |
+| Encountered type | Decoding behavior |
 |---|---|
-| STRUCT | `def.fields` 를 순서대로 읽음 (tag 없음, 종료 sentinel 없음, 모든 field 강제) |
-| MESSAGE | tag-based loop, 0 sentinel 까지 |
-| ENUM | `varuint` 한 개 읽고, schema 의 enum value 와 매칭해 이름 lookup |
-| array `T[]` | `[count : varuint]` 읽고 count 만큼 element 디코드 |
+| STRUCT | Read `def.fields` in order (no tags, no terminator sentinel, all fields required) |
+| MESSAGE | tag-based loop, until the 0 sentinel |
+| ENUM | Read one `varuint`, look up the name by matching it to a schema enum value |
+| array `T[]` | Read `[count : varuint]` and decode `count` elements |
 
-### 3.4 Field tag 매칭 (★핵심)
+### 3.4 Field tag matching (★ core)
 
-데이터의 byte 가 어떤 field 인지 결정하는 메커니즘:
+The mechanism that decides which field a data byte belongs to:
 
 ```
 data byte stream:        03 ...
                          ↑
-                         │ 이 byte 가 tag (varuint)
+                         │ this byte is the tag (varuint)
                          │
 Schema definition:       Message {
                            ...
-                           field { name: "nodeChanges", value: 3 }  ← 매칭!
+                           field { name: "nodeChanges", value: 3 }  ← match!
                            ...
                          }
                          │
-결과:                    result["nodeChanges"] = decodeArray(...)
+Result:                  result["nodeChanges"] = decodeArray(...)
 ```
 
-**값(value) 이 같으면 이름이 바뀌어도 호환성 유지된다** — 이게
-Figma 가 schema 를 진화시키면서도 옛 .fig 파일을 계속 읽을 수 있는 비결.
-audit-oracle spec 에서 본 `SPACE_EVENLY ↔ SPACE_BETWEEN` 도 같은 메커니즘.
+**Compatibility is preserved even if the name changes, as long as the value is the same** — this is the secret to Figma being able to evolve the schema while continuing to read old .fig files.
+The `SPACE_EVENLY ↔ SPACE_BETWEEN` situation we saw in audit-oracle spec is the same mechanism.
 
-### 3.5 노드 ID 의 정체
+### 3.5 What node IDs really are
 
-각 노드는 `GUID = { sessionID: uint, localID: uint }` 로 식별:
+Each node is identified by `GUID = { sessionID: uint, localID: uint }`:
 
-- `sessionID`: 그 노드를 만든 클라이언트의 세션 번호
-- `localID`: 그 세션 안에서 일련번호
+- `sessionID`: the session number of the client that created the node
+- `localID`: a sequence number within that session
 
-문자열로 표현할 때 보통 `<sessionID>:<localID>` 형식. 부모-자식 관계는
-`parentIndex: { guid, position: fractional }` 로 표현되어, **CRDT 정렬용 fractional
-indexing** 으로 동시 편집 시 충돌 없이 형제 순서를 유지한다.
+When represented as a string, it is usually in the `<sessionID>:<localID>` form. The parent-child relationship is expressed through `parentIndex: { guid, position: fractional }`, using **fractional indexing for CRDT ordering** so sibling order is preserved without conflict during concurrent editing.
 
-### 3.6 Data chunk hex 샘플 (가상)
+### 3.6 Data chunk hex sample (fictional)
 
-`Message { type: NODE_CHANGES, sessionID: 42 }` 만 들어있는 최소 data:
+The minimal data containing only `Message { type: NODE_CHANGES, sessionID: 42 }`:
 
 ```
 01                          ← tag = 1 ("type" field)
 00                          ← value = 0 (enum value for NODE_CHANGES)
 02                          ← tag = 2 ("sessionID" field)
 2A                          ← value = 42 (varuint)
-00                          ← tag = 0 → message 끝
+00                          ← tag = 0 → end of message
 ```
 
-총 5 bytes. 실제 .fig 는 여기 `nodeChanges: NodeChange[]` 가 array 로 붙어
-수만 개의 노드가 줄줄이 들어간다.
+5 bytes in total. In an actual .fig, `nodeChanges: NodeChange[]` is attached here as an array, into which tens of thousands of nodes line up.
 
 ---
 
-## 4. 디코드 결과의 형태
+## 4. Shape of the decoded result
 
-Layer 3 까지 끝나면 in-memory JSON-like 객체가 나온다.
+After Layer 3 you get an in-memory JSON-like object.
 
-### 4.1 최상위 Message
+### 4.1 Top-level Message
 
 ```javascript
 {
@@ -331,7 +324,7 @@ Layer 3 까지 끝나면 in-memory JSON-like 객체가 나온다.
 }
 ```
 
-### 4.2 노드 한 개 예시 (RECTANGLE)
+### 4.2 Example of a single node (RECTANGLE)
 
 ```javascript
 {
@@ -344,7 +337,7 @@ Layer 3 까지 끝나면 in-memory JSON-like 객체가 나온다.
   name:    "Button BG",
   visible: true,
 
-  // 시각 속성
+  // visual properties
   transform: {
     m00: 1, m01: 0, m02: 100,    // 2x3 affine matrix
     m10: 0, m11: 1, m12: 200
@@ -353,7 +346,7 @@ Layer 3 까지 끝나면 in-memory JSON-like 객체가 나온다.
   cornerRadius: 8,
   opacity: 1,
 
-  // 채움
+  // fill
   fillPaints: [
     {
       type: "SOLID",
@@ -368,23 +361,23 @@ Layer 3 까지 끝나면 in-memory JSON-like 객체가 나온다.
 }
 ```
 
-### 4.3 INSTANCE 노드 (component instance)
+### 4.3 INSTANCE node (component instance)
 
 ```javascript
 {
   guid: { sessionID: 0, localID: 87 },
   type: "INSTANCE",
   name: "Button/Primary",
-  componentRef: { sessionID: 0, localID: 23 },   // master 의 GUID
-  overrideKey: 12345,                             // override 추적
-  // master 에서 derive 된 effective children
+  componentRef: { sessionID: 0, localID: 23 },   // master GUID
+  overrideKey: 12345,                             // override tracking
+  // effective children derived from master
   _renderChildren: [ /* ... */ ],
-  // override 된 속성만 carry
+  // carries only the overridden properties
   fillPaints: [ /* override */ ],
 }
 ```
 
-### 4.4 TEXT 노드
+### 4.4 TEXT node
 
 ```javascript
 {
@@ -400,76 +393,71 @@ Layer 3 까지 끝나면 in-memory JSON-like 객체가 나온다.
 }
 ```
 
-### 4.5 VECTOR 노드 (별도 binary blob 영역)
+### 4.5 VECTOR node (separate binary blob region)
 
 ```javascript
 {
   guid: { sessionID: 0, localID: 99 },
   type: "VECTOR",
-  vectorNetworkBlob: <Uint8Array>,   // ← schema 의 시야 너머, 또 한 층 binary
-  commandsBlob: <Uint8Array>,         // ← SVG path 명령의 packed binary
+  vectorNetworkBlob: <Uint8Array>,   // ← beyond the schema's view, yet another binary layer
+  commandsBlob: <Uint8Array>,         // ← packed binary of SVG path commands
   fillPaints: [ /* ... */ ],
 }
 ```
 
-`vectorNetworkBlob` 과 `commandsBlob` 은 schema 가 byte array 로만 알고 있고,
-*그 안의 의미* 는 별도의 reverse-engineering 영역.
+The schema only knows `vectorNetworkBlob` and `commandsBlob` as byte arrays;
+*the semantics inside* are a separate reverse-engineering target.
 
 ---
 
-## 5. Figma UI 와의 매칭
+## 5. Mapping to the Figma UI
 
-| Figma 화면 영역 | data chunk 안의 source |
+| Figma UI region | Source inside the data chunk |
 |---|---|
-| **상단 Pages 탭** | `CANVAS` type 노드들 (각 페이지 = 한 sub-root) |
-| **왼쪽 Layers panel** | 모든 노드의 `guid`, `name`, `type`, `visible`, parent-child 관계 |
-| **가운데 Canvas** | 위 속성들로부터 *런타임에 계산되는* 렌더 결과 (픽셀은 저장 안 됨) |
-| **오른쪽 Inspector** | 선택된 노드의 `transform`, `size`, `fillPaints`, `strokePaints`, `effects`, `cornerRadius`, `opacity`, layoutMode + stack* 필드 등 |
-| **Components panel** | `SYMBOL` type 노드 (master) + `INSTANCE` 의 `componentRef` |
-| **Variables panel** | `VARIABLE`, `VARIABLE_SET` type 노드 |
-| **Prototype 탭** | `reactions`, `prototypeStartNode`, transition 속성 |
+| **Top Pages tab** | `CANVAS`-type nodes (each page = one sub-root) |
+| **Left Layers panel** | Every node's `guid`, `name`, `type`, `visible`, parent-child relation |
+| **Center Canvas** | The render result *computed at runtime* from the above properties (pixels are not stored) |
+| **Right Inspector** | The selected node's `transform`, `size`, `fillPaints`, `strokePaints`, `effects`, `cornerRadius`, `opacity`, layoutMode + stack* fields, etc. |
+| **Components panel** | `SYMBOL`-type nodes (master) + INSTANCE's `componentRef` |
+| **Variables panel** | `VARIABLE`, `VARIABLE_SET`-type nodes |
+| **Prototype tab** | `reactions`, `prototypeStartNode`, transition properties |
 | **Auto-layout controls** | `layoutMode`, `stackSpacing`, `stackPadding*`, `stackAlign*` |
 
-### Inspector ↔ schema field 의 1:1 관계
+### 1:1 relation between Inspector and schema field
 
-오른쪽 Inspector 의 한 row 는 schema field 의 한 entry 와 거의 1:1. 사용자가
-"Corner radius: 8" 을 보고 있을 때, 실제로는 selected 노드의 `cornerRadius: 8`
-이라는 schema field 값이 그대로 표시되는 것.
+A single row in the right Inspector is nearly 1:1 with a single entry of a schema field. When the user is looking at "Corner radius: 8", what is actually being displayed is the schema field value `cornerRadius: 8` of the selected node, as-is.
 
-### 캔버스의 진정한 의미
+### The true meaning of the canvas
 
-가장 헷갈리는 부분: **캔버스의 픽셀은 저장되지 않는다.** 저장되는 건 그리기
-명령일 뿐이고, 클라이언트 renderer 가 매번 새로 그려낸다. 그래서:
+The most confusing part: **canvas pixels are not stored.** What is stored is only the drawing commands, and the client renderer redraws them every time. That is why:
 
-> `.fig` 는 "이미지 파일" 이 아니라 **"그리기 프로그램의 source code"** 에 가깝다.
+> `.fig` is not an "image file" — it is closer to the **"source code of a drawing program"**.
 
-같은 .fig 라도 zoom, pan, dark mode, 다른 폰트 fallback 에 따라 화면이 달라지는
-이유.
+This is why the same .fig can look different depending on zoom, pan, dark mode, or which font fallback the host has.
 
 ---
 
-## 6. data chunk 에 *없는* 것들
+## 6. What is *not* in the data chunk
 
-| 항목 | 어디 있는가 |
+| Item | Where it lives |
 |---|---|
-| 이미지 픽셀 (PNG/JPG bytes) | 별도 blob store / `.make` ZIP 의 `images/` 폴더 / Figma 서버 |
-| Font glyph (실제 폰트 파일) | OS / Google Fonts / Figma font server. 이름만 저장됨 |
-| Vector path 의 풀린 형태 | `commandsBlob` 안에 또 한 층의 packed binary 로 들어있음 |
-| 협업 history, 코멘트 | Figma server-side, Postgres + DynamoDB |
-| Hover/selection state | 런타임 전용, 저장 안 됨 |
-| `absoluteRenderBounds` 등 derived 값 | 런타임 계산, plugin API 가 노출만 함 |
-| Preview thumbnail | 별도 chunk (chunk[2]) |
+| Image pixels (PNG/JPG bytes) | Separate blob store / `images/` folder of the `.make` ZIP / Figma servers |
+| Font glyphs (actual font files) | OS / Google Fonts / Figma font server. Only the name is stored |
+| Resolved vector path | Inside `commandsBlob`, in yet another layer of packed binary |
+| Collaboration history, comments | Figma server-side, Postgres + DynamoDB |
+| Hover / selection state | Runtime-only, not stored |
+| Derived values like `absoluteRenderBounds` | Computed at runtime, only exposed by the plugin API |
+| Preview thumbnail | Separate chunk (chunk[2]) |
 
-이 분리가 audit-oracle spec §7.1 의 "비대상" 항목과 정확히 겹친다 — *.fig 파일
-자체의 scope 밖이거나, schema 의 시야를 벗어난 binary blob 들*.
+This separation overlaps exactly with the "out of scope" items in audit-oracle spec §7.1 — *they are either outside the .fig file's scope or inside binary blobs beyond the schema's view*.
 
 ---
 
-## 7. 전체 디코드 파이프라인 (총정리)
+## 7. The complete decode pipeline (recap)
 
 ```javascript
 async function decodeFigFile(bytes) {
-  // ─── Layer 1: 컨테이너 파싱 ───
+  // ─── Layer 1: container parsing ───
   const magic = readBytes(bytes, 0, 8);          // "fig-kiwi"
   if (toString(magic) !== "fig-kiwi") throw "not a .fig";
   const version = readUint32LE(bytes, 8);
@@ -481,26 +469,26 @@ async function decodeFigFile(bytes) {
     chunks.push(bytes.slice(offset, offset + len)); offset += len;
   }
 
-  // ─── Layer 2: schema 디코드 ───
+  // ─── Layer 2: schema decode ───
   const rawSchema = decompress(chunks[0]);       // pako or zstd
   const schema = decodeBinarySchema(rawSchema);  // ~558 definitions
 
-  // ─── Layer 3: data 디코드 ───
+  // ─── Layer 3: data decode ───
   const rawData = decompress(chunks[1]);
   const rootDef = schema.definitions.find(d => d.name === "Message");
   const message = decodeMessage(rawData, rootDef, schema);
 
   // ─── Optional: preview ───
-  const preview = chunks[2];                     // PNG bytes (있으면)
+  const preview = chunks[2];                     // PNG bytes (when present)
 
   return { version, schema, message, preview };
 }
 ```
 
-### 결과로부터 노드 트리 만들기
+### Building the node tree from the result
 
 ```javascript
-// nodeChanges 는 평탄한 array → tree 로 재구성
+// nodeChanges is a flat array → reconstruct it into a tree
 const byId = new Map();
 for (const node of message.nodeChanges) {
   byId.set(`${node.guid.sessionID}:${node.guid.localID}`, node);
@@ -514,7 +502,7 @@ for (const node of message.nodeChanges) {
   if (parent) (parent.children ??= []).push(node);
 }
 
-// fractional index 로 형제 정렬
+// sort siblings by fractional index
 for (const node of byId.values()) {
   node.children?.sort((a, b) =>
     a.parentIndex.position < b.parentIndex.position ? -1 : 1
@@ -522,34 +510,34 @@ for (const node of byId.values()) {
 }
 ```
 
-이제 이 트리가 곧 Figma 왼쪽 Layers panel 에 보이는 그것이다.
+This tree is exactly what you see in the left Layers panel of Figma.
 
 ---
 
-## 부록 A: 주요 노드 type 일람 (kiwi 의 `type` enum)
+## Appendix A: Major node types (kiwi's `type` enum)
 
-| kiwi name | Plugin/REST name | 비고 |
+| kiwi name | Plugin/REST name | Notes |
 |---|---|---|
-| `DOCUMENT` | `DOCUMENT` | 최상위 root |
-| `CANVAS` | `PAGE` | 각 페이지 |
-| `FRAME` | `FRAME` 또는 `GROUP` | `resizeToFit=true` + 빈 fillPaints 면 GROUP |
+| `DOCUMENT` | `DOCUMENT` | top-level root |
+| `CANVAS` | `PAGE` | each page |
+| `FRAME` | `FRAME` or `GROUP` | becomes GROUP when `resizeToFit=true` + empty fillPaints |
 | `RECTANGLE` | `RECTANGLE` | |
-| `ROUNDED_RECTANGLE` | `RECTANGLE` | corner-radius 가 있는 변형 |
+| `ROUNDED_RECTANGLE` | `RECTANGLE` | variant with corner-radius |
 | `ELLIPSE` | `ELLIPSE` | |
 | `LINE` | `LINE` | |
-| `VECTOR` | `VECTOR` | path 데이터는 `commandsBlob` 에 |
-| `STAR`, `REGULAR_POLYGON` | 동일 | |
-| `TEXT` | `TEXT` | `textData` 에 characters + style |
+| `VECTOR` | `VECTOR` | path data lives in `commandsBlob` |
+| `STAR`, `REGULAR_POLYGON` | same | |
+| `TEXT` | `TEXT` | characters + style in `textData` |
 | `SYMBOL` | `COMPONENT` | component master |
 | `INSTANCE` | `INSTANCE` | component instance |
 | `BOOLEAN_OPERATION` | `BOOLEAN_OPERATION` | union/subtract/intersect/exclude |
-| `SLICE` | `SLICE` | export 영역 |
-| `STICKY` | `STICKY` | FigJam 포스트잇 |
-| `VARIABLE` / `VARIABLE_SET` | (트리 외부 노출) | plugin/REST 는 children 으로 안 보여줌 |
+| `SLICE` | `SLICE` | export region |
+| `STICKY` | `STICKY` | FigJam sticky note |
+| `VARIABLE` / `VARIABLE_SET` | (exposed outside the tree) | plugin/REST does not show them as children |
 
 ---
 
-## 부록 B: 자주 등장하는 STRUCT
+## Appendix B: Frequently used STRUCTs
 
 ```
 STRUCT GUID         { uint sessionID; uint localID; }
@@ -560,21 +548,16 @@ STRUCT Matrix       { float m00; float m01; float m02;
 STRUCT ParentIndex  { GUID guid; string position; }   // position = fractional
 ```
 
-이 STRUCT 들은 **모든 field 가 항상 등장하고 정의 순서대로** 인코딩되므로
-wire 에서 가장 컴팩트한 영역이 된다. 반대로 한번 사용된 STRUCT 는
-field 추가가 불가능 — schema 진화의 제약 지점.
+Because **every field is always present and encoded in definition order**, these STRUCTs are the most compact region on the wire. The downside is that once a STRUCT has been used, no new fields can be added — a constraint point in schema evolution.
 
 ---
 
-## 부록 C: 참고 자료
+## Appendix C: References
 
-- [evanw/kiwi](https://github.com/evanw/kiwi) — kiwi binary format 본가
-- [evanw/kiwi/js/binary.ts](https://github.com/evanw/kiwi/blob/master/js/binary.ts) — `decodeBinarySchema` 의 정본 구현
-- [madebyevan.com/figma/fig-file-parser](https://madebyevan.com/figma/fig-file-parser/) — Evan 본인의 .fig parser (browser)
+- [evanw/kiwi](https://github.com/evanw/kiwi) — kiwi binary format home
+- [evanw/kiwi/js/binary.ts](https://github.com/evanw/kiwi/blob/master/js/binary.ts) — canonical implementation of `decodeBinarySchema`
+- [madebyevan.com/figma/fig-file-parser](https://madebyevan.com/figma/fig-file-parser/) — Evan's own .fig parser (browser)
 - [fig-kiwi (npm)](https://www.npmjs.com/package/fig-kiwi) — `readFigFile` / `writeFigFile`
-- [allan-simon/figma-kiwi-protocol](https://github.com/allan-simon/figma-kiwi-protocol) — WebSocket frame 까지 포함한 최신 reverse-eng
+- [allan-simon/figma-kiwi-protocol](https://github.com/allan-simon/figma-kiwi-protocol) — recent reverse-engineering that goes as far as WebSocket frames
 
-> **주의**: kiwi schema (`~558 types`) 는 Figma 가 임의로 바꿀 수 있는
-> internal format. 어느 날 schema 가 진화해도 wire-level forward compat 는
-> 유지되지만, *이름* 으로 의존하는 코드는 깨질 수 있다. audit-oracle 의
-> `VALUE_ALIASES` 가 정확히 그 패치 layer.
+> **Note**: The kiwi schema (`~558 types`) is an internal format Figma may change at will. Even if the schema evolves, wire-level forward compatibility is preserved, but *code that depends on names* may break. The `VALUE_ALIASES` in audit-oracle is exactly that patch layer.

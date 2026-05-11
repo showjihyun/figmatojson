@@ -1,17 +1,17 @@
 # spec/web-undo-redo
 
-| 항목 | 값 |
+| Field | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/core/application/History.ts` |
-| 테스트 | `web/core/application/History.test.ts`, `web/server/adapters/driven/applyTool.test.ts` (cumulative + interleave 블록), `web/e2e/undo-redo.spec.ts` |
-| 의존 | `EditJournal` port (`web/core/ports/EditJournal.ts`), `applyPatches` 헬퍼 (History.ts에서 export) |
+| Status | Approved |
+| Implementation | `web/core/application/History.ts` |
+| Tests | `web/core/application/History.test.ts`, `web/server/adapters/driven/applyTool.test.ts` (cumulative + interleave blocks), `web/e2e/undo-redo.spec.ts` |
+| Dependencies | `EditJournal` port (`web/core/ports/EditJournal.ts`), `applyPatches` helper (exported from History.ts) |
 
-## 1. 목적
+## 1. Goal
 
-세션의 편집 히스토리를 LIFO로 되감고/되감기를 취소한다. 모든 mutation 유스케이스(EditNode / ResizeNode / OverrideInstanceText / applyTool 의 모든 chat tool)는 성공 시 한 건의 `JournalEntry` 를 `record` 한다. `History.execute({ direction: 'undo' })` 는 가장 최근 `past` 엔트리를 꺼내 각 patch 의 `before` 를 적용하고, `direction: 'redo'` 는 가장 최근 `future` 엔트리의 `after` 를 적용한다.
+Rewind / un-rewind the session's edit history in LIFO order. Every mutation use case (EditNode / ResizeNode / OverrideInstanceText / every chat tool of applyTool) `record`s a single `JournalEntry` on success. `History.execute({ direction: 'undo' })` pops the most recent `past` entry and applies each patch's `before`; `direction: 'redo'` applies the `after` of the most recent `future` entry.
 
-세션 단위 (`sessionId`) 로 격리 — 다른 세션의 히스토리는 서로에게 보이지 않는다. 메모리 기반 (`InMemoryEditJournal`) 으로 서버 재시작 시 휘발한다 (PoC 범위; production 은 별도 작업).
+Isolated per session (`sessionId`) — histories of different sessions are not visible to each other. Memory-based (`InMemoryEditJournal`); volatile across server restart (PoC scope; production is separate work).
 
 ## 2. Input / Output
 
@@ -26,70 +26,70 @@ HistoryOutput = {
 }
 ```
 
-- `direction` 은 input 그대로 output 에 echo — 호출자가 응답 분기 시 reference 용.
-- `ok=false` 는 빈 스택에서 호출됐음을 의미한다 — 에러가 아니다 (UI 에서 버튼 disabled 처리용).
-- `appliedLabel` 는 `JournalEntry.label` 그대로 (예: `"Edit"`, `"Resize"`, `"AI: duplicate"`). 빈 스택일 때 `null`.
-- `past` / `future` 는 호출 후의 스택 깊이. UI 가 매 호출마다 별도 GET 없이 affordance 를 갱신할 수 있도록 응답에 포함.
+- `direction` echoes the input verbatim — used by callers to branch on the response.
+- `ok=false` means the call hit an empty stack — not an error (used to disable the button in the UI).
+- `appliedLabel` is `JournalEntry.label` as-is (e.g., `"Edit"`, `"Resize"`, `"AI: duplicate"`). `null` on empty stack.
+- `past` / `future` are the stack depths after the call. Returned in the response so the UI can refresh affordances without an extra GET.
 
 ## 3. Stack invariants
 
-`EditJournal` port 는 두 스택을 `direction` 으로 인덱스한다 — `'undo'` 는 past 스택 (undo 가 꺼내는 곳), `'redo'` 는 future 스택 (redo 가 꺼내는 곳).
+The `EditJournal` port indexes the two stacks by `direction` — `'undo'` is the past stack (what undo pops from), `'redo'` is the future stack (what redo pops from).
 
-- I-1 `record(entry)` → `past.push(entry)` 한 뒤 `future` 를 비운다 (모든 표준 undo-stack 의 표준 동작 — 새 분기가 생기면 redo 미래는 사라짐).
-- I-2 `popStep(sessionId, 'undo')` 성공 후 (= past 에서 pop), 동일 엔트리가 `pushStep(sessionId, 'redo', entry)` 로 future 에 옮겨진다. Undo→Redo 는 같은 엔트리를 사용해 라운드트립한다.
-- I-3 `popStep(sessionId, 'redo')` 성공 후 (= future 에서 pop), 동일 엔트리가 `pushStep(sessionId, 'undo', entry)` 로 past 에 옮겨진다.
-- I-4 `MAX_ENTRIES` (`InMemoryEditJournal` 에서 100) 초과 시 `record` 는 가장 오래된 past 엔트리를 drop. `pushStep` 은 cap 의 영향을 받지 않는다 — 새 엔트리를 system 에 들이는 것이 아니라 이미 cap 안에 있던 엔트리를 두 스택 사이에서 옮길 뿐이므로.
-- I-5 빈 스택에서 `popStep(sessionId, direction)` 는 `null` 을 반환 — 어떤 mutation 도 일어나지 않고, message.json / documentJson 도 변경되지 않는다.
-- I-6 세션이 destroy 되어도 journal 은 그대로 남는다 (PoC; production 은 cascade 가 필요할 수 있음). 다만 destroy 된 세션에 대한 `History.execute` 는 `NotFoundError` 로 throw 한다 — `popStep` 이 호출되기 전에.
+- I-1 `record(entry)` → `past.push(entry)` and clear `future` (the standard behavior of every undo stack — a new branch makes the redo future disappear).
+- I-2 After a successful `popStep(sessionId, 'undo')` (= pop from past), the same entry moves to future via `pushStep(sessionId, 'redo', entry)`. Undo→Redo round-trips on the same entry.
+- I-3 After a successful `popStep(sessionId, 'redo')` (= pop from future), the same entry moves to past via `pushStep(sessionId, 'undo', entry)`.
+- I-4 When `MAX_ENTRIES` (100 in `InMemoryEditJournal`) is exceeded, `record` drops the oldest past entry. `pushStep` is not affected by the cap — it does not introduce a new entry; it merely moves an already-capped entry between the two stacks.
+- I-5 `popStep(sessionId, direction)` on an empty stack returns `null` — no mutation occurs and neither message.json nor documentJson is changed.
+- I-6 The journal persists even after a session is destroyed (PoC; production may require a cascade). However, `History.execute` against a destroyed session throws `NotFoundError` — before `popStep` is called.
 
 ## 4. Patch invariants
 
-`JournalEntry.patches` 의 각 `PatchPair = {guid, field, before, after}` 는 두 종류 중 하나:
+Each `PatchPair = {guid, field, before, after}` in `JournalEntry.patches` is one of two kinds:
 
 ### 4.1 Leaf patch (set_text / set_position / set_size / fill / cornerRadius / align / instance-override / EditNode / ResizeNode)
 
-- I-L1 `guid` 는 실제 노드 GUID (`"sessionID:localID"`). `field` 는 도트/브래킷 경로 (예: `"textData.characters"`, `"transform.m02"`).
-- I-L2 `applyPatches` 는 `findNode(guid)` 로 `msg.nodeChanges` 에서 해당 노드를 찾아 `setPath(node, tokens, value)` 로 in-place mutation 한다. 그 후 `documentJson` 에서 같은 GUID 노드를 walk 로 찾아 동일 mutation 을 mirror.
-- I-L3 노드가 발견되지 않으면 (`findNode` returns undefined) 해당 patch 는 silently skip — 다른 patch 들은 계속 적용된다 (atomic 보장 없음, 단일 entry 안의 부분 실패는 허용).
-- I-L4 leaf patch 만 든 entry 는 `documentJson` 의 wholesale rebuild 를 트리거하지 않는다.
+- I-L1 `guid` is the actual node GUID (`"sessionID:localID"`). `field` is a dot/bracket path (e.g., `"textData.characters"`, `"transform.m02"`).
+- I-L2 `applyPatches` uses `findNode(guid)` to locate the node in `msg.nodeChanges` and applies in-place mutation via `setPath(node, tokens, value)`. Then it mirrors the same mutation by walking `documentJson` for the matching GUID node.
+- I-L3 If the node is not found (`findNode` returns undefined), that patch is silently skipped — other patches keep applying (no atomicity guarantee; partial failure inside a single entry is allowed).
+- I-L4 An entry with leaf patches only does not trigger a wholesale rebuild of `documentJson`.
 
 ### 4.2 Structural patch (duplicate / group / ungroup)
 
-- I-S1 `guid === MSG_SENTINEL_GUID` (= `"__msg__"`) 이고 `field === "nodeChanges"` 인 patch 는 sentinel 로 인식된다.
-- I-S2 sentinel patch 의 `before` / `after` 는 각각 `nodeChanges` 배열 전체의 deep clone (`clone(msg.nodeChanges)`). leaf patch 와 달리 단일 필드 경로가 아니라 트리 전체의 스냅샷.
-- I-S3 sentinel 처리: `msg.nodeChanges = pick === 'before' ? patch.before : patch.after`. `setPath` / `findNode` 경로를 거치지 않고 `continue`. (`pick` 은 `direction === 'undo' ? 'before' : 'after'`.)
-- I-S4 entry 안에 sentinel patch 가 한 건이라도 있으면, `applyPatches` 는 모든 patch 처리 후 `s.documentJson = rebuildDocumentFromMessage(JSON.stringify(msg))` 로 클라이언트 트리를 재생성한다.
-- I-S5 leaf + sentinel 혼합 entry 는 발행되지 않는다 (현재 mutation use case 중 어느 것도 둘을 한 entry 에 묶지 않음). 만약 미래에 발행되면 patch 적용 순서에 의존하게 되므로 spec 변경이 선행되어야 한다.
+- I-S1 A patch with `guid === MSG_SENTINEL_GUID` (= `"__msg__"`) and `field === "nodeChanges"` is recognized as a sentinel.
+- I-S2 The sentinel patch's `before` / `after` are each deep clones of the entire `nodeChanges` array (`clone(msg.nodeChanges)`). Unlike a leaf patch, this is a tree-wide snapshot rather than a single field path.
+- I-S3 Sentinel handling: `msg.nodeChanges = pick === 'before' ? patch.before : patch.after`. Skips the `setPath` / `findNode` paths and `continue`s. (`pick` is `direction === 'undo' ? 'before' : 'after'`.)
+- I-S4 If the entry contains any sentinel patch, `applyPatches` regenerates the client tree via `s.documentJson = rebuildDocumentFromMessage(JSON.stringify(msg))` after processing all patches.
+- I-S5 No entry is emitted that mixes leaf + sentinel (no current mutation use case bundles both into one entry). If introduced in the future, application order would matter and a spec change must come first.
 
 ## 5. Round-trip property
 
-- I-R1 임의의 mutation 시퀀스 `M1, M2, ..., Mn` 후 `History.execute({ direction: 'undo' })×n` 을 적용하면, 각 mutation 의 `before` 가 LIFO 순으로 적용되어 message.json 은 baseline 과 byte-for-byte 동일해진다 (단일 mutation entry 내부에 leaf-skip(I-L3)이 발생하지 않은 경우에 한해). `after` 클론 시점에 `JSON.stringify` 가 결정적이고 노드별 key 삽입 순서가 보존되기 때문.
-- I-R2 동일 시퀀스 후 `undo×n → redo×n` 은 message.json 을 시퀀스 직후 상태로 되돌린다.
-- I-R3 group/ungroup 의 ungroup-side 는 `between()` 으로 새 position 문자열을 생성하므로 자기 자신이 idempotent 하지 않다 (`web-group-ungroup.spec.md §5`). Undo 는 idempotence 가 아니라 **journal-recorded snapshot 의 정확한 재적용** 으로 baseline 을 보장한다 — 두 성질을 혼동하지 말 것.
+- I-R1 After an arbitrary mutation sequence `M1, M2, ..., Mn`, applying `History.execute({ direction: 'undo' })×n` applies each mutation's `before` in LIFO order, and message.json becomes byte-for-byte identical to the baseline (as long as no leaf-skip (I-L3) occurred inside a single mutation entry). This is because `JSON.stringify` at the `after` clone moment is deterministic and per-node key insertion order is preserved.
+- I-R2 After the same sequence, `undo×n → redo×n` returns message.json to the state immediately after the sequence.
+- I-R3 The ungroup side of group/ungroup uses `between()` to create new position strings, so it is not self-idempotent (`web-group-ungroup.spec.md §5`). Undo guarantees the baseline not by idempotence but by **exact reapplication of the journal-recorded snapshot** — the two properties must not be confused.
 
 ## 6. Error cases
 
-- I-E1 `getById(sessionId)` 가 null → `NotFoundError(\`session \${id} not found\`)` 로 throw. journal 은 건드리지 않는다.
-- I-E2 빈 스택 → `ok: false`, `appliedLabel: null`. throw 하지 않는다 (I-5).
-- I-E3 `applyPatches` 도중 fs 쓰기 실패 → 호출자에게 throw, journal 은 이미 pop 된 상태이므로 sequence 가 깨진다. (현재 PoC 한계 — atomic write 도입 후 별도 보강 필요. `#3 Atomic write` 작업 참조.)
+- I-E1 `getById(sessionId)` returns null → throws `NotFoundError(\`session \${id} not found\`)`. The journal is not touched.
+- I-E2 Empty stack → `ok: false`, `appliedLabel: null`. Does not throw (I-5).
+- I-E3 fs write failure during `applyPatches` → propagates the throw to the caller; the journal has already popped, so the sequence breaks. (Current PoC limitation — needs reinforcement after introducing atomic writes. See work item `#3 Atomic write`.)
 
-## 7. 라우팅 결합
+## 7. Routing
 
-- `POST /api/undo/:id` — body 없음. 핸들러는 `History.execute({ sessionId, direction: 'undo' })` 호출. 응답: `HistoryOutput`.
-- `POST /api/redo/:id` — body 없음. 핸들러는 `History.execute({ sessionId, direction: 'redo' })` 호출. 응답: `HistoryOutput`.
-- 클라이언트는 키보드 단축키 (`Cmd/Ctrl+Z`, `Shift+Cmd/Ctrl+Z`) 를 이 엔드포인트에 매핑.
+- `POST /api/undo/:id` — no body. The handler calls `History.execute({ sessionId, direction: 'undo' })`. Response: `HistoryOutput`.
+- `POST /api/redo/:id` — no body. The handler calls `History.execute({ sessionId, direction: 'redo' })`. Response: `HistoryOutput`.
+- The client maps keyboard shortcuts (`Cmd/Ctrl+Z`, `Shift+Cmd/Ctrl+Z`) to these endpoints.
 
-## 8. 비대상
+## 8. Non-goals
 
-- **Branching history (tree-style undo)** — 단순 LIFO 두 스택만. 다중 분기는 선언적으로 폐기.
-- **Persistent journal** — 메모리 한정. 서버 재시작 시 모든 히스토리 손실. snapshot save/load (`web-snapshot.spec.md`) 도 journal 을 포함하지 않는다.
-- **Cross-session undo** — 다른 세션의 mutation 을 되돌릴 수 없음 (각 세션의 stack 은 독립).
-- **Undo-of-undo collapse** — 동일한 mutation 을 두 번 연속 record 해도 합쳐지지 않는다 (예: 같은 노드의 set_text 를 빠르게 두 번 → 두 entry). UX 에서 debounce 가 필요하면 호출자 책임.
-- **Selective undo** — 특정 entry 만 골라 되돌리는 동작은 없음. 항상 stack top.
+- **Branching history (tree-style undo)** — only two simple LIFO stacks. Multi-branch is explicitly declined.
+- **Persistent journal** — memory only. All history is lost on server restart. Snapshot save/load (`web-snapshot.spec.md`) does not include the journal.
+- **Cross-session undo** — mutations of another session cannot be undone (per-session stacks are independent).
+- **Undo-of-undo collapse** — even if the same mutation is recorded twice in a row, the entries are not merged (e.g., set_text on the same node twice quickly → two entries). If UX requires debouncing, that is the caller's responsibility.
+- **Selective undo** — no operation to undo a specific entry. Always stack top.
 
 ## 9. Resolved questions
 
-- **`_componentTexts` refresh on undo of set_text master** — Undo 의 leaf patch 처리는 master 노드의 `textData.characters` 만 되돌린다. INSTANCE 들의 `_componentTexts` 캐시는 갱신하지 않으므로, undo 후 인스펙터를 다시 열 때까지 stale 한 master 텍스트를 보일 수 있다. 알려진 한계 — UX 가 문제될 경우 별도 보강.
-- **structural patch 와 leaf patch 의 entry 통합 가능성** — 현재 mutation use case 중 어느 것도 둘을 한 entry 에 섞지 않는다. 만약 미래에 한 turn 에 leaf + structural 을 묶어 atomic 하게 처리하려면, `applyPatches` 의 patch 적용 순서가 documentJson rebuild 와 충돌하지 않도록 명시해야 한다 (현재는 sentinel 처리 후 leaf walk 가 rebuild 직전에 일어나므로 leaf walk 결과가 손실될 수 있음 — I-S4 참조).
-- **`MAX_ENTRIES` 정책** — 100 은 PoC 임의값. user 세션 길이 추적이 가능해지면 재조정. cap 도달 시 oldest 가 silently drop 되므로 UI 상에서 affordance 변화 없음 — 그게 적정한지 별도 검증.
-- **`Undo` / `Redo` 이중 클래스 → `History` 단일 클래스 (2026-05-06)** — 두 use case 가 `popUndo / popRedo` + `pushFuture / pushPast` 의 대칭쌍에 의해서만 갈렸고 본문은 `applyPatches` 를 공유했음. `direction` 파라미터로 합쳐 EditJournal port 도 `popStep / pushStep` 4 메서드로 축소. 결과 동작은 동일 — 와이어 응답 모양만 `appliedLabel` 단일 필드 + `direction` echo 로 변경.
+- **`_componentTexts` refresh on undo of set_text master** — Undo's leaf-patch processing reverts only the master node's `textData.characters`. INSTANCEs' `_componentTexts` cache is not refreshed, so the inspector may show stale master text until reopened after undo. A known limitation — reinforce separately if UX becomes a problem.
+- **Possibility of merging structural and leaf patches into one entry** — currently no mutation use case mixes the two. If, in the future, atomic handling of leaf + structural inside a single turn is needed, the patch application order must avoid colliding with documentJson rebuild (currently the leaf walk happens just before rebuild after sentinel processing, so leaf walk results could be lost — see I-S4).
+- **`MAX_ENTRIES` policy** — 100 is an arbitrary PoC value. Adjust once user session length tracking is available. On cap exhaustion the oldest is silently dropped with no affordance change in the UI — verify whether that is acceptable separately.
+- **Dual class `Undo` / `Redo` → single class `History` (2026-05-06)** — the two use cases differed only by the symmetric pair `popUndo / popRedo` + `pushFuture / pushPast`, sharing the `applyPatches` body. They were merged behind a `direction` parameter, and the EditJournal port was reduced to four methods `popStep / pushStep`. The resulting behavior is identical — only the wire response shape changed to a single `appliedLabel` field + `direction` echo.

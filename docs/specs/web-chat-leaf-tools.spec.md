@@ -1,39 +1,39 @@
 # spec/web-chat-leaf-tools
 
-| 항목 | 값 |
+| Field | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/server/adapters/driven/applyTool.ts` 의 `set_text` / `set_position` / `set_size` / `set_fill_color` / `set_corner_radius` / `align_nodes` 케이스 |
-| 테스트 | `web/server/adapters/driven/applyTool.test.ts` |
-| 의존 | `EditJournal` port, `ToolDispatcher` 카탈로그 (`InProcessTools.ts`) |
-| 형제 | `web-chat-duplicate.spec.md` (structural), `web-group-ungroup.spec.md` (structural), `web-edit-node.spec.md` / `web-resize-node.spec.md` / `web-instance-override.spec.md` (HTTP route 측면) |
+| Status | Approved |
+| Implementation | `set_text` / `set_position` / `set_size` / `set_fill_color` / `set_corner_radius` / `align_nodes` cases in `web/server/adapters/driven/applyTool.ts` |
+| Tests | `web/server/adapters/driven/applyTool.test.ts` |
+| Dependencies | `EditJournal` port, `ToolDispatcher` catalog (`InProcessTools.ts`) |
+| Siblings | `web-chat-duplicate.spec.md` (structural), `web-group-ungroup.spec.md` (structural), `web-edit-node.spec.md` / `web-resize-node.spec.md` / `web-instance-override.spec.md` (HTTP route side) |
 
-## 1. 목적
+## 1. Goal
 
-AI 채팅 (`Apply edits via the figma_editor tools.`) 으로부터 호출되는 leaf-mutation 도구들을 한 곳에서 정의한다. 각 도구는 단일 노드(또는 align 의 경우 N개 노드의 m02/m12) 의 특정 필드를 mutation 하고, 한 건의 `JournalEntry` 를 발행한다.
+Define, in one place, the leaf-mutation tools invoked from the AI chat (`Apply edits via the figma_editor tools.`). Each tool mutates a specific field of a single node (or, for align, the m02/m12 of N nodes) and emits a single `JournalEntry`.
 
-leaf 도구들의 공통 패턴:
-- `applyTool(s, name, input, journal)` 로 진입.
-- `findNode(guid)` 로 `msg.nodeChanges` 에서 대상 노드를 찾는다.
-- 노드 in-place mutation → `writeFileSync(messagePath, JSON.stringify(msg))` → `mirrorClient(guid, mutator)` 로 client tree 동기화 → `recordChatEdit(label, patches)` 로 journal 에 기록.
-- 출력은 void — `ToolDispatcher` 가 `{ok: true}` 로 wrap.
+Common leaf-tool pattern:
+- Enter via `applyTool(s, name, input, journal)`.
+- `findNode(guid)` locates the target node in `msg.nodeChanges`.
+- In-place mutate the node → `writeFileSync(messagePath, JSON.stringify(msg))` → sync the client tree via `mirrorClient(guid, mutator)` → record into the journal via `recordChatEdit(label, patches)`.
+- Output is void — `ToolDispatcher` wraps it as `{ok: true}`.
 
-structural 도구 (`duplicate` / `group` / `ungroup`) 와 달리:
-- patch 는 leaf shape `{guid, field, before, after}` 로 발행 (`MSG_SENTINEL_GUID` 사용 금지).
-- `documentJson` 의 wholesale rebuild 트리거하지 않음 (`mirrorClient` 로 in-place 갱신).
+Unlike structural tools (`duplicate` / `group` / `ungroup`):
+- Patches are emitted in leaf shape `{guid, field, before, after}` (no `MSG_SENTINEL_GUID`).
+- No wholesale rebuild of `documentJson` is triggered (in-place updates via `mirrorClient`).
 
-`web-edit-node` / `web-resize-node` / `web-instance-override` 는 같은 의미의 mutation 을 HTTP route 로 받는 **별개의 surface** 다 — 본 spec 은 chat tool 분기만 다룬다.
+`web-edit-node` / `web-resize-node` / `web-instance-override` are **separate surfaces** that accept semantically identical mutations via HTTP routes — this spec covers the chat-tool branch only.
 
-## 2. 공통 invariants
+## 2. Common invariants
 
-이하 모든 도구에 적용:
+Applies to all tools below:
 
-- I-C1 진입 시 `findNode` 가 노드를 찾지 못하면 `Error("node <guid> not found")` (또는 도구별 prefix). throw 전에 어떤 write 도 일어나지 않는다 — disk / journal 미오염.
-- I-C2 성공 시 정확히 한 건의 `JournalEntry` 가 record 된다. label = `"AI: <tool>"` (align 은 `"AI: align <axis>"`).
-- I-C3 patch 의 `before` 는 mutation 직전의 값, `after` 는 mutation 직후의 값. 두 값 모두 deep clone (객체/배열은 `clone(...)` = `JSON.parse(JSON.stringify(...))` 로) — 이후 추가 mutation 으로 인한 aliasing 을 방지.
-- I-C4 mutation 은 `msg.nodeChanges` 의 해당 노드를 in-place 로 변경한 뒤 `writeFileSync` 로 디스크에 동기 반영. 동일 변경이 `s.documentJson` 에도 `mirrorClient` 로 mirror.
-- I-C5 `record` 호출은 disk write 이후에 일어난다 — write 가 throw 하면 journal 도 오염되지 않는다 (atomic write 도입 후 보장 강화 — `web-undo-redo.spec.md §6 I-E3` 참조).
-- I-C6 동일한 `applyTool` 호출 안에서는 한 도구만 실행 (switch). 여러 도구를 batch 하는 contract 는 dispatcher 레벨에서 N회 호출로 표현.
+- I-C1 If `findNode` cannot find the node on entry, throw `Error("node <guid> not found")` (or a per-tool prefix). No write occurs before the throw — neither disk nor journal is dirtied.
+- I-C2 On success, exactly one `JournalEntry` is recorded. label = `"AI: <tool>"` (align is `"AI: align <axis>"`).
+- I-C3 The patch's `before` is the value just before the mutation; `after` is the value just after. Both are deep clones (objects/arrays via `clone(...)` = `JSON.parse(JSON.stringify(...))`) — preventing aliasing from later mutations.
+- I-C4 The mutation changes the matching node in `msg.nodeChanges` in-place, then `writeFileSync` flushes to disk synchronously. The same change is mirrored into `s.documentJson` via `mirrorClient`.
+- I-C5 The `record` call happens after the disk write — if the write throws, the journal is not dirtied either (the guarantee strengthens after atomic write is introduced — see `web-undo-redo.spec.md §6 I-E3`).
+- I-C6 Within a single `applyTool` invocation, only one tool runs (switch). Batching multiple tools is expressed as N dispatcher-level invocations.
 
 ## 3. set_text
 
@@ -44,11 +44,11 @@ label  = 'AI: set_text'
 patches = [{ guid, field: 'textData.characters', before, after }]
 ```
 
-- I-T1 `node.textData.characters` 가 `String(value)` 로 설정. `textData` 가 없으면 빈 객체로 만든 뒤 설정.
-- I-T2 `before` 는 mutation 직전의 `textData.characters` 값. textData 자체가 없었다면 `undefined`.
-- I-T3 master text(`guid`) 가 INSTANCE 들의 `_componentTexts[]` 에 캐시되어 있는 경우, `documentJson` 트리를 walk 하며 `r.guid === input.guid` 인 모든 항목의 `r.characters` 도 `after` 로 갱신 (인스펙터 component-text 패널 즉시 반영).
-- I-T4 INSTANCE 의 per-instance override (`symbolData.symbolOverrides` / `_instanceOverrides`) 는 변경하지 않음 — 이 도구는 master 만 건드린다 (override 는 `override_instance_text` 의 책임).
-- I-T5 (알려진 한계) Undo of set_text 는 `_componentTexts` 캐시를 갱신하지 않음 (`web-undo-redo.spec.md §9` 참조).
+- I-T1 `node.textData.characters` is set to `String(value)`. If `textData` is absent, an empty object is created and then set.
+- I-T2 `before` is the `textData.characters` value just before the mutation. If textData was absent altogether, it is `undefined`.
+- I-T3 When the master text (`guid`) is cached on INSTANCEs' `_componentTexts[]`, walk the `documentJson` tree and also update `r.characters` of every entry with `r.guid === input.guid` to `after` (immediate reflection in the inspector's component-text panel).
+- I-T4 INSTANCE per-instance overrides (`symbolData.symbolOverrides` / `_instanceOverrides`) are not changed — this tool touches the master only (overrides are the responsibility of `override_instance_text`).
+- I-T5 (Known limitation) Undo of set_text does not refresh the `_componentTexts` cache (see `web-undo-redo.spec.md §9`).
 
 ## 4. set_position
 
@@ -62,10 +62,10 @@ patches = [
 ]
 ```
 
-- I-P1 `node.transform.m02 ← Number(x)`, `node.transform.m12 ← Number(y)`. transform 객체가 없으면 빈 객체로 만든 뒤 설정.
-- I-P2 회전 채널 (`m00/m01/m10/m11`) 은 변경하지 않음 — 이 도구는 translation 만.
-- I-P3 patch 는 항상 두 건 (`m02`, `m12`) — x/y 중 하나만 바뀌었어도 둘 다 발행 (호출자가 기존값 그대로 다시 넣은 경우 before === after 인 patch 가 기록됨).
-- I-P4 단위는 `transform` 의 native 단위 (px). 호출자가 음수를 보내면 음수 그대로 적용.
+- I-P1 `node.transform.m02 ← Number(x)`, `node.transform.m12 ← Number(y)`. If the transform object is absent, an empty object is created and then set.
+- I-P2 Rotation channels (`m00/m01/m10/m11`) are not changed — this tool handles translation only.
+- I-P3 Patches are always two (`m02`, `m12`) — even if only one of x/y changed, both are emitted (when the caller passes back the existing value, a patch with before === after is recorded).
+- I-P4 The unit is the transform's native unit (px). Negative values from the caller are applied as-is.
 
 ## 5. set_size
 
@@ -79,10 +79,10 @@ patches = [
 ]
 ```
 
-- I-Z1 `node.size = { x: max(1, Number(w)), y: max(1, Number(h)) }`. 0 이하 입력은 1 로 클램프.
-- I-Z2 `before` 는 mutation 직전의 `size.x` / `size.y`. size 가 없었다면 둘 다 `undefined`.
-- I-Z3 `transform` 은 변경하지 않음 — 위치 고정.
-- I-Z4 size 객체 전체가 새 객체로 교체된다 (in-place 가 아닌 reassign) — 기존 size 의 다른 키 (`width`/`height` 등 비표준) 가 있었다면 사라진다. 현재 kiwi 출력에는 `x`/`y` 만 있어 회귀 위험 없음.
+- I-Z1 `node.size = { x: max(1, Number(w)), y: max(1, Number(h)) }`. Inputs ≤ 0 are clamped to 1.
+- I-Z2 `before` is the pre-mutation `size.x` / `size.y`. If size was absent, both are `undefined`.
+- I-Z3 `transform` is not changed — position is fixed.
+- I-Z4 The entire size object is replaced with a new object (reassign, not in-place) — non-standard keys (`width`/`height`, etc.) that may have existed are dropped. No regression risk because current kiwi output has only `x`/`y`.
 
 ## 6. set_fill_color
 
@@ -93,10 +93,10 @@ label  = 'AI: set_fill_color'
 patches = [{ guid, field: 'fillPaints', before, after }]
 ```
 
-- I-F1 `node.fillPaints[0].color = { r, g, b, a }` (모두 `Number(...)` 로 강제). `fillPaints[0]` 가 없으면 `{type:'SOLID', visible:true, opacity:1}` 로 새로 생성.
-- I-F2 `fillPaints[1..]` 는 변경하지 않음 — 첫 번째 paint 만 색을 바꾼다.
-- I-F3 patch 의 `before` / `after` 는 fillPaints 배열 전체의 deep clone. 단일 색상 변경이라도 배열 전체가 들어가는 이유: paint 는 type / visible / opacity / blendMode / color / gradientStops / image 등 다층 객체라 단일 path 로 표현하기 부담스럽다.
-- I-F4 r/g/b/a 는 0..1 범위 가정. 범위 밖 값에 대한 clamp 는 없음 — 호출자가 책임.
+- I-F1 `node.fillPaints[0].color = { r, g, b, a }` (each coerced to `Number(...)`). If `fillPaints[0]` is absent, a new `{type:'SOLID', visible:true, opacity:1}` is created.
+- I-F2 `fillPaints[1..]` is not changed — only the first paint's color is changed.
+- I-F3 Patch `before` / `after` are deep clones of the entire fillPaints array. Even for a single color change, the whole array is captured because paints are multi-layer objects (type / visible / opacity / blendMode / color / gradientStops / image), which would be cumbersome to express via a single path.
+- I-F4 r/g/b/a are assumed in the 0..1 range. No clamp for out-of-range values — caller's responsibility.
 
 ## 7. set_corner_radius
 
@@ -107,9 +107,9 @@ label  = 'AI: set_corner_radius'
 patches = [{ guid, field: 'cornerRadius', before, after }]
 ```
 
-- I-R1 `node.cornerRadius = max(0, Number(value))`. 음수 입력은 0 으로 클램프.
-- I-R2 `rectangleCornerRadiiData` (per-corner) 는 건드리지 않음 — uniform radius 만.
-- I-R3 노드 타입 검증 없음 — TEXT 같이 cornerRadius 가 의미 없는 노드에 호출해도 그대로 적용. 렌더링이 무시한다.
+- I-R1 `node.cornerRadius = max(0, Number(value))`. Negative inputs clamp to 0.
+- I-R2 `rectangleCornerRadiiData` (per-corner) is not touched — uniform radius only.
+- I-R3 No node-type validation — calling it on a node where cornerRadius is meaningless (e.g., TEXT) still applies it. Rendering ignores it.
 
 ## 8. align_nodes
 
@@ -117,46 +117,46 @@ patches = [{ guid, field: 'cornerRadius', before, after }]
 input  = { guids: string[], axis: 'left'|'center'|'right'|'top'|'middle'|'bottom' }
 output = void
 label  = `AI: align ${axis}`
-patches = (axis 에 따라 transform.m02 또는 transform.m12 의 N건)
+patches = (N entries of transform.m02 or transform.m12 depending on axis)
 ```
 
-- I-A1 `guids.length < 2` → `Error("align_nodes needs >= 2 guids")`. 0 / 1 은 정렬 의미 없음.
-- I-A2 모든 `guids` 는 존재해야 함 — 한 개라도 `findNode` 실패하면 `Error("node <guid> not found")`. 부분 mutation 없음.
-- I-A3 그룹 bbox = `(min(x), min(y))` ~ `(max(x+w), max(y+h))` — 멤버들의 `transform.m02/m12` 와 `size.x/y` 만으로 계산 (회전 고려 안 함, AABB).
-- I-A4 axis 별 새 m02/m12:
+- I-A1 `guids.length < 2` → `Error("align_nodes needs >= 2 guids")`. 0 / 1 carries no alignment meaning.
+- I-A2 All `guids` must exist — if any `findNode` fails, throw `Error("node <guid> not found")`. No partial mutation.
+- I-A3 Group bbox = `(min(x), min(y))` to `(max(x+w), max(y+h))` — computed solely from members' `transform.m02/m12` and `size.x/y` (no rotation, AABB).
+- I-A4 New m02/m12 per axis:
   - `left`   → `m02 = groupX`
   - `center` → `m02 = (groupX + groupRight) / 2 - w/2`
   - `right`  → `m02 = groupRight - w`
   - `top`    → `m12 = groupY`
   - `middle` → `m12 = (groupY + groupBottom) / 2 - h/2`
   - `bottom` → `m12 = groupBottom - h`
-- I-A5 patch 는 변경된 축에 대한 것만 발행 — horizontal axis (`left`/`center`/`right`) 는 m02 N건, vertical (`top`/`middle`/`bottom`) 은 m12 N건. 변경되지 않은 축은 patch 에 없다 (Undo 가 잘못된 축으로 이동시키는 것을 방지).
-- I-A6 멤버 중 일부가 이미 정렬 위치에 있어도 patch 는 발행 (before === after). I-P3 와 동일한 이유.
-- I-A7 미지원 axis → `Error("align_nodes: unknown axis <axis>")`.
-- I-A8 멤버들의 `parentIndex` 는 변경하지 않음 — align 은 transform 만 만진다.
+- I-A5 Only patches for the changed axis are emitted — horizontal axes (`left`/`center`/`right`) emit N m02 patches; vertical (`top`/`middle`/`bottom`) emit N m12 patches. The unchanged axis is absent from patches (prevents Undo from translating along the wrong axis).
+- I-A6 Even if some members are already at the aligned position, patches are still emitted (before === after). Same reason as I-P3.
+- I-A7 Unknown axis → `Error("align_nodes: unknown axis <axis>")`.
+- I-A8 Members' `parentIndex` is not changed — align touches only transforms.
 
-## 9. Error cases (모든 도구 공통)
+## 9. Error cases (common across all tools)
 
-- 세션 미존재 → 호출자 (`ToolDispatcher`) 가 `findNode` 도달 전에 throw.
-- 노드 미존재 → I-C1.
-- mutation 도중 `writeFileSync` 실패 → 호출자에게 throw, journal 미오염 (atomic write 도입 후 보장 강화).
-- align 의 axis 검증 → I-A7. 다른 도구는 input 검증 없음 — 호출자가 잘못된 타입을 보내면 `Number(...)` / `String(...)` 로 강제 변환.
+- Session not found → caller (`ToolDispatcher`) throws before reaching `findNode`.
+- Node not found → I-C1.
+- `writeFileSync` failure during mutation → propagates to the caller; journal is not dirtied (guarantee strengthens after atomic write).
+- Axis validation for align → I-A7. Other tools do not validate input — if the caller passes the wrong type, `Number(...)` / `String(...)` coerce it.
 
-## 10. 비대상
+## 10. Non-goals
 
-- **input schema validation** — JSON-schema / zod 검증 없음. `ToolDispatcher` 가 카탈로그 레벨에서 wrap 하지만, 본 dispatcher 레벨에서는 type coercion 만 (예: `Number(input.x)`).
-- **batch in single tool call** — 한 도구는 한 노드만 (align 제외). 여러 노드 변경은 dispatcher 가 도구를 N회 호출.
-- **stride / step alignment** — align_nodes 는 그룹 정렬만. 일정 간격 분배 (distribute horizontally 등) 는 별도 도구 후보.
-- **rotated bbox** — align_nodes 의 bbox 계산은 회전된 멤버에 대해 OBB 가 아닌 AABB (`web-group-ungroup.spec.md §8` 와 동일 한계).
-- **textData 의 lines 배열 동기화** — set_text 는 `characters` 만 갱신, `lines` 의 styling segments 는 그대로. 1줄 / 단일-스타일 가정. 다중 스타일 텍스트의 부분 수정은 별도 도구.
+- **Input schema validation** — no JSON-schema / zod validation. `ToolDispatcher` wraps at the catalog level, but at this dispatcher level only type coercion happens (e.g., `Number(input.x)`).
+- **Batch within a single tool call** — one tool changes one node (except align). Multi-node changes are expressed as N dispatcher calls.
+- **Stride / step alignment** — align_nodes only group-aligns. Even-distribution (distribute horizontally, etc.) is a candidate for a separate tool.
+- **Rotated bbox** — align_nodes computes the AABB rather than OBB for rotated members (same limitation as `web-group-ungroup.spec.md §8`).
+- **Syncing the `lines` array of textData** — set_text updates only `characters`; the styling segments in `lines` stay. Single-line / single-style assumption. Partial edits of multi-style text are a separate tool.
 
-## 11. 라우팅 결합
+## 11. Routing
 
-- 채팅 전용 — HTTP 직접 노출 없음. `POST /api/chat/:id` → `RunChatTurn` → `ToolDispatcher.dispatch` → `applyTool`.
-- 사용자 수동 인스펙터의 leaf 편집은 별도 surface 로 진입 (`PATCH /api/doc/:id` → `EditNode` 등) — 본 spec 은 채팅 분기만.
+- Chat only — no direct HTTP exposure. `POST /api/chat/:id` → `RunChatTurn` → `ToolDispatcher.dispatch` → `applyTool`.
+- Manual user-facing inspector leaf edits enter through separate surfaces (`PATCH /api/doc/:id` → `EditNode`, etc.) — this spec covers only the chat branch.
 
 ## 12. Resolved questions
 
-- **set_text 의 `_componentTexts` 즉시 갱신 vs Undo 시 갱신** — forward 경로(I-T3)에서는 mirror 하지만 Undo 의 `applyPatches` 는 master 만 되돌리고 `_componentTexts` 캐시는 그대로. 의도된 차이 — Undo 는 leaf-level 만 처리하며 도구별 후처리(component-text refresh)는 모르는 게 옳다고 판단. UX 가 문제 시 Undo 후 인스펙터 재오픈으로 갱신 가능.
-- **set_size 의 1px 클램프** — 0 이하는 렌더링 사이드에서 NaN/Infinity 의 원인이 될 수 있어 도구 진입 시 1로 강제. 호출자는 클램프된 값이 disk 에 들어간 것을 확인하고 다음 호출에 반영해야 함.
-- **set_fill_color 의 fillPaints[0] 만 변경** — multi-paint 노드의 두 번째 이상 fill 을 변경하는 케이스는 매우 드물어 v1 에서 punt. 필요 시 `fillIndex` 옵션 추가 (별도 spec).
+- **set_text's immediate `_componentTexts` refresh vs the absence on Undo** — the forward path (I-T3) mirrors, but Undo's `applyPatches` only reverts the master and leaves the `_componentTexts` cache alone. Intentional difference — Undo handles only leaf level and should not know per-tool post-processing (component-text refresh). If UX becomes a problem, reopening the inspector after Undo refreshes it.
+- **set_size's 1px clamp** — values ≤ 0 can cause NaN/Infinity on the render side, so the tool entry forces 1. Callers must confirm the clamped value persisted to disk and use it in the next call.
+- **set_fill_color changing only fillPaints[0]** — multi-paint nodes changing the second-and-later fill are rare; punted in v1. If needed, add a `fillIndex` option (separate spec).

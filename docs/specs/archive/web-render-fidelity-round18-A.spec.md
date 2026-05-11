@@ -1,18 +1,15 @@
 # spec/web-render-fidelity-round18-A
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/core/domain/colorStyleRef.ts` (신규 함수 `resolveVariableChain`) |
-| 테스트 | `web/core/domain/colorStyleRef.test.ts` (신규 case set) |
-| 형제 | round 15 (`colorVarName`/`textStyleName` single-hop), round 17 (audit-properties-coverage broken-chain 측정) |
+| Status | Approved |
+| Implementation | `web/core/domain/colorStyleRef.ts` (new function `resolveVariableChain`) |
+| Tests | `web/core/domain/colorStyleRef.test.ts` (new case set) |
+| Siblings | round 15 (`colorVarName` / `textStyleName` single-hop), round 17 (audit-properties-coverage broken-chain measurement) |
 
-## 1. 배경
+## 1. Background
 
-Round 15 의 `colorVarName` 은 **single hop** — `paint.colorVar.alias.guid` 가
-가리키는 VARIABLE 노드의 `name` 만 반환한다 (Figma editor 의 "가까운
-alias" 표시와 일치). 그러나 Figma 의 design system 에서는 한 VARIABLE
-이 또 다른 VARIABLE 을 alias 로 carry 하는 **alias chain** 패턴이 흔하다:
+Round 15's `colorVarName` is **single hop** — it returns the `name` of the VARIABLE node pointed to by `paint.colorVar.alias.guid` (matching Figma editor's "closest alias" display). But in Figma design systems, **alias chains** in which one VARIABLE carries another VARIABLE as alias are common:
 
 ```
 paint.colorVar  →  VARIABLE A "Button/Primary/Default"
@@ -22,39 +19,33 @@ paint.colorVar  →  VARIABLE A "Button/Primary/Default"
                       →  { r, g, b, a }   ← leaf
 ```
 
-Round 17 의 `audit-properties-coverage.mjs` 가 chain reachability 를
-측정하면서 bvp 50+ / 메타리치 6 건의 dead-end / cycle 을 발견했는데,
-audit script 는 .mjs 이고 web/core/domain 은 TypeScript 라 헬퍼 공유가
-어려워 inline 검증을 carry 하고 있었다.
+When round 17's `audit-properties-coverage.mjs` measured chain reachability, it found 50+ broken cases in bvp and 6 in meta-rich (dead-end / cycle). The audit script is in .mjs and web/core/domain is TypeScript, so sharing helpers was awkward — the verification had to live inline.
 
-본 라운드는:
+This round:
 
-1. **신규 도메인 헬퍼** `resolveVariableChain(node, root)` — pure, single
-   `entries[0]` chain 의 leaf + 거쳐간 chain 노드 배열 반환
-2. **chain end-state 분류** — leaf 도달 / cycle / dead-end / depth-cap 4 종
+1. **Adds a new domain helper** `resolveVariableChain(node, root)` — pure, returns the leaf of a single `entries[0]` chain plus the list of nodes it walked through.
+2. **Classifies chain end states** — 4 categories: leaf reached / cycle / dead-end / depth-cap.
 
-audit script 는 본 라운드에서 변경하지 않는다 (별도 라운드 후보 — .mjs
-가 web/core dist 를 consume 하도록 빌드 path 설계 또는 helper 를 ESM
-export 가능한 .js 로 mirror).
+The audit script is not changed in this round (separate-round candidate — design the build path so the .mjs consumes the web/core dist, or mirror the helper as an ESM-export-able .js).
 
-## 2. 헬퍼 시그니처
+## 2. Helper signature
 
 ```ts
-// web/core/domain/colorStyleRef.ts (round 18-A 추가)
+// web/core/domain/colorStyleRef.ts (round 18-A addition)
 
 export type VariableChainEnd =
-  | { kind: 'leaf' }                         // ALIAS 가 아닌 entry 도달
-  | { kind: 'non-variable' }                 // alias 가 가리키는 노드의 type !== 'VARIABLE'
-  | { kind: 'cycle'; cycledAt: string }      // 이미 본 GUID 재방문
-  | { kind: 'dead-end' }                     // alias guid lookup 실패
-  | { kind: 'depth-cap'; cap: number };       // hop 수 초과
+  | { kind: 'leaf' }                         // reached a non-ALIAS entry
+  | { kind: 'non-variable' }                 // alias points to a node whose type !== 'VARIABLE'
+  | { kind: 'cycle'; cycledAt: string }      // re-visited a previously seen GUID
+  | { kind: 'dead-end' }                     // alias guid lookup failed
+  | { kind: 'depth-cap'; cap: number };       // hop count exceeded
 
 export interface VariableChainResult {
-  /** chain 의 마지막 *resolved* VARIABLE 노드. cycle/dead-end 시 마지막 도달한 노드. */
+  /** the last *resolved* VARIABLE node of the chain. On cycle/dead-end, the last node reached. */
   leaf: unknown | null;
-  /** 거쳐간 GUID 들의 배열 — 입력 VARIABLE 부터 leaf 또는 break-point 까지. */
+  /** array of GUIDs walked through — from the input VARIABLE to the leaf or break-point. */
   chain: string[];
-  /** chain 종료 사유. */
+  /** the reason the chain ended. */
   end: VariableChainEnd;
 }
 
@@ -67,28 +58,20 @@ export function resolveVariableChain(
 
 ## 3. Invariants
 
-- I-1 입력 `node` 가 falsy / 비-object / `type !== 'VARIABLE'` → `null` 반환.
-- I-2 `maxDepth` default = 8 (audit script 와 일치). 옵션으로 override 가능.
-- I-3 입력 VARIABLE 자체가 raw value (`variableDataValues.entries[0].variableData.dataType !== 'ALIAS'`)
-  이면 `{ leaf: node, chain: [node.id], end: { kind: 'leaf' } }`. chain 길이 1.
-- I-4 chain walk 룰 (각 hop):
-  1. 현재 노드의 `variableDataValues.entries[0]` 가 없거나 `variableData.dataType !== 'ALIAS'`
-     → leaf, end = `{ kind: 'leaf' }`. 현재 노드가 leaf.
-  2. `entries[0].variableData.value.alias.guid` 추출 실패 → end = `{ kind: 'dead-end' }`.
-     leaf = 현재 노드 (마지막으로 정상 도달한 곳).
-  3. guid 가 chain 에 이미 있음 → end = `{ kind: 'cycle', cycledAt: id }`.
-     leaf = 현재 노드.
-  4. root 에서 lookup 실패 → end = `{ kind: 'dead-end' }`. leaf = 현재 노드.
-  5. lookup 성공한 노드의 `type !== 'VARIABLE'` → end = `{ kind: 'non-variable' }`.
-     leaf = 그 non-VARIABLE 노드 (재미 있는 케이스: 일부 schema 가 raw color
-     를 별도 type 으로 carry).
-  6. 그 외 — 다음 hop 으로.
-- I-5 hop 수가 `maxDepth` 도달 → end = `{ kind: 'depth-cap', cap: maxDepth }`.
-  leaf = depth-cap 시점의 노드.
-- I-6 `entries` 가 multi-mode (light / dark 등) 인 경우 본 라운드는 **첫
-  entry 만** 따라간다. multi-mode 처리는 별도 라운드.
+- I-1 If the input `node` is falsy / not an object / `type !== 'VARIABLE'` → return `null`.
+- I-2 `maxDepth` default = 8 (matches the audit script). Overridable via options.
+- I-3 If the input VARIABLE itself carries a raw value (`variableDataValues.entries[0].variableData.dataType !== 'ALIAS'`) → `{ leaf: node, chain: [node.id], end: { kind: 'leaf' } }`. Chain length 1.
+- I-4 Chain walk rule (each hop):
+  1. If the current node has no `variableDataValues.entries[0]` or `variableData.dataType !== 'ALIAS'` → leaf, end = `{ kind: 'leaf' }`. Current node is the leaf.
+  2. If `entries[0].variableData.value.alias.guid` cannot be extracted → end = `{ kind: 'dead-end' }`. leaf = current node (the last cleanly reached one).
+  3. If the guid is already in the chain → end = `{ kind: 'cycle', cycledAt: id }`. leaf = current node.
+  4. If the root lookup fails → end = `{ kind: 'dead-end' }`. leaf = current node.
+  5. If the looked-up node's `type !== 'VARIABLE'` → end = `{ kind: 'non-variable' }`. leaf = that non-VARIABLE node (interesting case: some schemas carry raw color in a different type).
+  6. Otherwise — advance to the next hop.
+- I-5 If the hop count reaches `maxDepth` → end = `{ kind: 'depth-cap', cap: maxDepth }`. leaf = the node at the depth-cap point.
+- I-6 When `entries` is multi-mode (light / dark etc.), this round only follows the **first entry**. Multi-mode handling is a separate round.
 
-## 4. 사용 예
+## 4. Usage example
 
 ```ts
 import { resolveVariableChain } from '@core/domain/colorStyleRef';
@@ -105,27 +88,27 @@ if (result?.end.kind === 'leaf') {
 
 ## 5. Test cases (Invariants → assertions)
 
-| ID | 입력 | 기대 |
+| ID | Input | Expected |
 |---|---|---|
-| T-1 | `node = null` | `null` 반환 |
-| T-2 | type=FRAME node | `null` 반환 |
-| T-3 | VARIABLE 의 첫 entry 가 raw COLOR | leaf=node, chain=[id], end=leaf |
+| T-1 | `node = null` | returns `null` |
+| T-2 | type=FRAME node | returns `null` |
+| T-3 | VARIABLE whose first entry is raw COLOR | leaf=node, chain=[id], end=leaf |
 | T-4 | 2-hop chain (A → B raw) | leaf=B, chain=[A.id, B.id], end=leaf |
-| T-5 | 3-hop chain (A → B → C raw) | leaf=C, chain=3, end=leaf |
-| T-6 | dead-end (A → 미존재 guid) | leaf=A, end=dead-end |
+| T-5 | 3-hop chain (A → B → C raw) | leaf=C, chain length 3, end=leaf |
+| T-6 | dead-end (A → missing guid) | leaf=A, end=dead-end |
 | T-7 | cycle (A → B → A) | leaf=B, end=cycle, cycledAt=A.id |
 | T-8 | depth-cap (10-hop chain, maxDepth=3) | end=depth-cap, cap=3 |
 | T-9 | non-VARIABLE leaf (A → FRAME) | leaf=FRAME, end=non-variable |
-| T-10 | entries 자체 없음 | leaf=node, end=leaf, chain=[id] |
+| T-10 | no entries at all | leaf=node, end=leaf, chain=[id] |
 
 ## 6. Out of scope
 
-- ❌ audit-properties-coverage.mjs 의 helper 통합 (별도 라운드 — .mjs ↔ ts 빌드 경로).
-- ❌ Multi-mode (`entries[]` 의 두 번째 이상 entry) chain. 첫 entry 만.
-- ❌ Inspector UI 변경 — 본 라운드는 도메인 헬퍼 추가만. round 15 의 single-hop 라벨 표시는 그대로.
-- ❌ leaf 의 raw color 변환 (rgba CSS string 등). leaf 노드 자체만 반환.
+- ❌ Integrating the helper into audit-properties-coverage.mjs (separate round — the .mjs ↔ ts build path).
+- ❌ Multi-mode chains (the 2nd+ entries of `entries[]`). First entry only.
+- ❌ Inspector UI changes — this round adds the domain helper only. Round 15's single-hop label display remains.
+- ❌ Converting the leaf's raw color (e.g. to an rgba CSS string). Returns the leaf node itself only.
 
-## 7. 참조
+## 7. References
 
 - `docs/specs/archive/web-render-fidelity-round15.spec.md` §I-3 (single hop policy)
-- `docs/specs/audit-raw-coverage.spec.md` §4.2 I-P6 (audit broken-chain 정의)
+- `docs/specs/audit-raw-coverage.spec.md` §4.2 I-P6 (audit broken-chain definition)

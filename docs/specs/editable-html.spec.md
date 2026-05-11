@@ -1,160 +1,160 @@
 # spec/editable-html
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved (Iteration 10) |
-| 책임 모듈 | `src/editable-html.ts` (신규) |
-| 의존 | `src/tree.ts`, `src/normalize.ts`, `src/assets.ts`, `src/intermediate.ts` |
-| 테스트 | `test/editable-html.test.ts` |
-| 부모 SPEC | [SPEC-roundtrip §3.3, §3.5 Tier A](../SPEC-roundtrip.md) |
-| 의존 spec | [text-segments.spec.md](./text-segments.spec.md) — TEXT 노드 처리 |
+| Status | Approved (Iteration 10) |
+| Owner module | `src/editable-html.ts` (new) |
+| Dependencies | `src/tree.ts`, `src/normalize.ts`, `src/assets.ts`, `src/intermediate.ts` |
+| Tests | `test/editable-html.test.ts` |
+| Parent SPEC | [SPEC-roundtrip §3.3, §3.5 Tier A](../SPEC-roundtrip.md) |
+| Dependency spec | [text-segments.spec.md](./text-segments.spec.md) — TEXT node handling |
 
-## 1. 목적
+## 1. Goal
 
-Figma 트리(`BuildTreeResult`) + 에셋(이미지/SVG) → **편집 가능 HTML** (`figma.editable.html`) 생성. **Tier A** (HTML 인라인) 필드만 처리. Tier B는 [sidecar-meta.spec.md](./sidecar-meta.spec.md) 별도.
+From a Figma tree (`BuildTreeResult`) + assets (images/SVGs), generate the **editable HTML** (`figma.editable.html`). Handles only **Tier A** (HTML-inlined) fields. Tier B is separate; see [sidecar-meta.spec.md](./sidecar-meta.spec.md).
 
-## 2. 입력
+## 2. Input
 
 ```ts
 interface EditableHtmlInputs {
-  tree: BuildTreeResult;          // 빌드된 노드 트리 (35,660 노드)
-  decoded: DecodedFig;            // schema, message (raw blobs 참조용)
+  tree: BuildTreeResult;          // built node tree (35,660 nodes)
+  decoded: DecodedFig;            // schema, message (for raw blob references)
   container: ContainerResult;     // meta.json, images Map
-  outputDir: string;              // assets/ 출처 (기존 output/)
-  htmlOutDir: string;             // 출력 디렉토리 (기본: extracted/07_editable/)
+  outputDir: string;              // assets/ source (existing output/)
+  htmlOutDir: string;             // output directory (default: extracted/07_editable/)
   options?: {
     singleFile?: boolean;         // default false (Decision D-2)
-    cssExternal?: boolean;        // default true (디렉토리 모드)
-    includeRawAttrs?: boolean;    // default false (raw 필드는 sidecar로)
+    cssExternal?: boolean;        // default true (directory mode)
+    includeRawAttrs?: boolean;    // default false (raw fields go to sidecar)
   };
 }
 ```
 
-## 3. 출력
+## 3. Output
 
-디렉토리 모드 (default):
+Directory mode (default):
 ```
 <htmlOutDir>/
-├── figma.editable.html        ← 본 spec 책임
-├── figma.editable.css         ← 본 spec 책임
-└── README.md                  ← 본 spec 책임 (편집 가이드)
+├── figma.editable.html        ← this spec's responsibility
+├── figma.editable.css         ← this spec's responsibility
+└── README.md                  ← this spec's responsibility (editing guide)
 ```
 
-(figma.editable.meta.js와 assets/는 다른 spec/모듈 책임)
+(figma.editable.meta.js and assets/ belong to other specs/modules.)
 
-각 파일 형식은 §4의 invariant 만족.
+Each file's format satisfies the invariants in §4.
 
 ## 4. Invariants
 
-### I-1 GUID 1:1 매핑
+### I-1 GUID 1:1 mapping
 
-모든 `tree.allNodes`의 GUID는 출력 HTML 안에 정확히 1개의 element로 등장한다.
+Every GUID in `tree.allNodes` appears as exactly one element in the output HTML.
 
 ```
 ∀ guid ∈ tree.allNodes:
    |document.querySelectorAll(`[data-figma-id="${guid}"]`)| === 1
 ```
 
-### I-2 Parent-child DOM 보존
+### I-2 Parent-child DOM preservation
 
-각 노드의 부모-자식 관계가 HTML DOM의 부모-자식 관계와 일치한다. CANVAS의 직속 자식들은 페이지 안에 배치되며, 트리 깊이가 보존된다.
+Each node's parent-child relationship matches the DOM parent-child relationship. A CANVAS's direct children are placed within the page, and tree depth is preserved.
 
 ```
 ∀ child ∈ tree.allNodes, child.parentGuid !== null:
    parentEl(child) === htmlElementOf(child.parentGuid)
 ```
 
-### I-3 형제 순서 = position 순서
+### I-3 Sibling order = position order
 
-같은 부모 아래 형제 element들의 DOM 순서가 `parentIndex.position` 문자열 순서와 일치한다 (fractional indexing).
+Among siblings under the same parent, DOM ordering matches the `parentIndex.position` string order (fractional indexing).
 
 ```
 ∀ siblings ∈ same parent, sorted by position:
    indexInDom(s_i) < indexInDom(s_{i+1})
 ```
 
-### I-4 Tier A 필드의 CSS 표현
+### I-4 CSS representation of Tier A fields
 
-[SPEC-roundtrip §3.5 Tier A 표](../SPEC-roundtrip.md#35-편집-가능-영역-표--모든-raw-필드-편집-가능--decision-d-1)의 모든 필드가 element의 inline style 또는 data-* 속성으로 표현된다.
+Every field in the [SPEC-roundtrip §3.5 Tier A table](../SPEC-roundtrip.md#35-editable-area-table--all-raw-fields-editable--decision-d-1) is represented as the element's inline style or a data-* attribute.
 
-핵심:
+Highlights:
 - `size.x`, `size.y` → CSS `width`, `height` (px)
-- `transform` (m02, m12) → CSS `left`, `top` (px); m00, m01, m10, m11이 identity가 아니면 `transform: matrix(...)` 추가
+- `transform` (m02, m12) → CSS `left`, `top` (px); if m00, m01, m10, m11 are not identity, also add `transform: matrix(...)`
 - `opacity` → CSS `opacity`
 - `visible: false` → CSS `display: none`
-- `cornerRadius` (또는 `cornerRadii` 4개) → CSS `border-radius`
+- `cornerRadius` (or the 4 `cornerRadii`) → CSS `border-radius`
 - `fillPaints[0].type=SOLID` → `background-color`
 - `fillPaints[0].type=IMAGE` → `background-image: url(assets/images/<hash>.<ext>)`
-- `fillPaints[0].type=GRADIENT_*` → `background: linear-gradient(...)` 등 (best-effort)
+- `fillPaints[0].type=GRADIENT_*` → `background: linear-gradient(...)` and similar (best-effort)
 - `strokePaints[0].color` + `strokeWeight` → `border-color`, `border-width`, `border-style: solid`
 - `effects[]` → CSS `box-shadow` (DROP_SHADOW), `filter: blur` (LAYER_BLUR), `backdrop-filter: blur` (BACKGROUND_BLUR)
 - `blendMode` → CSS `mix-blend-mode`
-- TEXT 노드는 [text-segments.spec.md](./text-segments.spec.md) 따라 `<span>` 분할
+- TEXT nodes follow [text-segments.spec.md](./text-segments.spec.md) and split into `<span>`s
 
-### I-5 data-figma-* 속성 보존
+### I-5 data-figma-* attribute preservation
 
-다음 attribute는 모든 element에 항상 존재:
-- `data-figma-id` (GUID 문자열 "S:L")
-- `data-figma-type` (Figma 노드 타입)
-- `data-figma-position` (parentIndex.position 문자열, document·orphan은 null)
+The following attributes are always present on every element:
+- `data-figma-id` (GUID string "S:L")
+- `data-figma-type` (Figma node type)
+- `data-figma-position` (parentIndex.position string; null for document / orphan)
 
-선택적:
-- `data-figma-name` (노드 이름이 있을 때)
-- `data-figma-editable` (편집 가능 필드 공백 구분 리스트)
-- `data-figma-blob-refs` (참조하는 blob 인덱스 JSON 배열, 있을 때)
+Optional:
+- `data-figma-name` (when the node name is present)
+- `data-figma-editable` (whitespace-separated list of editable fields)
+- `data-figma-blob-refs` (JSON array of blob indices referenced, when present)
 
-### I-6 결정성
+### I-6 Determinism
 
-같은 입력 → 같은 출력. 타임스탬프 외 모든 byte 동등.
+Same input → same output. Byte-identical except timestamps.
 
 ```
 sha256(generate(input)) === sha256(generate(input))
 ```
 
-(문서 head의 `<meta name="generated-at">` 같은 타임스탬프 필드는 명시 제외)
+(Timestamp fields like `<meta name="generated-at">` in the document head are explicitly excluded.)
 
-### I-7 호환 메타
+### I-7 Compatibility metadata
 
-HTML `<body>` 또는 `<html>`에 다음 정보 포함 (sidecar 동기화용):
-- `data-figma-roundtrip="v2"` (포맷 버전)
-- `data-figma-archive-version` (예: "106")
-- `data-figma-source-fig-sha256` (원본 .fig sha)
-- `data-figma-schema-sha256` (schema 바이너리 sha)
+The HTML `<body>` or `<html>` contains the following information (for sidecar sync):
+- `data-figma-roundtrip="v2"` (format version)
+- `data-figma-archive-version` (e.g. "106")
+- `data-figma-source-fig-sha256` (sha of the source .fig)
+- `data-figma-schema-sha256` (sha of the schema binary)
 
-### I-8 페이지 구조
+### I-8 Page structure
 
-각 CANVAS 노드는 `<section class="fig-page">`로 표현된다. CANVAS는 페이지 단위 시각 컨테이너로 동작한다 (background, 사이즈 등).
+Each CANVAS node is represented as `<section class="fig-page">`. CANVAS acts as the per-page visual container (background, size, etc.).
 
-### I-9 알 수 없는 노드 타입 보존
+### I-9 Preservation of unknown node types
 
-[text-segments.spec.md](./text-segments.spec.md), [SPEC-roundtrip §3.3](../SPEC-roundtrip.md)에 명시되지 않은 타입(`VARIABLE_SET`, `BRUSH`, `CODE_LIBRARY` 등)은 `<div class="fig-unknown" data-figma-type="...">`로 표현하되 raw는 sidecar로 보존.
+Types not listed in [text-segments.spec.md](./text-segments.spec.md) or [SPEC-roundtrip §3.3](../SPEC-roundtrip.md) (`VARIABLE_SET`, `BRUSH`, `CODE_LIBRARY`, etc.) are represented as `<div class="fig-unknown" data-figma-type="...">`, with raw preserved in the sidecar.
 
-### I-10 단일 파일 모드 (옵션)
+### I-10 Single-file mode (option)
 
-`options.singleFile === true` 시 CSS와 sidecar(다른 모듈)가 inline `<style>`/`<script>` 블록으로 합쳐짐.
+When `options.singleFile === true`, CSS and the sidecar (other module) are merged into inline `<style>` / `<script>` blocks.
 
 ## 5. Error Cases
 
-- E-1: `tree.document === null` → throw `Error("editable-html: no DOCUMENT root")`. 빈 .fig는 미지원.
-- E-2: `htmlOutDir` 작성 권한 없음 → throw (Node fs 에러 그대로 전파)
-- E-3: 알 수 없는 paint type → CSS 무시, console.warn (`<style>` 비우고 raw는 sidecar에)
-- E-4: 매우 깊은 트리 (재귀 깊이 > 1000) → throw `Error("editable-html: tree too deep")` (현재 sample은 ~10 정도)
-- E-5: 같은 GUID 중복 (트리에서 안 일어나야 하나 방어) → throw
+- E-1: `tree.document === null` → throw `Error("editable-html: no DOCUMENT root")`. Empty .fig is not supported.
+- E-2: No write permission on `htmlOutDir` → throw (propagates the Node fs error as-is).
+- E-3: Unknown paint type → ignore in CSS, log via console.warn (leave `<style>` empty; raw goes to sidecar).
+- E-4: Very deep tree (recursion depth > 1000) → throw `Error("editable-html: tree too deep")` (current samples are ~10 deep).
+- E-5: Duplicate GUID (should not happen in a tree, but defensively) → throw.
 
 ## 6. Out of Scope
 
-- O-1: Sidecar JSON 생성 — [sidecar-meta.spec.md](./sidecar-meta.spec.md)
-- O-2: HTML → message 역변환 — [html-to-message.spec.md](./html-to-message.spec.md)
-- O-3: 노드 추가 (D-4) — v3
-- O-4: CSS Flexbox/Grid 자동 변환 — v3
-- O-5: 시각 100% Figma 렌더와 동등 — best-effort
-- O-6: 매우 큰 페이지 (예: WEB 29,029 노드) lazy load — v2 default는 단일 페이지 inline; lazy load는 후속 개선
-- O-7: 인터랙션 / 애니메이션 시각화 (Figma prototype) — Tier B sidecar 보존만
-- O-8: TEXT segment 변환 → [text-segments.spec.md](./text-segments.spec.md)
+- O-1: Sidecar JSON generation — [sidecar-meta.spec.md](./sidecar-meta.spec.md).
+- O-2: HTML → message reverse conversion — [html-to-message.spec.md](./html-to-message.spec.md).
+- O-3: Node addition (D-4) — v3.
+- O-4: Automatic CSS Flexbox/Grid conversion — v3.
+- O-5: 100% visual parity with Figma rendering — best-effort only.
+- O-6: Lazy loading of very large pages (e.g. the WEB 29,029-node case) — v2 default is single-page inline; lazy loading is a follow-up improvement.
+- O-7: Interaction / animation visualization (Figma prototype) — only Tier B sidecar preservation.
+- O-8: TEXT segment conversion → [text-segments.spec.md](./text-segments.spec.md).
 
-## 7. 참조
+## 7. References
 
-- 부모: [SPEC-roundtrip.md](../SPEC-roundtrip.md) §3 (HTML 형식)
-- 메서드론: [SDD.md](../SDD.md), [HARNESS.md](../HARNESS.md)
-- 기존: `src/normalize.ts` (Tier A 표현 일부), `src/assets.ts`
-- 형제: [sidecar-meta.spec.md](./sidecar-meta.spec.md), [text-segments.spec.md](./text-segments.spec.md)
+- Parent: [SPEC-roundtrip.md](../SPEC-roundtrip.md) §3 (HTML format).
+- Methodology: [SDD.md](../SDD.md), [HARNESS.md](../HARNESS.md).
+- Existing: `src/normalize.ts` (partial Tier A representation), `src/assets.ts`.
+- Siblings: [sidecar-meta.spec.md](./sidecar-meta.spec.md), [text-segments.spec.md](./text-segments.spec.md).

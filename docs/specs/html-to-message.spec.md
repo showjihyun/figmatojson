@@ -1,76 +1,76 @@
 # spec/html-to-message
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved (Iteration 10) |
-| 책임 모듈 | `src/html-to-message.ts` (신규) |
-| 의존 | `src/decoder.ts` (schema), `src/assets.ts::hashToHex`, htmlparser2 (parsing) |
-| 테스트 | `test/html-to-message.test.ts` |
-| 부모 SPEC | [SPEC-roundtrip §4](../SPEC-roundtrip.md) |
-| 의존 spec | [text-segments.spec.md](./text-segments.spec.md), [parent-index-position.spec.md](./parent-index-position.spec.md) |
+| Status | Approved (Iteration 10) |
+| Owner module | `src/html-to-message.ts` (new) |
+| Dependencies | `src/decoder.ts` (schema), `src/assets.ts::hashToHex`, htmlparser2 (parsing) |
+| Tests | `test/html-to-message.test.ts` |
+| Parent SPEC | [SPEC-roundtrip §4](../SPEC-roundtrip.md) |
+| Dependency specs | [text-segments.spec.md](./text-segments.spec.md), [parent-index-position.spec.md](./parent-index-position.spec.md) |
 
-## 1. 목적
+## 1. Goal
 
-편집 가능 HTML(`figma.editable.html`) + sidecar(`figma.editable.meta.js`) → 갱신된 KiwiMessage 객체. 이 객체를 `kiwi.compileSchema(schema).encodeMessage(msg)`에 입력하면 새 .fig 생성 가능.
+From the editable HTML (`figma.editable.html`) + sidecar (`figma.editable.meta.js`), produce an updated KiwiMessage object. Pass that object to `kiwi.compileSchema(schema).encodeMessage(msg)` to generate a new .fig.
 
-## 2. 입력
+## 2. Input
 
 ```ts
 interface HtmlToMessageInputs {
-  htmlPath: string;               // figma.editable.html 경로
-  sidecarPath?: string;           // figma.editable.meta.js (기본: htmlPath 같은 디렉토리)
-  schema: kiwi.Schema;            // 원본 .fig의 schema (추출에서 가져옴)
+  htmlPath: string;               // path to figma.editable.html
+  sidecarPath?: string;           // figma.editable.meta.js (default: same directory as htmlPath)
+  schema: kiwi.Schema;            // schema of the source .fig (taken from extraction)
   options?: {
-    strict?: boolean;             // default true. 형식 깨지면 즉시 에러 vs warning만
-    onUnknownElement?: 'ignore' | 'preserve' | 'error';  // default 'preserve' — sidecar에 있던 raw 보존
+    strict?: boolean;             // default true. fail fast on format error vs warning only
+    onUnknownElement?: 'ignore' | 'preserve' | 'error';  // default 'preserve' — preserve raw from sidecar
   };
 }
 ```
 
-## 3. 출력
+## 3. Output
 
 ```ts
 interface HtmlToMessageResult {
-  message: KiwiMessage;           // 갱신된 nodeChanges 포함
+  message: KiwiMessage;           // updated nodeChanges included
   stats: {
-    nodesTotal: number;           // 총 노드 수 (원본 + 변경)
-    nodesEditedTierA: number;     // HTML에서 변경된 노드
-    nodesEditedTierB: number;     // sidecar에서 변경된 노드
-    nodesRemoved: number;         // DOM에 없는 (REMOVED phase)
-    nodesAddedAttempted: number;  // DOM에 새로 추가 (v2 미지원이므로 0이어야 — D-4)
-    warnings: string[];           // 손실 가능 요소 (예: 알 수 없는 paint type)
+    nodesTotal: number;           // total nodes (original + changed)
+    nodesEditedTierA: number;     // nodes edited via HTML
+    nodesEditedTierB: number;     // nodes edited via sidecar
+    nodesRemoved: number;         // missing from DOM (REMOVED phase)
+    nodesAddedAttempted: number;  // newly added in DOM (must be 0 — D-4 not supported in v2)
+    warnings: string[];           // potentially-lossy items (e.g. unknown paint type)
   };
 }
 ```
 
 ## 4. Invariants
 
-### I-1 GUID 보존 100%
+### I-1 100% GUID preservation
 
-원본 sidecar의 GUID 집합이 결과 message에 모두 등장 (REMOVED 포함).
+Every GUID in the original sidecar appears in the result message (including REMOVED).
 
 ```
 ∀ guid ∈ sidecar.nodes:
-   ∃ nc ∈ message.nodeChanges, nc.guid의 string === guid
+   ∃ nc ∈ message.nodeChanges, string of nc.guid === guid
 ```
 
-### I-2 노드 추가 거부 (D-4)
+### I-2 Reject node additions (D-4)
 
-DOM에 `data-figma-id` 없는 element가 있으면:
+If an element in DOM lacks `data-figma-id`:
 - `options.onUnknownElement === 'error'` → throw
-- `'preserve'` (default) → warning만, 결과 message에 추가하지 않음
+- `'preserve'` (default) → warning only, not added to the result message
 - `'ignore'` → silent skip
 
 ```
-options.strict === true ∧ data-figma-id 없는 element 존재
-   ⇒ throw 또는 warning에 명시
+options.strict === true ∧ element without data-figma-id exists
+   ⇒ throw or include in warnings explicitly
 ```
 
-(v3에서 노드 추가 지원 시 본 invariant 변경)
+(This invariant changes once v3 supports node addition.)
 
-### I-3 Tier A > Tier B 우선
+### I-3 Tier A > Tier B priority
 
-HTML에 표현된 필드가 sidecar 값과 다르면 HTML 값 사용.
+If a field represented in HTML differs from the sidecar value, the HTML value wins.
 
 ```
 ∀ guid, ∀ field ∈ Tier A:
@@ -78,9 +78,9 @@ HTML에 표현된 필드가 sidecar 값과 다르면 HTML 값 사용.
    ⇒ result.nodes[guid][field] === tierAValue
 ```
 
-### I-4 미편집 노드 byte-level 동등
+### I-4 Byte-level equality for untouched nodes
 
-사용자가 편집 안 한 노드는 raw 필드가 원본과 byte-level 동등.
+Nodes the user did not edit keep raw fields byte-identical to the original.
 
 ```
 ∀ guid, ∀ field:
@@ -89,22 +89,22 @@ HTML에 표현된 필드가 sidecar 값과 다르면 HTML 값 사용.
    ⇒ result.nodes[guid][field] === original.nodes[guid][field]
 ```
 
-### I-5 Tier C 자동 설정
+### I-5 Tier C auto-population
 
-도구가 자동 설정:
-- `guid`: HTML element의 `data-figma-id`로 복원 (`"S:L"` → `{sessionID:S, localID:L}`)
-- `parentIndex.guid`: HTML 부모 element의 `data-figma-id`
-- `parentIndex.position`: DOM 형제 순서로 재계산 — [parent-index-position.spec.md](./parent-index-position.spec.md) 따라
+The tool automatically populates:
+- `guid`: restored from HTML element's `data-figma-id` (`"S:L"` → `{sessionID:S, localID:L}`)
+- `parentIndex.guid`: HTML parent element's `data-figma-id`
+- `parentIndex.position`: recomputed from DOM sibling order — see [parent-index-position.spec.md](./parent-index-position.spec.md)
 - `phase`:
-  - DOM에 있고 sidecar에 있음 → 원본 phase 유지 (보통 `CREATED`)
-  - DOM에 있고 sidecar에 없음 → `CREATED` (v3 노드 추가)
-  - DOM에 없고 sidecar에 있음 → `REMOVED`
+  - Present in DOM and in sidecar → keep original phase (usually `CREATED`)
+  - Present in DOM but missing from sidecar → `CREATED` (v3 node addition)
+  - Missing from DOM but present in sidecar → `REMOVED`
 
-### I-6 CSS 역변환 룰
+### I-6 CSS reverse-conversion rules
 
-[SPEC-roundtrip §4.2](../SPEC-roundtrip.md)의 모든 매핑이 양방향.
+All mappings in [SPEC-roundtrip §4.2](../SPEC-roundtrip.md) are bidirectional.
 
-핵심:
+Highlights:
 - `width: Npx` → `size.x = N`
 - `height: Npx` → `size.y = N`
 - `left: Xpx; top: Ypx` → `transform.m02 = X; m12 = Y`
@@ -113,62 +113,62 @@ HTML에 표현된 필드가 sidecar 값과 다르면 HTML 값 사용.
 - `background-color: transparent` → `fillPaints = []`
 - `opacity: O` → `opacity = O`
 - `display: none` → `visible = false`
-- `border-radius: Rpx` → `cornerRadius = R` (또는 cornerRadii 4개 분리)
+- `border-radius: Rpx` → `cornerRadius = R` (or split into 4 cornerRadii)
 - `border: Wpx solid color` → `strokePaints[0] = {type:'SOLID', color}; strokeWeight = W`
-- `box-shadow: X Y B [S] color [inset]` → `effects[]` (DROP_SHADOW 또는 INNER_SHADOW)
+- `box-shadow: X Y B [S] color [inset]` → `effects[]` (DROP_SHADOW or INNER_SHADOW)
 - `filter: blur(Npx)` → `effects[] += {type:'LAYER_BLUR', radius:N}`
 - `backdrop-filter: blur(Npx)` → `effects[] += {type:'BACKGROUND_BLUR', radius:N}`
 - `mix-blend-mode: X` → `blendMode = X.toUpperCase()`
 - `font-size: Npx` → TEXT `fontSize = N`
-- `font-family: F1, F2, ...` → TEXT `fontName.family = F1` (첫 family)
+- `font-family: F1, F2, ...` → TEXT `fontName.family = F1` (first family)
 - `color: rgba(...)` → TEXT `fillPaints[0].color`
 - `text-align: X` → `textAlignHorizontal = X.toUpperCase()`
-- TEXT 노드 segment → [text-segments.spec.md](./text-segments.spec.md) 룰
+- TEXT node segments → rules in [text-segments.spec.md](./text-segments.spec.md)
 
-### I-7 SVG path → commandsBlob 재인코딩 (best-effort)
+### I-7 SVG path → commandsBlob re-encoding (best-effort)
 
-`<svg><path d="..."/></svg>`의 `d` 속성이 변경된 경우, path command 파싱 → commandsBlob byte stream 재생성.
+When the `d` attribute on `<svg><path d="..."/></svg>` changes, parse the path commands → regenerate the commandsBlob byte stream.
 
-성공 시: blob 갱신, message 그대로.
-실패 시 (지원 안 되는 SVG path 명령): warning + 원본 commandsBlob 보존.
+On success: blob updated, message preserved.
+On failure (unsupported SVG path command): warning + keep the original commandsBlob.
 
 ```
 SVG path 'M0 0 L10 10' → bytes [0x01, 0x00*8, 0x02, 0x00*4, 0x41200000*2 ...]
 ```
 
-상세 매핑은 본 spec 부록 A 참조.
+See Appendix A in this spec for the detailed mapping.
 
-### I-8 message 최상위 보존
+### I-8 Top-level message preservation
 
-`message.type`, `message.sessionID`, `message.ackID` 등 top-level 필드는 sidecar의 `__meta` + `message`에서 복원.
+`message.type`, `message.sessionID`, `message.ackID`, and other top-level fields are restored from the sidecar's `__meta` + `message`.
 
-### I-9 결정성
+### I-9 Determinism
 
-같은 HTML + sidecar → 같은 message (byte-level).
+Same HTML + sidecar → same message (byte-level).
 
 ## 5. Error Cases
 
-| ID | 조건 | 행동 |
+| ID | Condition | Behavior |
 |---|---|---|
-| E-1 | HTML 파싱 실패 (malformed) | throw `Error("html-to-message: parse error at line N")` |
-| E-2 | sidecar 로드 실패 (`window.FIGMA_RAW` 없음) | throw |
-| E-3 | sidecar의 `__meta.archiveVersion` !== schema 호환 archiveVersion | throw `"version mismatch"` |
-| E-4 | data-figma-id 형식 불량 (예: "abc") | strict면 throw, 아니면 skip + warning |
-| E-5 | 부모-자식 cycle (HTML이 어떻게든 깨진 경우) | throw |
-| E-6 | sibling position 재계산 실패 | throw, [parent-index-position.spec.md](./parent-index-position.spec.md) 참조 |
-| E-7 | TEXT segment 형식 불량 (`<span data-style-id="...">`가 깨짐) | strict면 throw, 아니면 plain text fallback + warning |
-| E-8 | CSS 값 파싱 실패 (예: `width: NaN`) | warning, 원본 값 유지 |
+| E-1 | HTML parse failed (malformed) | throw `Error("html-to-message: parse error at line N")` |
+| E-2 | Sidecar load failed (no `window.FIGMA_RAW`) | throw |
+| E-3 | Sidecar `__meta.archiveVersion` does not match schema-compatible archiveVersion | throw `"version mismatch"` |
+| E-4 | Malformed data-figma-id (e.g. "abc") | throw under strict, otherwise skip + warning |
+| E-5 | Parent-child cycle (somehow broken HTML) | throw |
+| E-6 | Sibling position recomputation failed | throw, see [parent-index-position.spec.md](./parent-index-position.spec.md) |
+| E-7 | Malformed TEXT segment (`<span data-style-id="...">` broken) | throw under strict, otherwise plain-text fallback + warning |
+| E-8 | CSS value parse failure (e.g. `width: NaN`) | warning, keep original value |
 
 ## 6. Out of Scope
 
-- O-1: HTML 생성 — [editable-html.spec.md](./editable-html.spec.md)
-- O-2: 노드 추가 (D-4) — v3
-- O-3: kiwi encode + 압축 + ZIP 패키징 — `repack.ts` 재사용 (별도 단계)
-- O-4: schema 자체 변경 — schema는 input으로 받고 그대로 사용
-- O-5: 사용자가 schema 외 type 추가 — 무시 또는 strict 시 error
-- O-6: blob 의미 변경 (commandsBlob 외 어떤 blob의 byte 직접 수정) — sidecar에서 byte 수정한 경우만 반영, 의미 검증은 안 함
+- O-1: HTML generation — [editable-html.spec.md](./editable-html.spec.md).
+- O-2: Node addition (D-4) — v3.
+- O-3: kiwi encode + compression + ZIP packaging — reuse `repack.ts` (separate step).
+- O-4: Schema modification — schema is taken as input and used as-is.
+- O-5: User-introduced types outside the schema — ignored, or error under strict.
+- O-6: Blob semantics changes (raw byte edits to blobs other than commandsBlob) — applied only when bytes were edited in the sidecar; semantic validation is not performed.
 
-## 7. 부록 A — SVG path → commandsBlob 매핑
+## 7. Appendix A — SVG path → commandsBlob mapping
 
 | SVG command | commandsBlob byte | float32 args |
 |---|---|---|
@@ -178,13 +178,13 @@ SVG path 'M0 0 L10 10' → bytes [0x01, 0x00*8, 0x02, 0x00*4, 0x41200000*2 ...]
 | `Q cx cy x y` | 0x04 | 4 floats |
 | `Z` | 0x05 | (none) |
 
-지원 안 됨 (warning):
-- `H`, `V` (수평·수직만) — `L`로 변환 가능, 예외 없이 변환
-- `S`, `T` (smooth) — 직전 control point 추정해 `C`/`Q`로 변환
-- `A` (arc) — best-effort: arc → cubic Bezier 근사
+Not supported (warning):
+- `H`, `V` (horizontal/vertical only) — convertible to `L`; converted without exception.
+- `S`, `T` (smooth) — infer the previous control point, convert to `C`/`Q`.
+- `A` (arc) — best-effort: arc → cubic Bezier approximation.
 
-## 8. 참조
+## 8. References
 
-- 부모: [SPEC-roundtrip §4](../SPEC-roundtrip.md)
-- 형제: [editable-html.spec.md](./editable-html.spec.md), [sidecar-meta.spec.md](./sidecar-meta.spec.md)
-- 의존: [text-segments.spec.md](./text-segments.spec.md), [parent-index-position.spec.md](./parent-index-position.spec.md)
+- Parent: [SPEC-roundtrip §4](../SPEC-roundtrip.md).
+- Siblings: [editable-html.spec.md](./editable-html.spec.md), [sidecar-meta.spec.md](./sidecar-meta.spec.md).
+- Dependencies: [text-segments.spec.md](./text-segments.spec.md), [parent-index-position.spec.md](./parent-index-position.spec.md).

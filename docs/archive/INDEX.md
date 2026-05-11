@@ -1,7 +1,7 @@
 # Archived top-level docs
 
-이미 closed 된 phase 문서. 본 디렉토리는 historical reference 용으로만 보존.
+Documents for phases that are already closed. This directory is retained for historical reference only.
 
-| 문서 | 내용 | 후속 |
+| Document | Contents | Follow-up |
 |---|---|---|
-| [PHASE-0-FOUNDATION.md](./PHASE-0-FOUNDATION.md) | 초기 phase-0 (CLI 9 단계 파이프라인 부트스트랩) 의 foundational scope 정의 | [`docs/SPEC.md`](../SPEC.md) v1 구현 완료, [`docs/SPEC-architecture.md`](../SPEC-architecture.md) round-25 까지 진화 |
+| [PHASE-0-FOUNDATION.md](./PHASE-0-FOUNDATION.md) | Foundational scope definition of the initial phase-0 (bootstrapping the 9-stage CLI pipeline) | [`docs/SPEC.md`](../SPEC.md) v1 implementation complete; [`docs/SPEC-architecture.md`](../SPEC-architecture.md) has evolved through round-25 |

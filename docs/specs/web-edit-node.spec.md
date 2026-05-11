@@ -1,15 +1,15 @@
 # spec/web-edit-node
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved (Phase 7) |
-| 구현 | `web/core/application/EditNode.ts` |
-| 테스트 | `web/core/application/EditNode.test.ts` |
-| 부모 | [docs/SPEC-architecture.md](../SPEC-architecture.md) |
+| Status | Approved (Phase 7) |
+| Implementation | `web/core/application/EditNode.ts` |
+| Tests | `web/core/application/EditNode.test.ts` |
+| Parent | [docs/SPEC-architecture.md](../SPEC-architecture.md) |
 
-## 1. 목적
+## 1. Purpose
 
-세션의 단일 노드에서 임의 필드를 PATCH한다. 수정은 `extracted/04_decoded/message.json`(repack source-of-truth)에 즉시 기록되며, 클라이언트가 새로 fetch하지 않아도 다음 `GET /api/doc/:id` 가 변경을 보도록 in-memory documentJson에도 동시 반영한다.
+PATCH an arbitrary field on a single node within a session. The edit is written immediately to `extracted/04_decoded/message.json` (the repack source-of-truth) and is also applied to the in-memory documentJson so that the next `GET /api/doc/:id` sees the change without the client having to re-fetch.
 
 ## 2. Input / Output
 
@@ -18,32 +18,32 @@ input  = { sessionId: string, nodeGuid: string, field: string, value: unknown }
 output = { ok: true }
 ```
 
-`field` 는 도트/브래킷 경로 (`textData.characters`, `fillPaints[0].color.r`).
+`field` is a dot/bracket path (`textData.characters`, `fillPaints[0].color.r`).
 
 ## 3. Invariants
 
-- I-1 PATCH 후 `extracted/04_decoded/message.json`을 다시 디코드하면 새 `value`가 `field` 위치에 존재
-- I-2 `session.documentJson` 트리에서 동일 GUID 노드를 찾으면 같은 `value`가 같은 `field` 위치에 존재
-- I-3 `field === 'textData.characters'` 이고 `value`가 string이면, 트리 내 모든 INSTANCE의 `_componentTexts[]` 중 `guid === nodeGuid` 인 항목의 `characters` 가 새 값으로 갱신됨 (인스펙터의 component-text 패널이 재로드 없이 갱신된다)
-- I-4 message.json의 다른 노드/필드는 변경되지 않음 (단일 노드 단일 필드 변경)
-- I-5 `field === 'textData.characters'` 이고 `value`가 string이면, **Figma 의 사전 계산 layout cache 가 무효화**되어야 한다 — 그렇지 않으면 Figma 가 import 시 stale cache 를 우선해 *변경된 값이 적용 안 된 채로 로드*. 구체적으로:
-  - 편집된 노드 자체의 `textData.{glyphs, baselines, derivedLines, fontMetaData, layoutSize, minContentHeight, truncatedHeight, truncationStartIndex, logicalIndexToCharacterOffsetMap, decorations, blockquotes, hyperlinkBoxes, mentionBoxes, fallbackFonts}` 모두 제거 (`web/core/domain/textInvalidation.ts:invalidateTextLayoutCache`)
-  - 같은 노드의 직접 필드 `derivedTextData` 제거
-  - `textData.characterStyleIDs` 길이를 새 `characters.length` 와 동기화 (짧으면 truncate, 길면 마지막 style index 로 pad — kiwi 인코드의 run mismatch 방지)
-  - 모든 INSTANCE 노드의 `derivedSymbolData[]` 에서 `guidPath.guids[last] === nodeGuid` 인 entry 제거 (`pruneInstanceDerivedTextData`) — Figma 가 import 시 per-instance bake 를 재계산
+- I-1 After PATCH, re-decoding `extracted/04_decoded/message.json` shows the new `value` at the `field` location
+- I-2 If the same GUID node is located in the `session.documentJson` tree, the same `value` is present at the same `field` location
+- I-3 If `field === 'textData.characters'` and `value` is a string, then for every INSTANCE in the tree, the `_componentTexts[]` entry whose `guid === nodeGuid` has its `characters` updated to the new value (the inspector's component-text panel refreshes without a reload)
+- I-4 No other node or field in message.json is changed (single-node single-field change)
+- I-5 If `field === 'textData.characters'` and `value` is a string, **Figma's precomputed layout cache must be invalidated** — otherwise Figma will prefer the stale cache on import and *load with the change unapplied*. Specifically:
+  - Remove all of the edited node's own `textData.{glyphs, baselines, derivedLines, fontMetaData, layoutSize, minContentHeight, truncatedHeight, truncationStartIndex, logicalIndexToCharacterOffsetMap, decorations, blockquotes, hyperlinkBoxes, mentionBoxes, fallbackFonts}` (`web/core/domain/textInvalidation.ts:invalidateTextLayoutCache`)
+  - Remove the same node's direct `derivedTextData` field
+  - Sync the length of `textData.characterStyleIDs` to the new `characters.length` (truncate if shorter, pad with the last style index if longer — prevents run mismatches in kiwi encoding)
+  - In every INSTANCE node, remove entries from `derivedSymbolData[]` where `guidPath.guids[last] === nodeGuid` (`pruneInstanceDerivedTextData`) — forces Figma to recompute the per-instance bake on import
 
 ## 4. Error cases
 
-- 세션 미존재 → `NotFoundError(\`session \${id} not found\`)`
-- 노드 미존재 → `NotFoundError(\`node \${guid} not found\`)`
-- `field` 가 빈 문자열 → `ValidationError('empty field path')`
+- Session not found → `NotFoundError(\`session \${id} not found\`)`
+- Node not found → `NotFoundError(\`node \${guid} not found\`)`
+- `field` is an empty string → `ValidationError('empty field path')`
 
-## 5. 비대상
+## 5. Out of scope
 
-- 트랜잭션/롤백 (단일 mutation)
-- 다중 필드 batch (호출자가 N번 호출)
-- 타입 검증 (서버는 `value`를 그대로 둠 — 호출자 책임)
+- Transactions / rollback (single mutation)
+- Multi-field batch (caller invokes N times)
+- Type validation (the server keeps `value` as-is — caller's responsibility)
 
-## 6. 라우팅 결합
+## 6. Routing coupling
 
 `PATCH /api/doc/:id`. body = `{nodeGuid, field, value}`.

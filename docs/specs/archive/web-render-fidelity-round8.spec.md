@@ -1,19 +1,19 @@
 # spec/web-render-fidelity-round8
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/client/src/Canvas.tsx` ImageFill + 일반 분기 stroke 부분 + `web/client/src/lib/imageScale.ts` |
-| 테스트 | `web/client/src/lib/imageScale.test.ts` |
-| 부모 | round 1~7 |
+| Status | Approved |
+| Implementation | `web/client/src/Canvas.tsx` ImageFill + the stroke section of the generic branch + `web/client/src/lib/imageScale.ts` |
+| Tests | `web/client/src/lib/imageScale.test.ts` |
+| Parents | rounds 1~7 |
 
-## 1. 목적
+## 1. Purpose
 
-두 universal Figma 기능 — **IMAGE scaleMode** (FILL/FIT/CROP/STRETCH/TILE) 와 **stroke gradient fallback**. 둘 다 Figma 표준 필드. 파일 종속 휴리스틱 없음.
+Two universal Figma features — **IMAGE scaleMode** (FILL/FIT/CROP/STRETCH/TILE) and **stroke gradient fallback**. Both are standard Figma fields. No file-specific heuristics.
 
-이전 라운드들에선 모든 IMAGE paint 가 box 사이즈로 단순 stretch — 사진 비율이 box 와 다르면 늘어진 형태. Figma 는 기본 FILL (object-fit: cover) 동작이라 큰 visible 격차. 메타리치 86개 image fill 중 86개가 FILL, 5개가 STRETCH.
+In previous rounds every IMAGE paint was simply stretched to the box size — when the photo aspect differed from the box, it appeared distorted. Figma defaults to FILL (object-fit: cover), so this is a large visible gap. In the meta-rich dataset, 86 of 86 image fills are FILL and 5 are STRETCH.
 
-Stroke gradient 는 메타리치엔 없지만 Figma 의 universal 기능. Konva 의 stroke prop 은 단일 색상만 받음 — gradient stroke 는 별도 path geometry 가 필요해 v1 에서 first-stop solid 로 fallback.
+Stroke gradient is absent from meta-rich but is a universal Figma feature. Konva's stroke prop accepts only a single color — a gradient stroke needs a dedicated path geometry, so v1 falls back to the first-stop solid.
 
 ## 2. IMAGE scaleMode
 
@@ -25,17 +25,17 @@ paint: {
   visible: boolean,
   imageScaleMode: 'FILL' | 'FIT' | 'CROP' | 'STRETCH' | 'TILE',
   rotation?: number,
-  scalingFactor?: number,    // TILE 의 scale
+  scalingFactor?: number,    // TILE scale
   image: { hash: ... },
-  filters?: { ... },          // brightness/contrast/saturation 등 — v1 비대상
+  filters?: { ... },          // brightness/contrast/saturation etc. — out of scope for v1
 }
 ```
 
-### 2.2 Konva crop 계산
+### 2.2 Computing the Konva crop
 
-Konva.Image 의 `crop` prop = `{x, y, width, height}` — 원본 이미지의 어느 부분을 잘라 사용할지. width/height prop = destination box. 둘을 조합해서 object-fit 효과 emulate.
+Konva.Image's `crop` prop = `{x, y, width, height}` — which portion of the source image to use. The width/height props = the destination box. Combine the two to emulate object-fit.
 
-`computeImageCrop(scaleMode, imgW, imgH, boxW, boxH)` 반환:
+`computeImageCrop(scaleMode, imgW, imgH, boxW, boxH)` returns:
 ```ts
 {
   crop?: { x, y, width, height },   // Konva.Image crop prop
@@ -47,8 +47,8 @@ Konva.Image 의 `crop` prop = `{x, y, width, height}` — 원본 이미지의 �
 
 ### 2.3 FILL (= object-fit: cover)
 
-- I-IS1 비율 유지 + box 채우도록 crop. 이미지가 box 보다 wide → 좌우 잘림. 이미지가 narrow → 위아래 잘림.
-- 알고리즘:
+- I-IS1 Preserve aspect, fill the box. Wider-than-box image → sides cropped. Narrower → top/bottom cropped.
+- Algorithm:
   ```
   imgAspect = imgW / imgH
   boxAspect = boxW / boxH
@@ -65,60 +65,60 @@ Konva.Image 의 `crop` prop = `{x, y, width, height}` — 원본 이미지의 �
     cropX = 0
     cropY = (imgH - cropH) / 2
   ```
-- dst = (0, 0, boxW, boxH) — Konva 가 cropped portion 을 dst 영역에 fit.
+- dst = (0, 0, boxW, boxH) — Konva fits the cropped portion into the dst region.
 
 ### 2.4 FIT (= object-fit: contain)
 
-- I-IS2 비율 유지 + box 안에 들어가도록. 가장자리에 letterbox 빈 공간.
-- crop = 전체 이미지 (`{x:0, y:0, width: imgW, height: imgH}`).
-- dst = box 안에 fit 하는 사각형 — 이미지가 wider → height 줄임, narrow → width 줄임. 중심 정렬.
+- I-IS2 Preserve aspect, fit inside the box. Letterboxed empty space along the edges.
+- crop = the full image (`{x:0, y:0, width: imgW, height: imgH}`).
+- dst = the largest rectangle that fits inside the box — wider image → reduce height, narrower → reduce width. Centered.
 
 ### 2.5 CROP
 
-- I-IS3 1:1 scale (no resize), 중심 정렬, box 밖 부분 잘림.
-- crop = box 사이즈만큼의 중앙 영역.
+- I-IS3 1:1 scale (no resize), centered, anything outside the box is clipped.
+- crop = a centered region the size of the box.
 - dst = (0, 0, boxW, boxH).
-- 이미지가 box 보다 작으면 letterbox (가장자리 transparent 또는 border).
+- If the image is smaller than the box → letterboxed (edges transparent or bordered).
 
-### 2.6 STRETCH (= 현재 동작)
+### 2.6 STRETCH (= current behavior)
 
-- I-IS4 비율 무시. crop = full image. dst = (0, 0, boxW, boxH). Konva 의 `width / height` prop 만으로 충분 — crop 생략.
+- I-IS4 Ignore aspect. crop = full image. dst = (0, 0, boxW, boxH). Konva's `width / height` props are sufficient — no crop needed.
 
 ### 2.7 TILE
 
-- I-IS5 v1 비대상. caller 가 STRETCH 처럼 fallback 해서 일단 stretch 로 표시. Konva 의 Pattern fill 로 구현하려면 별도 `Konva.Image` + `fillPatternImage` 패턴 사용 — 복잡도 높아 미루기.
+- I-IS5 Out of scope for v1. The caller falls back to STRETCH so the image still shows. Implementing it via Konva pattern fill would require a separate `Konva.Image` + `fillPatternImage` setup — complexity is too high, deferred.
 
-### 2.8 imageScaleMode 외 paint 필드
+### 2.8 Other paint fields besides imageScaleMode
 
-- I-IS6 `paint.rotation` 회전: v1 비대상. 0 이 아닌 경우 별도 Konva Group 으로 wrap 해서 crop 영역 회전 필요. 메타리치 모두 0.
-- I-IS7 `paint.filters` (brightness/contrast/saturation/hue/temperature/tint): canvas filter 필요. v1 비대상.
+- I-IS6 `paint.rotation` rotation: out of scope for v1. Non-zero values would need wrapping in a Konva Group to rotate the crop region. All meta-rich entries are 0.
+- I-IS7 `paint.filters` (brightness/contrast/saturation/hue/temperature/tint): needs canvas filters. Out of scope for v1.
 
 ## 3. Stroke gradient fallback
 
 ### 3.1 Background
 
-`strokePaints[0]` 가 GRADIENT_* 타입인 경우 Konva.Rect / Path 의 stroke prop 은 단일 색상만 받음. Gradient stroke 를 정확히 그리려면 stroke 영역에 해당하는 path geometry 를 만들어 그 안을 gradient 로 채워야 함 — 복잡도 높음.
+When `strokePaints[0]` is a GRADIENT_* type, Konva.Rect / Path's stroke prop accepts only a single color. Drawing a real gradient stroke would require building a path geometry that covers the stroke area and filling it with a gradient — high complexity.
 
 ### 3.2 Fallback rule
 
-- I-SG1 stroke paint 가 GRADIENT_LINEAR / RADIAL / ANGULAR / DIAMOND 인 경우, `firstStopRgba(paint)` 결과를 stroke color 로 사용. 단일 stop 색상이 디자인의 dominant 색을 대표하므로 시각 차이 minimal.
-- I-SG2 stroke paint 가 IMAGE 인 경우 v1 미지원 — stroke 그리지 않음.
-- I-SG3 SOLID 는 기존 경로 그대로.
+- I-SG1 When the stroke paint is GRADIENT_LINEAR / RADIAL / ANGULAR / DIAMOND, use `firstStopRgba(paint)` as the stroke color. A single stop typically represents the dominant color of the design, so the visual difference is minimal.
+- I-SG2 IMAGE stroke paint is unsupported in v1 — stroke is not drawn.
+- I-SG3 SOLID continues on the existing path.
 
 ### 3.3 Implementation
 
-기존 `strokeOf(node) = solidStrokeCss(node)` 가 SOLID 만 처리. 새 helper `strokeFromPaints(node)` 가 SOLID + GRADIENT 둘 다 처리. Canvas.tsx 의 `strokeOf` 호출을 `strokeFromPaints` 로 교체.
+The existing `strokeOf(node) = solidStrokeCss(node)` only handles SOLID. A new helper `strokeFromPaints(node)` handles SOLID + GRADIENT. Replace the `strokeOf` call in Canvas.tsx with `strokeFromPaints`.
 
-## 4. 비대상 (v1)
+## 4. Out of scope (v1)
 
-- TILE imageScaleMode (Konva pattern 필요)
+- TILE imageScaleMode (requires Konva pattern)
 - IMAGE paint rotation
 - IMAGE paint filters (brightness/contrast/...)
-- 진짜 gradient stroke (path geometry 필요)
+- True gradient stroke (requires path geometry)
 - IMAGE stroke paint
 
 ## 5. Resolved questions
 
-- **FILL vs FIT 의 시각 차이**: FILL = cover (잘림), FIT = contain (letterbox). Figma 기본은 FILL. 메타리치 86개 모두 FILL.
-- **CROP 와 FILL 의 차이**: CROP 은 1:1 scale (이미지 원래 크기 유지), FILL 은 box 에 맞게 scale up/down 하면서 비율 유지. CROP 이 더 specific 한 케이스.
-- **Konva.Image 의 crop prop 동작**: source image 의 (x, y, width, height) 영역을 (dstX, dstY, dstW, dstH) 에 그림 — `ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh)` 와 동일.
+- **Visual difference between FILL and FIT**: FILL = cover (clips), FIT = contain (letterbox). Figma defaults to FILL. All 86 meta-rich entries are FILL.
+- **Difference between CROP and FILL**: CROP is 1:1 scale (keeps the image's original size), FILL scales up/down to fit the box while preserving aspect. CROP is the more specific case.
+- **Behavior of Konva.Image's crop prop**: draws the (x, y, width, height) region of the source image into (dstX, dstY, dstW, dstH) — same as `ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh)`.

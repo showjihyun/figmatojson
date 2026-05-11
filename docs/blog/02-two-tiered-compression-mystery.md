@@ -122,10 +122,10 @@ After fixing the compression auto-detect, the assertions hold every time. 35,660
 For verification run output:
 
 ```
-🟢 V-07 Kiwi 스키마 sanity: definitions: 568, root type: ColorStopVar, archive v106,
+🟢 V-07 Kiwi schema sanity: definitions: 568, root type: ColorStopVar, archive v106,
                             compression: schema=deflate-zlib, data=zstd
-🟢 V-02 디코딩 round-trip: schema bytes match: true (66133 vs 66133).
-                           re-encoded message: 9282747 bytes (orig data 9282747).
+🟢 V-02 decoding round-trip: schema bytes match: true (66133 vs 66133).
+                             re-encoded message: 9282747 bytes (orig data 9282747).
 ```
 
 This single check is the hill that round-trip safety dies on. If the bytes don't match here, every downstream guarantee (byte-identical repack, JSON edit-and-rebuild, …) collapses.

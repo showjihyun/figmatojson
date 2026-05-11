@@ -1,248 +1,248 @@
-# Figma `.fig` wire format vs. 디자인 의도 — 검토 노트
+# Figma `.fig` wire format vs. design intent — review notes
 
-> 블로그/노트 초안 ("왜 좋은 Figma → code 컨버터가 없나") 에 대한 사실 검증 보고서.
-> 우리 자신의 codebase (`figma-reverse`) 를 1차 근거로 사용.
+> Fact-check report on the blog / note draft ("Why aren't there any good Figma → code converters?").
+> Uses our own codebase (`figma-reverse`) as primary evidence.
 
-## 결론 요약
+## Summary
 
-- **큰 그림 thesis (`wire format ≠ design intent`) 는 정확.**
-- 그러나 본문에서 든 **8개 gap 중 절반은 사실과 다르거나 과장**되어 있음.
-- 가장 큰 오해: *"wire format 의 표현력 부족"* 으로 묘사된 항목 다수가 실제로는 *"디자이너가 그 표현력을 사용하지 않은 결손"*.
-- 우리 parser 가 99.47% 정확도로 풀고 있는 것이 *"wire 결손"* 의 반례 — 즉 wire 에 들어있어도 우리가 매번 파싱하는 항목들이 글에서는 "wire 에 없음" 으로 묘사됨.
+- **The big-picture thesis (`wire format ≠ design intent`) is correct.**
+- However, **about half of the 8 gaps listed are factually wrong or overstated**.
+- The biggest misconception: many items described as *"insufficient expressiveness in the wire format"* are actually *"the designer did not use that expressiveness"*.
+- The things our parser resolves at 99.47% accuracy are a counter-example to *"wire deficits"* — i.e. items that exist in the wire and we parse every time are described in the article as *"not in the wire"*.
 
 ---
 
-## 검증 요약 표
+## Verification summary table
 
-| 본문 주장 | 판정 | 근거 |
+| Claim in the article | Verdict | Evidence |
 |---|---|---|
-| 컨버터는 많은데 만족스러운 게 없다 | ✅ 정확 | 시장 사실 |
-| `.fig` 는 wire 만 있고 intent 가 없다 (전체 thesis) | 🟡 부분적으로 맞음 | wire 에 intent 가 글이 묘사하는 것보다 많이 들어있음 |
-| §7.1 인용 ("vector geometry, paint, effects, prototyping 비대상") | ✅ 일치 | `docs/specs/audit-oracle.spec.md:250–263` |
-| Parser 99.47% 정확도 | ✅ 정확 | round 31 baseline (commit `690e856`) |
-| **#1 컴포넌트 경계가 wire 에 없다 (FRAME 뿐)** | ❌ **틀림** | wire 에 `SYMBOL` / `COMPONENT` / `COMPONENT_SET` 타입이 명시 (`src/masterIndex.ts:30`) |
-| **#2 Props vs 변형 구분 불가** | 🟡 부분 사실 | `componentPropDefs` / `componentPropAssignments` / `componentPropRefs` 모두 wire 에 존재 (`src/instanceOverrides.ts:287-303`) |
-| **#3 상태 (hover 등) wire 에 없음** | 🟡 반은 틀림 | Prototype reactions (hover trigger 등) 는 .fig 에 존재. 우리 §7.1 에서 "비대상" 으로 뒀을 뿐 |
-| #4 반응형 룰 없음 | ✅ 정확 | breakpoint 정보는 wire 에 정말 없음 |
-| **#5 디자인 토큰 매핑 어려움** | ❌ 부분 틀림 | `boundVariables` / variable alias chain wire 에 명시. `buildColorVarResolver()` 가 16-depth 추적 중 (`src/pen-export.ts:227-254`) |
-| #6 데이터 vs 레이아웃 분리 | ✅ 정확 | 동적 텍스트 vs 정적 텍스트 신호 wire 에 없음 |
-| #7 CSS 임피던스 미스매치 | ✅ 정확 | 단, Auto-layout 사용 시는 flex 매핑 깔끔 |
-| #8 시맨틱/접근성 부재 | ✅ 정확 | semantic HTML, aria-* 정보 없음 |
-| 디자이너 스타일 의존성 | ✅ 정확 | 표의 % 수치는 정성적 추정 (공개 벤치마크 없음) |
-| LLM 추론이 미래 게임 체인저 | 🟡 방향은 맞음 | "99.47% 가 의도를 담고 있는 게 아니다" 라는 표현에 카테고리 에러 존재 |
+| There are many converters, none are satisfactory | ✅ Accurate | Market fact |
+| `.fig` only has wire, no intent (overall thesis) | 🟡 Partially right | The wire holds more intent than the article describes |
+| §7.1 citation ("vector geometry, paint, effects, prototyping out of scope") | ✅ Matches | `docs/specs/audit-oracle.spec.md:250–263` |
+| Parser at 99.47% accuracy | ✅ Accurate | round 31 baseline (commit `690e856`) |
+| **#1 Component boundary is not in the wire (only FRAME)** | ❌ **Wrong** | The wire explicitly carries `SYMBOL` / `COMPONENT` / `COMPONENT_SET` types (`src/masterIndex.ts:30`) |
+| **#2 Cannot distinguish props vs variants** | 🟡 Partially true | `componentPropDefs` / `componentPropAssignments` / `componentPropRefs` all exist in the wire (`src/instanceOverrides.ts:287-303`) |
+| **#3 State (hover, etc.) is not in the wire** | 🟡 Half-wrong | Prototype reactions (hover triggers, etc.) exist in .fig. Our §7.1 simply marks them "out of scope" |
+| #4 No responsive rules | ✅ Accurate | Breakpoint info really is not in the wire |
+| **#5 Design token mapping is hard** | ❌ Partly wrong | `boundVariables` / variable alias chains are explicit in the wire. `buildColorVarResolver()` already traces 16 levels deep (`src/pen-export.ts:227-254`) |
+| #6 Data vs layout not separated | ✅ Accurate | No dynamic-vs-static text signal in the wire |
+| #7 CSS impedance mismatch | ✅ Accurate | Except: with Auto-layout, the flex mapping is clean |
+| #8 No semantics / accessibility | ✅ Accurate | No semantic HTML, no aria-* info |
+| Designer-style dependency | ✅ Accurate | The percentages in the table are qualitative estimates (no public benchmark) |
+| LLM reasoning is the future game-changer | 🟡 Direction is right | "The 99.47% is not 99.47% of intent" contains a category error |
 
 ---
 
-## 1. ❌ "컴포넌트 경계가 wire 에 없다" — 가장 큰 사실 오류
+## 1. ❌ "Component boundary is not in the wire" — the biggest factual error
 
-**본문 주장**
+**Article claim**
 
-> "wire 엔 그냥 FRAME 트리만 있어요. *어디까지가 한 컴포넌트인지* 가 wire 에 표시되지 않습니다."
+> "The wire is just a FRAME tree. *Where one component ends and another begins* is not marked in the wire."
 
-**검증**
+**Verification**
 
-`.fig` 의 노드 `type` 필드에 명시적으로 들어 있음. 우리 코드가 직접 사용 중:
+The node `type` field of `.fig` explicitly carries this. Our code uses it directly:
 
 ```ts
 // src/masterIndex.ts:30
 if (n.type === 'SYMBOL' || n.type === 'COMPONENT' || n.type === 'COMPONENT_SET')
 ```
 
-- `SYMBOL` — Figma 내부에서 Component 의 kiwi alias
+- `SYMBOL` — Figma's internal kiwi alias for Component
 - `COMPONENT` — Component master
-- `COMPONENT_SET` — Variants 묶음
-- `INSTANCE` — Component 사용처
+- `COMPONENT_SET` — Variants set
+- `INSTANCE` — Component usage site
 
-이 4개 타입이 wire 에 explicit. 디자이너가 Component 를 *만들지 않은* 경우만 FRAME 으로 떨어짐.
+These 4 types are explicit in the wire. Only when the designer *did not create* a Component does it fall back to FRAME.
 
-**정확한 표현**
+**Accurate phrasing**
 
-> "디자이너가 Component 를 안 만든 경우 FRAME 트리만 있고, 만든 경우 wire 에 explicit 하게 명시된다."
+> "If the designer did not create a Component, the wire only has a FRAME tree. If they did, it is explicitly marked in the wire."
 
-**의미**
+**Implication**
 
-결손의 위치가 *wire 의 표현력* 이 아니라 *디자이너의 사용* 임. 글 후반의 "디자이너 스타일 의존성" 표와 정합적으로 이어짐.
+The location of the deficit is not *the wire's expressiveness* but *the designer's usage*. This connects cleanly with the "designer-style dependency" table in the latter half of the article.
 
 ---
 
-## 2. 🟡 "Props vs 디자인 변형의 구분" — 절반은 wire 가 답한다
+## 2. 🟡 "Props vs design variants" — half is answered by the wire
 
-**본문 주장**
+**Article claim**
 
-> "같은 Card 의 두 인스턴스가 너비가 다르면 — 그게 `width` prop 인가, 그냥 다른 화면이라 다르게 그린 건가? wire 만 봐선 모릅니다."
+> "If two instances of the same Card differ in width — is that a `width` prop, or did the designer just draw them differently on different screens? You can't tell from the wire alone."
 
-**검증**
+**Verification**
 
-Figma 의 Component Properties 시스템이 wire 에 들어있음:
+Figma's Component Properties system is in the wire:
 
-- `componentPropDefs[]` — Master 의 prop 정의 (이름 + 타입)
-- `componentPropAssignments[]` — Instance 가 prop 에 부여한 값
-- `componentPropRefs[]` — Master 의 어느 노드가 어느 prop 을 받는지 (예: visibility binding)
+- `componentPropDefs[]` — Master's prop definitions (name + type)
+- `componentPropAssignments[]` — Values the Instance assigned to props
+- `componentPropRefs[]` — Which node in the Master receives which prop (e.g. visibility binding)
 
-우리 코드가 직접 사용:
+Our code uses these directly:
 
 ```ts
 // src/instanceOverrides.ts:287-303
 // effectiveVisibility.ts:37
-// componentPropAssignments → componentPropRefs[VISIBLE] 매칭
+// componentPropAssignments → componentPropRefs[VISIBLE] match
 ```
 
-따라서 Card master 가 `width: NUMBER` prop 을 정의했고, Instance A 가 `componentPropAssignments[width]=200`, B 가 `=400` 이면 — **그건 명백히 prop 사용**. wire 가 답해줌.
+So when the Card master defines a `width: NUMBER` prop and Instance A has `componentPropAssignments[width]=200`, B has `=400` — that is **clearly prop usage**. The wire answers.
 
-**진짜로 wire 가 답하지 못하는 경우**: 디자이너가 Component Property 를 *안 만든 채로* override 만으로 너비를 바꾼 경우. 이건 본문 주장과 일치.
+**Where the wire genuinely cannot answer**: the designer *did not create* a Component Property and changed width via overrides only. This matches the article's claim.
 
-**§7.1 "out of scope" 의 의미**
+**What §7.1 "out of scope" means**
 
-audit-oracle §7.1 에서 `componentPropDefs / componentPropAssignments` 를 "비대상" 으로 둔 이유는:
+audit-oracle §7.1 lists `componentPropDefs / componentPropAssignments` as "out of scope" because:
 
-> "Figma plugin API 가 노출하는 형식과 우리 kiwi 필드의 정렬이 1:1 이 아니어서" (audit-oracle.spec.md:254)
+> "The shape exposed by Figma's plugin API is not 1:1-aligned with our kiwi fields" (audit-oracle.spec.md:254)
 
-→ 디코딩 문제가 아니라 **audit 비교 문제**. 글에서 §7.1 인용이 "wire 결손" 의 근거로 잘못 쓰임.
+→ This is an **audit comparison issue**, not a decoding issue. The article cites §7.1 as evidence of "wire deficit", which is incorrect.
 
 ---
 
-## 3. 🟡 "상태 정보가 wire 에 없다" — Prototype 데이터는 있음
+## 3. 🟡 "State info is not in the wire" — prototype data is there
 
-**본문 주장**
+**Article claim**
 
-> "정적 디자인에는 보통 default 상태만 그려져 있어요. 디자이너가 'Button/Hover' 같은 *이름* 으로 별도 frame 을 만들어두는 게 유일한 단서."
+> "Static designs usually only draw the default state. The only signal is the designer giving a separate frame a *name* like 'Button/Hover'."
 
-**검증**
+**Verification**
 
-`.fig` 에는 prototype reactions 가 명시적으로 들어있음. Figma Plugin API 의 `node.reactions` 에 대응하는 kiwi 필드:
+`.fig` explicitly contains prototype reactions. Kiwi fields corresponding to Figma Plugin API's `node.reactions`:
 
 - `trigger: { type: "ON_HOVER" | "ON_CLICK" | "ON_PRESS" | ... }`
 - `action: { type: "NODE", destinationId: "...", transition: { ... } }`
 
-디자이너가 prototype 연결선을 그려두면 *"hover 시 이 frame 으로 전환"* 같은 의도가 wire 에 그대로 들어감.
+When the designer draws a prototype connector, the intent — *"on hover, transition to this frame"* — is in the wire as-is.
 
-**§7.1 "prototyping / interaction / reactions 비대상" 의 의미**
+**What §7.1 "prototyping / interaction / reactions out of scope" means**
 
-`audit-oracle.spec.md:257` 의 표현 — *"wire 에 없어서 비대상"* 이 아니라 *"이번 라운드에서 우리 parser 가 안 다룬다"* 는 의미. 글에서 이 인용을 "wire 결손" 의 근거로 쓴 것은 의미가 어긋남.
+The phrasing at `audit-oracle.spec.md:257` — *"out of scope because it is not in the wire"* — is not what it means; it means *"our parser does not handle it this round"*. The article citing this as evidence of "wire deficit" is a mismatch.
 
-**현실적인 조정**
+**Realistic adjustment**
 
-대부분 디자이너가 prototype 을 정성껏 그리지 않으므로 *사실상* 신호가 없는 셈. 다만 표현은 *"wire 에 없다"* 가 아니라 *"디자이너가 prototype 을 그리지 않으면 사실상 없다"* 가 정확.
+Most designers do not carefully draw prototypes, so the signal is *effectively* absent. The accurate phrasing is *"if the designer does not draw a prototype, it is effectively absent"* — not *"it is not in the wire"*.
 
 ---
 
-## 4. ❌ "디자인 토큰 매핑이 추적 어려움" — 과장됨
+## 4. ❌ "Design token mapping is hard to trace" — overstated
 
-**본문 주장**
+**Article claim**
 
-> "`fillPaints[0].color = #3B82F6` 이 들어있는데, 이게 `var(--brand-blue-500)` 인가, `theme.colors.primary` 인가, 그냥 hard-coded 색인가 — Figma Variables 를 *체계적으로* 쓴 디자이너만 추적 가능."
+> "`fillPaints[0].color = #3B82F6` is in the wire — but is that `var(--brand-blue-500)`, `theme.colors.primary`, or just a hard-coded color? Only designers who use Figma Variables *systematically* can be traced."
 
-**검증**
+**Verification**
 
-Variables 가 사용된 경우엔 wire 에 alias 가 명시적으로 들어 있음. 우리 코드가 직접 풀고 있음:
+When Variables are used, the wire explicitly carries the alias. Our code resolves it directly:
 
 ```ts
 // src/pen-export.ts:227-254
 function buildColorVarResolver() {
   // paint.colorVar.alias.guid (sessionID:localID)
-  // → alias chain 을 16 depth 까지 따라가서 실제 색 결정
+  // → follow alias chain up to 16 levels deep to determine the actual color
   // → cache
 }
 ```
 
-Recent commit `9d99959` 에서 `resolveVariableChain` helper 로 분리.
+Recent commit `9d99959` factored this out as the `resolveVariableChain` helper.
 
-**실제 wire 분기**
+**Actual wire branches**
 
-| 디자이너가 Variable 사용? | wire 에 남는 정보 | 토큰 매핑 가능성 |
+| Designer used Variables? | Information left in the wire | Token mapping possibility |
 |---|---|---|
-| ✅ 사용 | `paint.colorVar.alias.guid` (Variable 식별자) | collection / variable name 까지 추적 가능 |
-| ❌ 미사용 | raw hex 만 | 완전 소실 — 흩뿌려진 색 코드 |
+| ✅ Used | `paint.colorVar.alias.guid` (Variable identifier) | Can be traced down to collection / variable name |
+| ❌ Not used | Raw hex only | Completely lost — scattered color codes |
 
-본문은 두 케이스를 묶어 "wire 가 침묵" 으로 표현했는데, 실제 wire 는 둘을 명확히 구분함.
-
----
-
-## 5. ✅ 큰 그림 thesis 는 맞음 — 단 표현이 정밀해야
-
-**본문 결론**
-
-> ".fig 는 '그림' 만 들어있는 파일이지, '이것을 어떻게 코드로 만들지' 의 사양이 들어있는 파일이 아니다."
-
-**평가**
-
-결론 자체는 정확. 다만 #1·#2·#3·#5 의 조정을 반영하면 더 정밀한 표현은:
-
-> ".fig 는 디자이너가 *입력한 만큼만* intent 를 담는다.
-> Component / Variant / Variable / Prototype 을 적극 쓴 디자인은 wire 에 풍부한 의도가 들어있고,
-> 안 쓴 디자인은 그림만 남는다.
-> 즉 **wire format 의 표현력 부족이 아니라, 디자이너가 그 표현력을 사용하지 않은 게 결손의 원인**."
-
-이게 글 후반의 *"디자이너 스타일에 따라 변환 가능성이 천차만별"* 표와 정합적. 본문 앞부분의 8-gap 묘사는 *"wire 자체의 한계"* 처럼 들리는 톤이라 후반과 미묘하게 충돌함.
+The article lumps the two cases as "the wire is silent", but the wire actually distinguishes them clearly.
 
 ---
 
-## 6. ✅ 정확한 부분들 (그대로 유지)
+## 5. ✅ The big-picture thesis is right — but the phrasing should be precise
 
-다음 항목은 검증을 통과:
+**Article conclusion**
 
-- **#4 반응형 transition rule 부재** — Auto-layout + Constraints 가 있어도 breakpoint 변환은 wire 에 정말 없음.
-- **#6 dynamic vs static text** — `text: "John Doe"` 가 prop 인지 정적인지 wire 가 침묵.
-- **#7 CSS 임피던스 미스매치** — Auto-layout 안 쓴 absolute 디자인일 때 정확. Auto-layout 디자인은 flex 매핑 비교적 깔끔.
-- **#8 semantic HTML / a11y** — `<button>` 시맨틱, `aria-*`, focus order 신호 없음.
-- **휴리스틱 (Anima/Locofy) vs LLM (Visual Copilot/v0) 분류** — 정확.
-- **디자이너 스타일 의존성** — 정성적으로 정확. 단, 표의 *%* 수치는 공개 벤치마크 없음 (정성적 추정으로 read 해야 함).
+> ".fig is a file that only contains 'the picture', not a spec for 'how to turn this into code'."
 
----
+**Assessment**
 
-## 7. 🟡 "LLM 미래" 결론의 미묘한 비약
+The conclusion itself is accurate. Reflecting the adjustments to #1·#2·#3·#5, a more precise phrasing is:
 
-**본문 주장**
+> ".fig contains as much intent as the designer *typed in*.
+> Designs that aggressively use Component / Variant / Variable / Prototype hold rich intent in the wire;
+> designs that do not just leave the picture.
+> In other words, **the cause of the deficit is not the wire format's lack of expressiveness, but the designer not using that expressiveness**."
 
-> "우리 parser 가 99.47% 정확도로 wire 를 풀어도, 그 99.47% 가 코드의 *의도* 를 99.47% 담고 있는 게 아닙니다 — 50% 도 안 될 수 있어요."
-
-**검증**
-
-99.47% 의 정확한 의미: *"우리 round-trip 결과가 Figma plugin API 의 dump 와 일치하는 비율"* (audit-oracle baseline round 31). *"디자이너 의도 capture 율"* 이 아님.
-
-두 숫자는 같은 축이 아니므로 *"99.47% 가 의도를 담고 있다"* 라는 비교 자체가 카테고리 에러. *"50% 도 안 될 수 있다"* 는 직관적인 반박이지만 논리 구조가 어긋남.
-
-**더 정확한 framing**
-
-> "99.47% 는 wire format decode 정확도이지, 디자이너 의도 capture 율이 아니다.
-> 의도 capture 율은 별개 축이고, 디자이너의 작업 스타일에 따라 매우 가변적이다."
-
-**LLM 활용 결론은 합리적**
-
-> "노드 트리 + Auto-layout + Variable 참조까지 함께 LLM 에 주면 더 정확해진다."
-
-→ 우리 parser 의 출력이 LLM 코드 생성의 *enriched context* 로 쓰이는 게 가장 큰 가치라는 framing 은 정확하고 발전적.
+This connects cleanly with the *"convertibility varies wildly by designer style"* table later in the article. The 8-gap framing in the early part has a tone that sounds like *"limitations of the wire itself"*, which subtly conflicts with the later half.
 
 ---
 
-## 권장 수정사항
+## 6. ✅ The accurate parts (keep as is)
 
-블로그/노트로 발행 시 다음 3개를 고치면 thesis 일관성이 강해짐:
+The following items pass verification:
 
-1. **#1 (컴포넌트 경계)**:
-   - Before: "wire 엔 FRAME 만 있다"
-   - After: "디자이너가 Component 를 안 만든 경우 FRAME 으로 떨어진다. 만든 경우 `SYMBOL` / `COMPONENT` / `COMPONENT_SET` 으로 wire 에 명시"
-
-2. **#3 (상태)**:
-   - §7.1 인용을 빼고
-   - "디자이너가 prototype 으로 hover 연결선을 안 그린 경우 정말 없다. 그리는 케이스가 드물어서 사실상 없는 셈" 으로 톤 조정
-
-3. **#5 (토큰)**:
-   - "Variables 를 쓴 경우엔 wire 에 alias chain 이 명시적이라 추적 가능. 안 쓴 경우엔 hex 만 남는다" 로 양자 구분 명확화
-
-전체 thesis 의 강도는 줄지 않음 — 오히려 **"wire 의 한계가 아니라 디자이너가 표현력을 쓰지 않은 결손"** 으로 framing 하면 후반 디자이너 스타일 의존성 표와 깔끔하게 이어지고 글의 일관성이 강해짐.
+- **#4 No responsive transition rules** — Even with Auto-layout + Constraints, breakpoint translation really is not in the wire.
+- **#6 Dynamic vs static text** — Whether `text: "John Doe"` is a prop or static is silent in the wire.
+- **#7 CSS impedance mismatch** — Accurate for absolute-positioned designs without Auto-layout. Auto-layout designs map relatively cleanly to flex.
+- **#8 Semantic HTML / a11y** — No `<button>` semantics, no `aria-*`, no focus-order signal.
+- **Heuristic (Anima/Locofy) vs LLM (Visual Copilot/v0) categorization** — Accurate.
+- **Designer-style dependency** — Qualitatively accurate. The *%* numbers in the table have no public benchmark (read them as qualitative estimates).
 
 ---
 
-## 부록: 1차 검증 출처
+## 7. 🟡 A subtle leap in the "LLM future" conclusion
 
-- `docs/specs/audit-oracle.spec.md` §7.1 (lines 250–263) — out-of-scope 명시
-- `src/masterIndex.ts:30` — Component 타입 indexing
-- `src/instanceOverrides.ts:243–245, 287–303` — auto-layout 필드 + componentPropAssignments 처리
+**Article claim**
+
+> "Even if our parser resolves the wire at 99.47% accuracy, that 99.47% doesn't capture 99.47% of the code *intent* — it might be less than 50%."
+
+**Verification**
+
+The precise meaning of 99.47%: *"the ratio at which our round-trip result matches Figma plugin API's dump"* (audit-oracle baseline round 31). It is *not* the *"designer-intent capture rate"*.
+
+The two numbers are not on the same axis, so the comparison *"99.47% holds intent"* is itself a category error. The *"might be less than 50%"* is an intuitive rebuttal, but the logic structure does not line up.
+
+**More accurate framing**
+
+> "99.47% is wire-format decoding accuracy, not designer-intent capture rate.
+> Intent-capture rate is a separate axis and varies dramatically with the designer's working style."
+
+**The LLM-utility conclusion is reasonable**
+
+> "Giving the LLM the node tree + Auto-layout + Variable references together produces more accurate code."
+
+→ Framing our parser's output as *enriched context* for LLM code generation as its largest value is accurate and forward-looking.
+
+---
+
+## Recommended edits
+
+If publishing as a blog / note, fixing these 3 strengthens the thesis's consistency:
+
+1. **#1 (component boundary)**:
+   - Before: "the wire is only FRAME"
+   - After: "if the designer did not create a Component, it falls back to FRAME. If they did, it is explicit in the wire as `SYMBOL` / `COMPONENT` / `COMPONENT_SET`"
+
+2. **#3 (state)**:
+   - Remove the §7.1 citation
+   - Adjust the tone to: "if the designer did not draw a hover connector via prototype, it really is absent. Since this case is rare, it is effectively absent in practice"
+
+3. **#5 (tokens)**:
+   - Distinguish the two cases clearly: "if Variables are used, the wire contains the alias chain explicitly and can be traced. If not, only hex remains"
+
+The strength of the overall thesis is not reduced — on the contrary, framing it as **"not a limit of the wire, but the designer not using its expressiveness"** flows cleanly into the later designer-style dependency table and strengthens the article's consistency.
+
+---
+
+## Appendix: primary verification sources
+
+- `docs/specs/audit-oracle.spec.md` §7.1 (lines 250–263) — explicit out-of-scope
+- `src/masterIndex.ts:30` — Component type indexing
+- `src/instanceOverrides.ts:243–245, 287–303` — auto-layout fields + componentPropAssignments handling
 - `src/pen-export.ts:227–254` — `buildColorVarResolver` (Variable alias chain)
-- `src/pen-export.ts:396–430` — auto-layout 디코딩 (`stackMode`, `stackSpacing`, `stackPadding*`, `stackPrimaryAlignItems`)
-- `docs/PRD.md:18, 37` — Dev Mode / Variables 유료 플랜 의존성, Figma Make `.make` 컨테이너
-- `docs/adr/0002-roundtrip-equality-tiers.md:3–8` — lossless 약속
-- `docs/adr/0003-rendering-strategy-reverse-vs-figma-api.md:18–43` — REST API 한계 → 오프라인 파싱 정당화
-- Recent commit `9d99959` — `resolveVariableChain` helper 분리
+- `src/pen-export.ts:396–430` — auto-layout decoding (`stackMode`, `stackSpacing`, `stackPadding*`, `stackPrimaryAlignItems`)
+- `docs/PRD.md:18, 37` — Dev Mode / Variables paid-plan dependency, Figma Make `.make` container
+- `docs/adr/0002-roundtrip-equality-tiers.md:3–8` — lossless promise
+- `docs/adr/0003-rendering-strategy-reverse-vs-figma-api.md:18–43` — REST API limitations → offline parsing justification
+- Recent commit `9d99959` — `resolveVariableChain` helper extraction
 - Baseline: round 31, commit `690e856`, 704 / 18,304 = 99.47%

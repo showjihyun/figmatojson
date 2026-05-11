@@ -1,33 +1,27 @@
 # spec/web-render-fidelity-round18-B
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/core/domain/colorStyleRef.ts` (`colorVarTrail`) + `web/client/src/Inspector.tsx` (FillSection / StrokeSection Style row) |
-| 테스트 | `web/core/domain/colorStyleRef.test.ts` (trail case set) |
-| 형제 | round 15 (`colorVarName` single-hop), round 18-A (`resolveVariableChain` chain walker) |
+| Status | Approved |
+| Implementation | `web/core/domain/colorStyleRef.ts` (`colorVarTrail`) + `web/client/src/Inspector.tsx` (FillSection / StrokeSection Style row) |
+| Tests | `web/core/domain/colorStyleRef.test.ts` (trail case set) |
+| Siblings | round 15 (`colorVarName` single-hop), round 18-A (`resolveVariableChain` chain walker) |
 
-## 1. 배경
+## 1. Background
 
-Round 15 의 Inspector Style row 는 첫 hop name 만 표시 — 메타리치 5:8
-fill 의 `colorVar` alias `11:434` → `"Button/Primary/Default"`. 사용자
-가 실제로 보고 싶은 정보는 종종 *그 변수가 어디서 오는지* — alias chain
-의 leaf 까지 따라간 trail. 예:
+Round 15's Inspector Style row only shows the first hop name — meta-rich 5:8 fill's `colorVar` alias `11:434` → `"Button/Primary/Default"`. What users often want to see is *where the variable comes from* — the trail walked all the way to the leaf of the alias chain. Example:
 
 ```
 Button/Primary/Default  →  Color/Blue/600
-                                 ↑ 이게 원래 색의 이름
+                                 ↑ the original color's name
 ```
 
-본 라운드는 round 18-A 의 `resolveVariableChain` 위에 얇은 *trail
-formatter* 를 얹어 Inspector 가 "A → B → C" 형태로 표시한다. round 15
-의 single-hop label 동작은 *그대로 유지* — round 15 의 helper 는 변경
-안 함, round 18-B 는 *추가 옵션*.
+This round lays a thin *trail formatter* on top of round 18-A's `resolveVariableChain`, so the Inspector can display "A → B → C". Round 15's single-hop label behavior is *preserved* — its helper is not changed; round 18-B is an *additional option*.
 
-## 2. 신규 헬퍼 — `colorVarTrail`
+## 2. New helper — `colorVarTrail`
 
 ```ts
-// web/core/domain/colorStyleRef.ts (round 18-B 추가)
+// web/core/domain/colorStyleRef.ts (round 18-B addition)
 
 export interface ColorVarTrailEntry {
   /** GUID of the chain node (always set). */
@@ -51,63 +45,51 @@ export function colorVarTrail(paint: unknown, root: unknown): ColorVarTrailResul
 
 ### 2.1 Invariants
 
-- I-1 입력 paint 가 falsy / `colorVar.alias.guid` 추출 실패 → `null` (round 15 와 동일 gate).
-- I-2 alias guid lookup 실패 또는 가리킨 노드의 `type !== 'VARIABLE'` →
-  *round 18-A 에선 non-variable leaf 이지만 본 라운드는 colorVar 전용이라*
-  `null` 반환 (round 15 의 `colorVarName` 룰과 일관).
-- I-3 입력 VARIABLE 부터 시작해 `resolveVariableChain` 호출. 결과의 chain[]
-  으로 `entries[]` 구성. 각 entry 는 chain 의 GUID + 그 노드의 `name`.
-- I-4 첫 entry 는 round 15 의 `colorVarName` 결과와 같은 노드. 즉 round 15 의
-  사용자가 보던 라벨이 trail 의 *첫 항목* 이고 round 18-B 가 *그 뒤에*
-  계속 추가.
-- I-5 `entries.length` 는 항상 ≥ 1 (입력 VARIABLE 자체) — 단 raw entry 만
-  있는 VARIABLE 도 chain 길이 1 로 OK.
-- I-6 `name` 은 노드의 `name` 필드가 string 이면 그대로, 아니면 `null`.
-  Inspector 는 `null` 을 fallback (예: GUID literal) 로 처리.
+- I-1 If the input paint is falsy / `colorVar.alias.guid` cannot be extracted → return `null` (same gate as round 15).
+- I-2 If the alias guid lookup fails, or the looked-up node's `type !== 'VARIABLE'` → in round 18-A this is a non-variable leaf, but this round is colorVar-specific and returns `null` (consistent with round 15's `colorVarName` rule).
+- I-3 Call `resolveVariableChain` starting from the input VARIABLE. Build `entries[]` from the result's chain[]. Each entry is a chain GUID + that node's `name`.
+- I-4 The first entry is the same node returned by round 15's `colorVarName`. That is: the label round 15 users saw is the *first item* of the trail, and round 18-B *continues from there*.
+- I-5 `entries.length` is always ≥ 1 (the input VARIABLE itself) — even a VARIABLE with a raw entry only has chain length 1.
+- I-6 `name` is the node's `name` field if string, else `null`. The Inspector falls back to a placeholder (e.g. GUID literal) when `null`.
 
-## 3. Inspector UI 변경
+## 3. Inspector UI changes
 
-- I-7 `FillSection` / `StrokeSection` 의 round 15 `Style` row 가 *trail*
-  텍스트로 갱신:
+- I-7 The round 15 `Style` row in `FillSection` / `StrokeSection` is updated to show *trail* text:
   ```
   <Row label="Style">
     <span>{trail formatted}</span>
   </Row>
   ```
-- I-8 trail format 룰 (single helper `formatTrail(result)` — Inspector
-  내부 또는 small util):
-  - `entries.length === 1` → 그 한 항목 name (or "<unnamed>") — round 15 동작과 동일.
+- I-8 Trail format rules (a single helper `formatTrail(result)` — either inline in Inspector or a small util):
+  - `entries.length === 1` → that single name (or "<unnamed>") — same as round 15.
   - `entries.length ≥ 2` → `entries.map(e => e.name ?? '<unnamed>').join(' → ')`.
-  - end 가 `cycle` 인 경우 끝에 ` ⟲` 추가. `dead-end` 면 ` ⚠`. `depth-cap` 이면 ` …`.
-    `non-variable` 은 colorVarTrail 자체에서 null 반환 (I-2) 이므로 도달
-    안 함.
-- I-9 길어질 수 있어 `<span>` 에 `class="text-xs text-muted-foreground"` 외에
-  `title={fullText}` 도 carry — hover 시 전체 텍스트 tooltip.
+  - When end is `cycle`, append ` ⟲`. `dead-end` → ` ⚠`. `depth-cap` → ` …`.
+    `non-variable` never reaches here because colorVarTrail itself returns null (I-2).
+- I-9 The text may be long, so the `<span>` carries `title={fullText}` alongside `class="text-xs text-muted-foreground"` — hover shows the full text in a tooltip.
 
 ## 4. Test cases
 
-| ID | 입력 | 기대 |
+| ID | Input | Expected |
 |---|---|---|
-| TR-1 | paint 에 colorVar 없음 | `null` |
-| TR-2 | colorVar 있지만 guid 미존재 lookup | `null` |
+| TR-1 | paint has no colorVar | `null` |
+| TR-2 | colorVar present but the guid lookup misses | `null` |
 | TR-3 | 1-hop (raw VARIABLE) | entries.length=1, end=leaf |
-| TR-4 | 2-hop chain | entries.length=2, end=leaf, names 순서 정확 |
+| TR-4 | 2-hop chain | entries.length=2, end=leaf, names in the right order |
 | TR-5 | 3-hop with depth-cap=2 | entries.length=2, end=depth-cap |
-| TR-6 | cycle | end=cycle, entries 보존 |
+| TR-6 | cycle | end=cycle, entries preserved |
 | TR-7 | dead-end | end=dead-end |
 | TR-8 | non-variable target | `null` (I-2) |
-| TR-9 | name 이 null/undefined 인 노드 포함 | entry.name=null carry |
+| TR-9 | chain contains a node with null/undefined name | entry.name=null carried through |
 
 ## 5. Out of scope
 
-- ❌ TextSection 의 textStyleName trail. text-style asset 은 단일 노드라 chain 없음. 변경 불필요.
-- ❌ Multi-mode (entries[N] 의 두 번째 이상) — round 18-A 와 동일 single-mode.
-- ❌ Trail clickable navigation (chain 노드 selecting). 별도 라운드.
-- ❌ Audit script (.mjs) 의 helper 통합 — round 18-C 후보.
-- ❌ Round 15 의 `colorVarName` 함수 변경. 본 라운드는 *추가 헬퍼* 이고
-  round 15 호출 site (만약 있다면) 에 영향 없음.
+- ❌ Trail for textStyleName in TextSection. Text-style assets are a single node with no chain. No change needed.
+- ❌ Multi-mode (2nd+ entries in entries[N]) — same single-mode constraint as round 18-A.
+- ❌ Clickable trail navigation (selecting chain nodes). Separate round.
+- ❌ Integrating the helper into the audit script (.mjs) — round 18-C candidate.
+- ❌ Changing round 15's `colorVarName`. This round is *an additive helper* and has no impact on round 15's call sites (if any).
 
-## 6. 참조
+## 6. References
 
-- `docs/specs/archive/web-render-fidelity-round15.spec.md` — single-hop 라벨 정책
+- `docs/specs/archive/web-render-fidelity-round15.spec.md` — single-hop label policy
 - `docs/specs/archive/web-render-fidelity-round18-A.spec.md` — `resolveVariableChain` API

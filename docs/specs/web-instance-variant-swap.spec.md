@@ -1,96 +1,96 @@
 # spec/web-instance-variant-swap
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Draft (round 16) |
-| 구현 | `web/core/domain/clientNode.ts` (`collectSwapTargetsAtPathFromInstance` + INSTANCE expansion 분기) |
-| 테스트 | `web/core/domain/clientNode.test.ts` (hand-built fixtures) |
-| 형제 | `web-instance-render-overrides.spec.md` §6 비대상 항목 ("Variant swap"); 본 spec 으로 그 항목 retire. |
+| Status | Draft (round 16) |
+| Implementation | `web/core/domain/clientNode.ts` (`collectSwapTargetsAtPathFromInstance` + INSTANCE expansion branch) |
+| Tests | `web/core/domain/clientNode.test.ts` (hand-built fixtures) |
+| Siblings | `web-instance-render-overrides.spec.md` §6 out-of-scope item ("Variant swap"); this spec retires that item. |
 
-## 1. 목적
+## 1. Goal
 
-Figma 의 "swap component instance" 메커니즘. 외곽 INSTANCE 의 `symbolOverrides[]` entry 가 `overriddenSymbolID` 를 carry 하면 그 path 가 가리키는 INSTANCE descendant 의 master 를 다른 master 로 교체한다. 메타리치 Dropdown 의 6번째 옵션 ("직접 선택") 이 이 메커니즘을 사용 — 기본 옵션 master (11:514, "state=기본") 대신 selected-state master (15:287, "state=selected") 로 swap 되고, swap target 의 child TEXT (15:288) 가 "직접 선택" 으로 override 됨.
+Figma's "swap component instance" mechanism. When an outer INSTANCE's `symbolOverrides[]` entry carries `overriddenSymbolID`, the master of the INSTANCE descendant referenced by that path is swapped for a different master. The 6th option of the meta-rich Dropdown (the "custom select" label) uses this mechanism — the default option master (11:514, "state=default") is swapped for the selected-state master (15:287, "state=selected"), and the swap target's child TEXT (15:288) is overridden with the "custom select" string.
 
-`pen-export.ts:convertNode` (1064-1080줄) 이 이미 `instData.overriddenSymbolID ?? sd.overriddenSymbolID` 를 통해 swap 을 처리 — 외곽 override 가 `applySymbolOverrides` 로 inner instance 의 data 에 patch 된 후. 우리 web 측은 `applySymbolOverrides` 를 사용하지 않고 path-keyed override Map 으로 처리하므로, swap target 도 path-keyed Map 으로 따로 collect 해야 한다.
+`pen-export.ts:convertNode` (lines 1064-1080) already handles swap via `instData.overriddenSymbolID ?? sd.overriddenSymbolID` — after the outer override has been patched into the inner instance's data by `applySymbolOverrides`. Our web side does not use `applySymbolOverrides` but instead a path-keyed override Map; therefore swap targets must be collected separately into a path-keyed Map.
 
 ## 2. Data shape
 
 ```ts
-// 외곽 INSTANCE 의 symbolOverrides[] 안의 한 entry:
+// one entry inside the outer INSTANCE's symbolOverrides[]:
 {
-  guidPath: { guids: [{ sessionID, localID }, ...] },  // 어느 inner INSTANCE 를 target
-  overriddenSymbolID: { sessionID, localID },          // 어느 master 로 swap 할지
-  componentPropAssignments: [...],                     // (선택) swap 후 prop assignments
-  // visible 필드는 보통 없음 — swap 자체가 표시 의도 (§3.3 참조)
+  guidPath: { guids: [{ sessionID, localID }, ...] },  // which inner INSTANCE is the target
+  overriddenSymbolID: { sessionID, localID },          // which master to swap to
+  componentPropAssignments: [...],                     // (optional) prop assignments after swap
+  // the visible field is usually absent — swap itself signals visibility intent (see §3.3)
 }
 ```
 
-메타리치 Dropdown 의 "직접 선택" 케이스:
-- Outer Dropdown (15:279) 의 symbolOverride entry: `guidPath: [15:300]`, `overriddenSymbolID: 15:287`
+The "custom select" case in the meta-rich Dropdown:
+- Outer Dropdown (15:279) symbolOverride entry: `guidPath: [15:300]`, `overriddenSymbolID: 15:287`
 - Master 11:514 (default option) → swap → master 15:287 (selected option)
-- 같은 outer 의 text override: `guidPath: [15:300, 15:288]`, `textData.characters: "직접 선택"` (15:288 은 15:287 의 child)
+- Same outer's text override: `guidPath: [15:300, 15:288]`, `textData.characters: <Korean "custom select" label>` (15:288 is a child of 15:287)
 
 ## 3. Invariants
 
 ### 3.1 Collection
 
-- I-C1 `collectSwapTargetsAtPathFromInstance(symbolOverrides) → Map<pathKey, swapTargetGuid>`. `pathKey` 는 outer 의 path-key 스킴 그대로 — `web-instance-render-overrides.spec.md §3.1 I-C1` 에 정의 (round-25 부터 FRAME/GROUP ancestor skip). `swapTargetGuid` 는 `${sessionID}:${localID}` 형식.
-- I-C2 entry 의 `overriddenSymbolID` 가 `{sessionID, localID}` integer 쌍이 아니면 entry 무시 (silent skip).
-- I-C3 같은 path 에 여러 swap entry → 마지막 이 win.
+- I-C1 `collectSwapTargetsAtPathFromInstance(symbolOverrides) → Map<pathKey, swapTargetGuid>`. `pathKey` follows the outer's path-key scheme exactly — defined in `web-instance-render-overrides.spec.md §3.1 I-C1` (FRAME/GROUP ancestor skip introduced in round-25). `swapTargetGuid` has the form `${sessionID}:${localID}`.
+- I-C2 If an entry's `overriddenSymbolID` is not a `{sessionID, localID}` integer pair, the entry is ignored (silent skip).
+- I-C3 Multiple swap entries on the same path → last wins.
 
 ### 3.2 Propagation
 
-- I-P1 `toClientNode` 의 INSTANCE 분기에서 `collectSwapTargetsAtPathFromInstance` 호출, 결과 map 을 `toClientChildForRender` 에 새 인자 `swapTargetsByPath: Map<string, string>` 으로 전달.
-- I-P2 `toClientChildForRender` 가 INSTANCE 노드를 visit 할 때 (nested-INSTANCE 분기, 자식 expansion 진입 직전):
-  1. `swapTargetsByPath.get(currentKey)` 매칭이 있으면 그 guid 를 master lookup 키로 사용 (default `sd.symbolID` 무시).
-  2. 매칭 없으면 default `sd.symbolID` 사용 (기존 동작).
-- I-P3 swap 적용 후 inner INSTANCE 의 자손 expansion 은 swap target master 의 children 트리에 대해 진행. text/fill/visibility/prop overrides 는 이미 outer 가 swap target 의 GUID 를 path 에 반영해 등록한 상태이므로 자동 매칭됨 (메타리치 케이스: text override `[15:300, 15:288]` 가 swap target 15:287 의 child 15:288 을 정확히 가리킴).
-- I-P4 nested-INSTANCE 의 own `symbolOverrides` 에서 collect 된 inner-swap-targets 도 outer 와 같은 prefix 룰로 머지 (path-keyed Map 모두 같은 패턴).
+- I-P1 In the INSTANCE branch of `toClientNode`, call `collectSwapTargetsAtPathFromInstance` and pass the resulting map to `toClientChildForRender` via a new argument `swapTargetsByPath: Map<string, string>`.
+- I-P2 When `toClientChildForRender` visits an INSTANCE node (nested-INSTANCE branch, just before descending into expansion):
+  1. If `swapTargetsByPath.get(currentKey)` matches, use that guid as the master lookup key (ignore the default `sd.symbolID`).
+  2. Otherwise use the default `sd.symbolID` (existing behavior).
+- I-P3 After swap, the inner INSTANCE's descendant expansion proceeds against the swap target master's children tree. Text/fill/visibility/prop overrides are matched automatically because the outer has already registered the swap target's GUID in its paths (meta-rich case: text override `[15:300, 15:288]` correctly references 15:288, the child of swap target 15:287).
+- I-P4 Inner-swap-targets collected from a nested-INSTANCE's own `symbolOverrides` merge with the outer using the same prefix rule (all path-keyed Maps follow the same pattern).
 
 ### 3.3 Implicit visibility
 
-- I-V1 swap 이 적용된 INSTANCE 는 **implicit visible:true** 로 취급 — 즉 INSTANCE 자체의 master 데이터가 `visible: false` 라도, swap 이 active 하면 visible 로 렌더. **단**, explicit `visibilityOverrides` (Symbol Visibility Override) 가 다른 값을 명시하면 그 값이 우선 (round-12 §3.4 I-P8 의 우선순위 일관). 메타리치 Dropdown 의 "직접 선택" 케이스: 15:300 master 데이터가 `visible: false`, outer 가 explicit `visible` override 를 두지 않음, swap 적용 → implicit visible:true → render.
-- I-V2 swap 이 *없는* INSTANCE 는 본 spec 영향 없음 — 기존 visibility 룰 그대로.
+- I-V1 An INSTANCE under an active swap is treated as **implicit visible:true** — even if the INSTANCE's own master data has `visible: false`, an active swap renders it visible. **However**, if an explicit `visibilityOverrides` (Symbol Visibility Override) specifies a different value, that value wins (consistent with the precedence in round-12 §3.4 I-P8). Meta-rich Dropdown "custom select" case: 15:300 master data has `visible: false`, the outer does not set an explicit `visible` override, swap is active → implicit visible:true → render.
+- I-V2 An INSTANCE *without* swap is unaffected by this spec — existing visibility rules apply.
 
 ### 3.4 Visual property inheritance from swap target (round 17)
 
-Figma 의 swap semantic 은 "use this variant's appearance" — 단순히 children 만 교체하는 게 아니라 **swap target 의 시각 속성을 INSTANCE 자체에 적용**. 메타리치 "직접 선택" 케이스: 기본 master 11:514 는 fillPaints 없음, swap target 15:287 은 fillPaints `{r:0.097, g:0.441, b:0.957}` (BLUE) + cornerRadius 12 + 흰 텍스트. swap 후 INSTANCE 가 swap target 의 fillPaints 를 inherit 하지 않으면 흰 텍스트가 흰 컨테이너 위에 그려져 시각적으로 사라짐.
+Figma's swap semantic is "use this variant's appearance" — not just replacing children, but **applying the swap target's visual properties to the INSTANCE itself**. Meta-rich "custom select" case: the default master 11:514 has no fillPaints, the swap target 15:287 has fillPaints `{r:0.097, g:0.441, b:0.957}` (BLUE) + cornerRadius 12 + white text. If the post-swap INSTANCE does not inherit the swap target's fillPaints, white text is drawn on a white container and visually disappears.
 
-- I-V3 swap 이 적용되면 swap target 의 `data` 필드를 instance `data` 에 머지 (read 전, data spread 직전). 머지 룰: **instance own field wins** — 이미 instance.data 에 값이 있으면 유지; 없을 때만 swap target 값 채움.
-- I-V4 머지에서 제외하는 필드: `guid`, `type`, `name` (identity), `children`, `symbolData` (instance-specific), `transform` (instance position), `parentIndex`, `phase` (tree-structure). 그 외는 inherit 후보.
-- I-V5 visual fields (fillPaints, strokePaints, cornerRadius, rectangle*CornerRadius, opacity 등) 가 inherit 되어 시각적 outcome 이 swap target 의 것과 일치.
+- I-V3 When swap is active, merge the swap target's `data` field into the instance's `data` (before the spread, before reads). Merge rule: **instance's own field wins** — if instance.data already has a value, keep it; only fill from the swap target when missing.
+- I-V4 Fields excluded from the merge: `guid`, `type`, `name` (identity), `children`, `symbolData` (instance-specific), `transform` (instance position), `parentIndex`, `phase` (tree-structure). Everything else is an inheritance candidate.
+- I-V5 Visual fields (fillPaints, strokePaints, cornerRadius, rectangle*CornerRadius, opacity, etc.) are inherited so the visual outcome matches the swap target.
 
-`pen-export.ts:1146-1158` 의 `merged` 객체 생성 로직과 동등한 효과 — 거기서는 `{ ...masterData, ...rootOverrideFields, ... }` 로 master 값이 base, override 가 상위. 본 spec 의 I-V3 는 같은 방향: swap target 이 base, instance own 이 상위.
+This produces the same effect as the `merged` object construction at `pen-export.ts:1146-1158`, where `{ ...masterData, ...rootOverrideFields, ... }` puts master values at the base and override on top. I-V3 of this spec mirrors the same direction: swap target as the base, instance own on top.
 
 ### 3.4 Master immutability
 
-- I-M1 swap target master 의 데이터 자체는 건드리지 않음 — round-12 spec §3.3 의 master immutability 와 동일 룰. swap 결과는 per-instance `_renderChildren` 복제본에만 적용.
+- I-M1 The swap target master's own data is not mutated — same rule as round-12 spec §3.3 master immutability. Swap results are applied only to the per-instance `_renderChildren` clone.
 
 ## 4. Error cases
 
-- I-E1 `swapTargetsByPath.get(currentKey)` 가 매칭하지만 `symbolIndex` 에 swap target 이 없음 (master 미존재, corrupt 데이터) → swap fallback to default `sd.symbolID`. 안전한 폴백.
-- I-E2 swap target master 가 INSTANCE 의 default master 와 *완전히 다른 트리* (다른 child GUID 들) → outer text/fill 등의 path-keyed overrides 가 swap target 트리의 GUID 와 매칭되지 않으면 그 override 는 무효 (default 값 노출). 메타리치 케이스는 outer 가 swap target 의 GUID 를 정확히 알고 있어 매칭됨.
-- I-E3 같은 path 에 swap + visibility override 가 모두 있으면 visibility override 가 우선 (I-V1 명시).
+- I-E1 `swapTargetsByPath.get(currentKey)` matches but the swap target is missing from `symbolIndex` (master not present, corrupt data) → swap falls back to the default `sd.symbolID`. Safe fallback.
+- I-E2 The swap target master is a *completely different tree* from the INSTANCE's default master (different child GUIDs) → if outer text/fill etc. path-keyed overrides do not match the swap target tree's GUIDs, those overrides are inert (default value exposed). The meta-rich case is fine because the outer already knows the swap target's GUIDs and matches.
+- I-E3 If both swap and visibility override exist for the same path, visibility override wins (stated in I-V1).
 
 ## 5. Tests
 
-`web/core/domain/clientNode.test.ts` 의 새 describe 블록 `collectSwapTargetsAtPathFromInstance` + `toClientChildForRender — variant swap`:
+New describe blocks in `web/core/domain/clientNode.test.ts`: `collectSwapTargetsAtPathFromInstance` + `toClientChildForRender — variant swap`:
 
 - Unit tests (`collectSwapTargetsAtPathFromInstance`): empty/undefined/corrupt entries handled; multi-step path keys; last-wins on duplicate path.
 - Integration: outer INSTANCE with one nested INSTANCE child, outer override has `overriddenSymbolID` pointing to a different SYMBOL with different child TEXT. Assert resolved `_renderChildren` use swap target's children.
 - Implicit visibility: nested INSTANCE has `visible: false` in master data, swap entry doesn't explicitly set visible — assert resolved node has `visible !== false`.
-- explicit visibility override wins: same as above but outer also has `visible: false` for the same path → swap still uses swap target master, but resolved node is `visible: false`.
-- Metarich Dropdown rail "직접 선택" fixture: full path-keyed text override on swap target's child resolves to overridden text.
+- Explicit visibility override wins: same as above but outer also has `visible: false` for the same path → swap still uses swap target master, but resolved node is `visible: false`.
+- Meta-rich Dropdown rail "custom select" fixture: full path-keyed text override on swap target's child resolves to overridden text.
 
-## 6. 비대상
+## 6. Out of scope
 
-- **Component property INSTANCE_SWAP** — `componentPropRefs` with `componentPropNodeField === 'INSTANCE_SWAP'`. v1 미지원. 메타리치 Dropdown rail 케이스는 직접 `overriddenSymbolID` 를 사용하므로 prop-binding 경유는 불필요.
-- **Recursive variant swap** — swap target 자체가 INSTANCE 인 케이스. v1 은 swap target 이 SYMBOL/COMPONENT 라고 가정.
-- **Swap target 의 visibility 가 false** — swap target master 자체의 `visible: false` 케이스. v1 은 swap target 이 visible: true 라고 가정 (메타리치 케이스 충족).
-- **Swap target 의 master tree 가 변경된 후 다른 outer override 처리** — v1 은 swap target 의 children 에 outer 의 *나머지* overrides 적용. 만약 다른 path-keyed override 가 default master 의 children 을 target 으로 작성되어 있으면 그 override 는 (다른 GUID 트리이므로) 매칭 안 됨 — 무효. 메타리치는 outer override 가 swap target 의 GUID 를 알고 있어 자동 매칭.
+- **Component property INSTANCE_SWAP** — `componentPropRefs` with `componentPropNodeField === 'INSTANCE_SWAP'`. Not supported in v1. The meta-rich Dropdown rail case uses `overriddenSymbolID` directly, so prop-binding pass-through is unnecessary.
+- **Recursive variant swap** — the swap target is itself an INSTANCE. v1 assumes the swap target is a SYMBOL/COMPONENT.
+- **Swap target visibility is false** — the case where the swap target master itself has `visible: false`. v1 assumes the swap target is visible: true (the meta-rich case satisfies this).
+- **Outer overrides processing after the swap target's master tree changed** — v1 applies the outer's *remaining* overrides to the swap target's children. If another path-keyed override targets the default master's children, it will not match (different GUID tree) and is inert. Meta-rich does not hit this because the outer already knows the swap target's GUIDs.
 
 ## 7. Round 17 visual fix history (resolved)
 
-Round 16 초안 commit 직후 데이터 layer 는 정상 작동했지만 audit 스크린샷에 6번째 행이 보이지 않았다. 원인 가설은 audit harness bbox 미스매치였으나, Konva tree dump 로 직접 확인하니 "직접 선택" TEXT 가 `fill: rgba(255,255,255,1)` (white) + 배경 Rect 부재로 흰 컨테이너 위 흰 텍스트 = 시각적으로 사라진 상태였다. Audit harness 와 무관한 bug.
+Right after the round-16 draft commit, the data layer worked correctly but the 6th row was invisible in the audit screenshot. The initial hypothesis was an audit-harness bbox mismatch, but a direct Konva tree dump showed the "custom select" TEXT was `fill: rgba(255,255,255,1)` (white) with no background Rect — white text on a white container, visually invisible. Unrelated to the audit harness.
 
-진짜 원인: swap 이 적용되면 swap target master 의 fillPaints (blue background) 를 INSTANCE 에 inherit 해야 하는데, round-16 코드는 children 만 교체하고 visual 속성은 inherit 안 함. round 17 가 §3.4 I-V3~V5 로 visual 속성 inheritance 추가. fix 후 6번째 행이 figma 와 동일하게 BLUE 배경 + WHITE 텍스트로 정상 표시됨.
+The real cause: when swap is active, the swap target master's fillPaints (blue background) must be inherited by the INSTANCE, but round-16 code replaced children only and did not inherit visual properties. Round 17 added visual property inheritance via §3.4 I-V3~V5. After the fix, the 6th row renders correctly with the BLUE background + WHITE text, matching Figma.

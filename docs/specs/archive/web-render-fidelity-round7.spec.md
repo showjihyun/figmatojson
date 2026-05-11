@@ -1,43 +1,43 @@
 # spec/web-render-fidelity-round7
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/client/src/Canvas.tsx` (findAbsBounds + SelectionOverlay + Hover wiring) + `web/client/src/components/canvas/HoverOverlay.tsx` + `web/client/src/lib/blendMode.ts` |
-| 테스트 | `web/client/src/lib/blendMode.test.ts`, `web/client/src/components/canvas/HoverOverlay.test.tsx` (확장) |
-| 부모 | round 1~6 |
+| Status | Approved |
+| Implementation | `web/client/src/Canvas.tsx` (findAbsBounds + SelectionOverlay + Hover wiring) + `web/client/src/components/canvas/HoverOverlay.tsx` + `web/client/src/lib/blendMode.ts` |
+| Tests | `web/client/src/lib/blendMode.test.ts`, `web/client/src/components/canvas/HoverOverlay.test.tsx` (expanded) |
+| Parents | rounds 1~6 |
 
-## 1. 목적
+## 1. Purpose
 
-두 universal Figma 기능 — **회전 노드의 OBB 선택/hover overlay** 와 **per-paint blendMode**. 둘 다 .fig 데이터에 standard 로 정의됨, 파일 종속 휴리스틱 없음.
+Two universal Figma features — **OBB selection/hover overlay for rotated nodes** and **per-paint blendMode**. Both are defined as standard in the .fig data, with no file-specific heuristics.
 
-이전 라운드들로 회전 자체는 렌더되지만 (round 3), 선택/hover overlay 는 axis-aligned bbox 로 그려져서 회전된 노드를 따라가지 못함 — 이번 라운드에서 정합. paint blendMode 는 multi-paint stacking 의 약속을 완성 — 적층된 paint 들이 NORMAL 외 모드로 합성되도록.
+In previous rounds the node itself rotates correctly (round 3), but the selection / hover overlay is drawn as an axis-aligned bbox and cannot follow a rotated node — this round aligns them. The paint blendMode completes the multi-paint stacking contract — stacked paints can composite using modes beyond NORMAL.
 
 ## 2. OBB rotated overlay
 
 ### 2.1 Background
 
-현재:
-- 노드 자체는 round 3 의 `rotationDegrees` + Konva Group rotation prop 으로 회전 렌더 OK.
-- SelectionOverlay 는 `findAbsBounds` 가 반환한 axis-aligned `{x, y, w, h}` 만 받아 회전 정보 없이 그림.
-- HoverOverlay 는 `e.target.getClientRect({relativeTo: stage})` 의 AABB 받아 회전 정보 없이 그림.
+Today:
+- The node itself rotates correctly via round 3's `rotationDegrees` + the Konva Group rotation prop.
+- SelectionOverlay receives the axis-aligned `{x, y, w, h}` returned by `findAbsBounds` and draws without rotation info.
+- HoverOverlay receives `e.target.getClientRect({relativeTo: stage})` AABB and draws without rotation info.
 
-결과: 회전 노드 위에 axis-aligned 사각형이 떠 있어 시각적으로 어긋남.
+Result: an axis-aligned rectangle floats over a rotated node and visually misaligns.
 
 ### 2.2 Solution
 
-- I-OB1 `findAbsBounds(root, guid, ...)` 의 반환 형식을 `{x, y, w, h, rotation}` 으로 확장. `rotation` = leaf 노드의 회전 각도 (`rotationDegrees(node.transform) ?? 0`).
-- I-OB2 SelectionOverlay 의 props 에 `rotation: number` 추가. 그 outer Konva Group 에 `rotation={rotation}` 적용. Konva 가 group 의 `(x, y)` 를 pivot 으로 회전.
-- I-OB3 HoverOverlay (props `bbox + name + scale`) 에 `rotation: number` 추가. 동일하게 outer Group 에 적용. 호출자 (Canvas) 는 hover state 에 rotation 도 저장.
-- I-OB4 hoverApi.enter 에서 회전 추출:
-  - 노드의 transform 에서 `rotationDegrees` 호출.
-  - hover state 의 `designBbox` 는 회전 *전* 의 axis-aligned bbox (= node.transform.m02/m12 + size). `e.target.getClientRect({relativeTo: stage})` 는 회전 후의 AABB 를 반환하므로 회전 노드에서 부정확. 새 경로: `e.target.x()` / `e.target.y()` (Konva node 의 set 값) + `node.size`.
-- I-OB5 **Nested ancestor rotation 은 v1 비대상** — leaf 노드의 회전만 반영. 부모 FRAME 이 회전된 경우 selection overlay 는 부정확해질 수 있음 (메타리치는 그런 케이스 없음, 일반 디자인 파일에서도 거의 없음).
+- I-OB1 Extend `findAbsBounds(root, guid, ...)` to return `{x, y, w, h, rotation}`. `rotation` = the leaf node's rotation angle (`rotationDegrees(node.transform) ?? 0`).
+- I-OB2 Add `rotation: number` to SelectionOverlay's props. Apply `rotation={rotation}` to its outer Konva Group. Konva pivots around the group's `(x, y)`.
+- I-OB3 Add `rotation: number` to HoverOverlay (props `bbox + name + scale`). Apply the same way on its outer Group. The caller (Canvas) stores rotation in hover state too.
+- I-OB4 Extract rotation in hoverApi.enter:
+  - Call `rotationDegrees` on the node's transform.
+  - Hover state's `designBbox` is the *pre-rotation* axis-aligned bbox (= node.transform.m02/m12 + size). `e.target.getClientRect({relativeTo: stage})` returns the post-rotation AABB and is inaccurate for rotated nodes. New path: `e.target.x()` / `e.target.y()` (Konva node's set values) + `node.size`.
+- I-OB5 **Nested ancestor rotation is out of scope for v1** — only the leaf's rotation is reflected. If a parent FRAME is rotated, the selection overlay may be inaccurate (no such case in meta-rich, and it is rare in typical design files).
 
-### 2.3 다중 선택의 OBB
+### 2.3 OBB for multi-select
 
-- I-OB6 다중 선택 시 (group bbox + corner handles) — 각 멤버가 다른 rotation 을 가질 수 있어 group bbox 자체를 OBB 로 만들 수 없음. v1: 다중 선택은 axis-aligned (현재 동작) 유지. 별도 라운드에서 union-of-OBBs 로 발전 가능.
-- I-OB7 **Resize handles 는 rotation === 0 일 때만 렌더** (v1). 회전된 노드의 corner-drag resize 는 local-↔-parent 좌표 변환 매트릭스가 더 필요해 별도 라운드. 회전 노드는 outline + size badge 만 표시. 사용자는 인스펙터를 통해 resize 가능 (현행 동작).
+- I-OB6 In multi-select (group bbox + corner handles) — members can each have different rotations, so the group bbox itself cannot be made an OBB. v1: multi-select stays axis-aligned (current behavior). Can evolve into a union-of-OBBs in a separate round.
+- I-OB7 **Resize handles are rendered only when rotation === 0** (v1). Corner-drag resize on a rotated node needs an additional local-↔-parent coordinate transform matrix; deferred to a separate round. A rotated node shows only the outline + size badge. Users can resize via the inspector (current behavior).
 
 ## 3. Paint blendMode
 
@@ -52,25 +52,25 @@ paint: {
 }
 ```
 
-### 3.2 Konva 매핑
+### 3.2 Konva mapping
 
 - I-BM1 `konvaBlendMode(figma)` (lib/blendMode.ts):
-  - 'NORMAL' / undefined → undefined (prop omit).
-  - 'PASS_THROUGH' → undefined (Figma 의 PASS_THROUGH 는 그룹 합성을 부모로 통과시키는 의미 — 단일 paint 에는 적용 안 됨, undefined 로 fallback).
-  - 그 외 → kebab-case CSS / canvas 모드명:
+  - 'NORMAL' / undefined → undefined (omit prop).
+  - 'PASS_THROUGH' → undefined (Figma's PASS_THROUGH means "let the group composite through to the parent" — has no meaning for a single paint; fall back to undefined).
+  - Otherwise → kebab-case CSS / canvas mode name:
     - DARKEN → 'darken', MULTIPLY → 'multiply', COLOR_BURN → 'color-burn', LIGHTEN → 'lighten', SCREEN → 'screen', COLOR_DODGE → 'color-dodge', OVERLAY → 'overlay', SOFT_LIGHT → 'soft-light', HARD_LIGHT → 'hard-light', DIFFERENCE → 'difference', EXCLUSION → 'exclusion', HUE → 'hue', SATURATION → 'saturation', COLOR → 'color', LUMINOSITY → 'luminosity'.
-- I-BM2 적용: multi-paint stack 의 각 paint Rect 에 `globalCompositeOperation={konvaBlendMode(paint.blendMode)}` prop. ImageFill 의 Konva.Image 에도 동일.
-- I-BM3 첫 번째 paint (i === 0) 의 blendMode 는 underlying 캔버스가 transparent 라 NORMAL 과 동일한 결과. 그래도 prop 은 그대로 전달 (특수 케이스 없음).
+- I-BM2 Apply: every paint Rect in the multi-paint stack gets `globalCompositeOperation={konvaBlendMode(paint.blendMode)}`. The Konva.Image inside ImageFill gets the same.
+- I-BM3 The first paint (i === 0) has a transparent underlying canvas, so its blendMode produces the same result as NORMAL. We still pass the prop through unchanged (no special case).
 
-## 4. 비대상 (v1)
+## 4. Out of scope (v1)
 
-- **Multi-select OBB**: 각 멤버의 회전 합 union. 별도 라운드.
-- **Nested ancestor rotation 누적**: 부모 FRAME 이 회전된 경우 leaf 의 절대 회전 = 부모 + 자식. v1 leaf 만.
-- **Skew transforms**: round 3 에서 punt 한 것과 동일 — `isPureRotation === false` 면 회전 0 으로 떨어짐.
-- **Layer-level blendMode** (`node.blendMode`): 노드 전체의 blendMode (paint 가 아니라 노드). 동일한 매핑 함수 재사용 가능 — 발견 시 별도 라운드.
+- **Multi-select OBB**: union over each member's rotation. Separate round.
+- **Accumulated nested ancestor rotation**: when a parent FRAME is rotated, the leaf's absolute rotation = parent + child. v1 uses only the leaf.
+- **Skew transforms**: same as the round 3 punt — `isPureRotation === false` falls back to rotation 0.
+- **Layer-level blendMode** (`node.blendMode`): blendMode for the entire node (not a paint). The same mapping function can be reused — a separate round when encountered.
 
 ## 5. Resolved questions
 
-- **Konva Group rotation pivot**: `(x, y)` 위치를 pivot 으로 회전. SelectionOverlay 의 outer Group 위치를 노드의 `(x, y)` 로 두고 rotation 적용 → 시각적으로 노드와 정확히 일치.
-- **`globalCompositeOperation` 가 transparent canvas 에서 동작하는지**: 표준 canvas 동작. 이전 paint 가 그려진 픽셀과 새 paint 의 블렌드는 일반적인 합성 룰을 따른다 (multiply, screen 등 모두 표준).
-- **PASS_THROUGH 처리**: Figma 의 그룹 PASS_THROUGH 는 부모로 합성을 위임하는 의미라 *paint* 단에선 의미 없음 — 무시.
+- **Konva Group rotation pivot**: rotates around the `(x, y)` position. Place SelectionOverlay's outer Group at the node's `(x, y)` and apply rotation → visually matches the node exactly.
+- **Does `globalCompositeOperation` work on a transparent canvas?**: yes, this is standard canvas behavior. Blending previously-drawn pixels with a new paint follows the usual compositing rules (multiply, screen, etc. are all standard).
+- **Handling PASS_THROUGH**: Figma's group PASS_THROUGH delegates compositing to the parent and has no meaning at the *paint* level — ignored.

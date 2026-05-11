@@ -1,15 +1,15 @@
 # spec/web-render-fidelity-round4
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/client/src/Canvas.tsx` 의 default Rect 분기 + `web/client/src/lib/gradient.ts`, `web/client/src/lib/paint.ts` |
-| 테스트 | `web/client/src/lib/gradient.test.ts`, `web/client/src/lib/paint.test.ts` |
-| 부모 | round 1~3 (typography / strokeAlign / clip / shadow / rotation / opacity / cap-join) |
+| Status | Approved |
+| Implementation | the default Rect branch in `web/client/src/Canvas.tsx` + `web/client/src/lib/gradient.ts`, `web/client/src/lib/paint.ts` |
+| Tests | `web/client/src/lib/gradient.test.ts`, `web/client/src/lib/paint.test.ts` |
+| Parents | rounds 1~3 (typography / strokeAlign / clip / shadow / rotation / opacity / cap-join) |
 
-## 1. 목적
+## 1. Purpose
 
-Universal Figma 기능 3종 — **gradient 채우기 (LINEAR / RADIAL)**, **multi-paint 의 top-paint 선택 정정**, **dashPattern (점선)**. 모두 Figma 의 공개 데이터 모델에 정의된 표준 필드. 파일 종속 휴리스틱 없음.
+Three universal Figma features — **gradient fills (LINEAR / RADIAL)**, **correct top-paint selection across multiple paints**, and **dashPattern (dashed strokes)**. All are standard fields defined in Figma's public data model. No file-specific heuristics.
 
 ## 2. Gradient fills
 
@@ -30,30 +30,30 @@ paint: {
 
 ### 2.2 Coordinate model
 
-Figma 의 gradient 좌표 시스템:
-- 단위 gradient 공간: t-축이 (0,0.5) → (1,0.5) 직선. center 라인을 따라 stop 들이 배치.
-- `paint.transform` 은 이 공간에서 bbox-normalized 공간 (0..1, 0..1) 으로 매핑하는 affine.
+Figma's gradient coordinate system:
+- Unit gradient space: the t-axis is the line from (0, 0.5) to (1, 0.5). Stops lie along the center line.
+- `paint.transform` is an affine mapping this space into bbox-normalized space (0..1, 0..1).
 
-Konva 가 받는 좌표는 **노드의 로컬 픽셀 좌표** (0..w, 0..h). 따라서 두 단계 변환:
+Konva expects **node-local pixel coordinates** (0..w, 0..h). Hence a two-step transform:
 1. unit point → bbox-normalized: `applyTransform(paint.transform, point)`
 2. bbox-normalized → pixel: `(p.x * w, p.y * h)`
 
 ### 2.3 LINEAR gradient
 
-- I-G1 start point (Konva `fillLinearGradientStartPoint`): `applyTransform(paint.transform, (0, 0.5))` × `(w, h)`.
-- I-G2 end point (`fillLinearGradientEndPoint`): `applyTransform(paint.transform, (1, 0.5))` × `(w, h)`.
-- I-G3 color stops (`fillLinearGradientColorStops`): flat array `[pos1, css1, pos2, css2, ...]` where `cssN = rgbaToCss(stops[N].color, paint.opacity)`. position 은 `stops[N].position` 그대로 (Konva 도 0..1 사용).
+- I-G1 Start point (Konva `fillLinearGradientStartPoint`): `applyTransform(paint.transform, (0, 0.5))` × `(w, h)`.
+- I-G2 End point (`fillLinearGradientEndPoint`): `applyTransform(paint.transform, (1, 0.5))` × `(w, h)`.
+- I-G3 Color stops (`fillLinearGradientColorStops`): flat array `[pos1, css1, pos2, css2, ...]` where `cssN = rgbaToCss(stops[N].color, paint.opacity)`. Position passes through as `stops[N].position` (Konva also uses 0..1).
 
 ### 2.4 RADIAL gradient
 
-- I-G4 start point (center, `fillRadialGradientStartPoint`): `applyTransform(paint.transform, (0.5, 0.5))` × `(w, h)`.
-- I-G5 end point (`fillRadialGradientEndPoint`) = same as start (radial gradient 의 end 위치는 center 와 동일; Konva 가 startRadius~endRadius 로 실제 표현).
-- I-G6 startRadius = 0; endRadius = bbox-normalized space 의 (1, 0.5) 와 (0.5, 0.5) 사이 거리 × bbox 크기 — `dx = m00*0.5 = halfWidth_in_paint_space`, similar for dy. radius = `sqrt((m00*0.5)² * w² + (m10*0.5)² * h²)` 같은 공식. 단순화: `radius = sqrt((dx*w)² + (dy*h)²)` where `(dx, dy) = applyTransform(t, (1, 0.5)) - applyTransform(t, (0.5, 0.5))`.
-- I-G7 color stops 형식 LINEAR 와 동일.
+- I-G4 Start point (center, `fillRadialGradientStartPoint`): `applyTransform(paint.transform, (0.5, 0.5))` × `(w, h)`.
+- I-G5 End point (`fillRadialGradientEndPoint`) = same as start (a radial gradient's end position equals its center; Konva expresses the extent through startRadius~endRadius).
+- I-G6 startRadius = 0; endRadius = distance between `(1, 0.5)` and `(0.5, 0.5)` in bbox-normalized space scaled by bbox size — `dx = m00*0.5 = halfWidth_in_paint_space`, similar for dy. Formula: `radius = sqrt((m00*0.5)² * w² + (m10*0.5)² * h²)`. Simplified: `radius = sqrt((dx*w)² + (dy*h)²)` where `(dx, dy) = applyTransform(t, (1, 0.5)) - applyTransform(t, (0.5, 0.5))`.
+- I-G7 Color-stops format is identical to LINEAR.
 
 ### 2.5 ANGULAR / DIAMOND
 
-- I-G8 Konva 는 angular / diamond 를 native 로 지원하지 않음. v1 fallback: paint 의 첫 번째 stop 의 색상 (with paint.opacity 합성) 을 SOLID 처럼 사용. Figma 와 시각 차이 있으나 사용자 노드 식별은 유지.
+- I-G8 Konva does not natively support angular / diamond. v1 fallback: use the paint's first stop color (composited with paint.opacity) as if SOLID. There will be a visual difference compared to Figma, but node identification is preserved.
 
 ### 2.6 Helper
 
@@ -62,57 +62,57 @@ Konva 가 받는 좌표는 **노드의 로컬 픽셀 좌표** (0..w, 0..h). 따�
 export function gradientFromPaint(paint, w, h): KonvaGradient | null
 ```
 
-반환:
-- LINEAR / RADIAL — Konva fill 관련 prop 들 (start, end, color stops, radii)
-- ANGULAR / DIAMOND — `null` (caller 가 first-stop fallback 처리)
-- 그 외 / 잘못된 paint — `null`
+Returns:
+- LINEAR / RADIAL — Konva fill props (start, end, color stops, radii)
+- ANGULAR / DIAMOND — `null` (caller handles the first-stop fallback)
+- otherwise / invalid paint — `null`
 
-## 3. Multi-paint: top-paint 선택
+## 3. Multi-paint: top-paint selection
 
 ### 3.1 Background
 
-Figma 의 `fillPaints` 배열은 **bottom-up 적층** — `fillPaints[0]` 이 가장 아래, `fillPaints[N-1]` 이 가장 위 (사용자에게 보이는 면). 기존 `solidFillCss` 는 *첫 번째* visible SOLID 를 픽 — 즉 가장 아래 paint 가 채택되어 *위 paint 가 가려지는 효과* 가 시각화되지 않음.
+Figma's `fillPaints` array is **stacked bottom-up** — `fillPaints[0]` is the bottom-most, `fillPaints[N-1]` is the top-most (the face the user sees). The previous `solidFillCss` picked the *first* visible SOLID — i.e. it picked the bottom paint, so the *covering effect of the upper paint* was lost.
 
-### 3.2 정정 규칙
+### 3.2 Correction rule
 
-- I-MP1 `pickTopPaint(fillPaints)` = `fillPaints` 를 **역순으로 순회**, `visible !== false` 이면서 IMAGE 가 아닌 첫 항목 (= 위에서 가려진 가장 윗 paint) 반환.
-- I-MP2 모든 paint 가 IMAGE 거나 hidden 이면 `null` 반환 → caller 가 `transparent` 또는 image fill 처리.
-- I-MP3 IMAGE 는 별도 처리 (`ImageFill` 컴포넌트가 이미 존재). `pickTopPaint` 는 IMAGE 를 건너뜀.
-- I-MP4 **완전한 multi-paint 적층** (alpha-blending, gradient over solid 등) 은 v2 비대상. 현재는 위 paint 한 개만 적용.
+- I-MP1 `pickTopPaint(fillPaints)` = scan `fillPaints` **in reverse**; return the first entry that is `visible !== false` and not IMAGE (i.e. the top-most non-image paint).
+- I-MP2 If every paint is IMAGE or hidden, return `null` → caller falls back to `transparent` or image fill.
+- I-MP3 IMAGE is handled separately (the `ImageFill` component already exists). `pickTopPaint` skips IMAGE.
+- I-MP4 **Full multi-paint stacking** (alpha blending, gradient-over-solid, etc.) is out of scope for v2. We apply only the top paint here.
 
 ### 3.3 Caller wiring
 
-`Canvas.tsx` 의 default Rect 분기:
+In `Canvas.tsx`'s default Rect branch:
 1. `top = pickTopPaint(node.fillPaints)`
 2. `top.type === 'SOLID'` → fill = rgba string
-3. `top.type === 'GRADIENT_LINEAR' | 'GRADIENT_RADIAL'` → fill = gradient props (Konva.Rect 가 받음)
-4. `top` 이 GRADIENT_ANGULAR/DIAMOND 면 first-stop solid fallback
-5. `top === null` → `transparent` (fill 없음)
+3. `top.type === 'GRADIENT_LINEAR' | 'GRADIENT_RADIAL'` → fill = gradient props (accepted by Konva.Rect)
+4. `top` is GRADIENT_ANGULAR/DIAMOND → first-stop solid fallback
+5. `top === null` → `transparent` (no fill)
 
 ## 4. dashPattern
 
 ### 4.1 Field shape
 
 ```ts
-node.dashPattern?: number[]   // 예: [10, 5] → 10px 채움, 5px 빈, 10px 채움, ...
+node.dashPattern?: number[]   // e.g. [10, 5] → 10 px filled, 5 px gap, 10 px filled, ...
 ```
 
-### 4.2 Konva 매핑
+### 4.2 Konva mapping
 
-- I-DP1 `node.dashPattern` 이 **non-empty array** 이면 stroke 가 적용되는 모든 Konva 요소 (Rect / Path / per-side Line) 의 `dash` prop 으로 그대로 전달.
-- I-DP2 `dashPattern` 이 빈 배열이거나 missing → `dash` prop omit (실선).
-- I-DP3 짝수 길이 보장 — Konva 가 홀수 길이 받으면 알아서 반복하므로 변환 불필요.
+- I-DP1 If `node.dashPattern` is a **non-empty array**, pass it through unchanged as the `dash` prop on every stroke-bearing Konva element (Rect / Path / per-side Line).
+- I-DP2 If `dashPattern` is an empty array or missing → omit the `dash` prop (solid stroke).
+- I-DP3 No even-length normalization needed — Konva handles odd-length arrays by repeating.
 
-## 5. 비대상 (v1)
+## 5. Out of scope (v1)
 
-- **Multi-paint stacking** — alpha 가 섞이는 multi-paint 의 진짜 합성. 현재는 top-paint 만 보임. 12개 노드 중 대부분이 단순 "흰색 위 light-blue" 형식 — top-paint 가 정답.
-- **GRADIENT_ANGULAR / GRADIENT_DIAMOND** — Konva 미지원, first-stop solid fallback.
-- **Image fills 의 multi-paint 결합** — IMAGE + SOLID 적층은 ImageFill 컴포넌트 + Rect 두 개로 분리 가능하지만 별도 라운드.
-- **stroke gradient** — `strokePaints` 가 GRADIENT 인 경우. 데이터 분포상 거의 없음.
-- **gradient transform 의 skew/회전 매트릭스** — `applyTransform` 이 모든 affine 을 처리 (회전된 gradient 도 동작). 다만 Konva 의 gradient 자체가 항상 직선 / 원형이라 skew 결과는 시각적으로 약간 다를 수 있음.
+- **Multi-paint stacking** — true alpha-blended compositing across paints. Today only the top paint shows. Most of the 12 affected nodes are simple "light-blue over white" arrangements where the top paint is already the right answer.
+- **GRADIENT_ANGULAR / GRADIENT_DIAMOND** — Konva does not support these; falls back to first-stop solid.
+- **Multi-paint combinations with image fills** — IMAGE + SOLID stacks could be split into ImageFill + Rect, but deferred to a separate round.
+- **Stroke gradients** — when `strokePaints` contain a GRADIENT. Almost absent from the data distribution.
+- **Skew / rotation matrices inside gradient transform** — `applyTransform` handles every affine (rotated gradients work). Konva's gradients are always straight / circular, however, so skewed inputs can render slightly off.
 
 ## 6. Resolved questions
 
-- **Gradient transform 의 해석 방향** — Figma 는 unit gradient space → bbox-normalized 매핑. start = `t(0, 0.5)`, end = `t(1, 0.5)`. 공식 spec / figma-js 라이브러리 / fig-kiwi 분석 모두 일치.
-- **Multi-paint: first vs last** — Figma UI 에서 paint 추가 시 "Add fill" 버튼이 stack 의 *위* 에 추가. 즉 array[N-1] 이 시각적으로 위. 우리 `solidFillCss` 가 first-pick 이었던 건 단순한 PoC 누락. 이번에 정정.
-- **dashPattern 적용 범위** — Konva 의 dash prop 은 stroke 에 한해 동작 (fill 에 영향 없음). 따라서 dashPattern 이 set 되어도 fill 은 정상 — Figma 동일.
+- **Direction of gradient transform interpretation** — Figma maps unit gradient space → bbox-normalized. start = `t(0, 0.5)`, end = `t(1, 0.5)`. The official spec, the figma-js library and our fig-kiwi analysis all agree.
+- **Multi-paint: first vs last** — In Figma's UI, "Add fill" inserts at the *top* of the stack, so array[N-1] is visually on top. The old `solidFillCss` first-pick was simply a PoC oversight. Fixed here.
+- **Scope of dashPattern** — Konva's dash prop only affects strokes (fills are untouched). Even when dashPattern is set, the fill renders normally — same as Figma.

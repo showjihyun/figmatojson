@@ -1,66 +1,55 @@
 # spec/web-render-fidelity-round16
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/core/domain/colorStyleRef.ts` (`effectiveTextStyle`) + `web/client/src/render/nodeRender.ts` (text-simple / text-styled plan) + `web/client/src/Inspector.tsx` (TextSection 표시) |
-| 테스트 | `web/core/domain/colorStyleRef.test.ts` (effectiveTextStyle 케이스 추가) + 기존 nodeRender 회귀 |
-| 형제 | round 15 (Inspector library color/text-style label), round 26 (textStyleRuns — per-character overrides) |
+| Status | Approved |
+| Implementation | `web/core/domain/colorStyleRef.ts` (`effectiveTextStyle`) + `web/client/src/render/nodeRender.ts` (text-simple / text-styled plans) + `web/client/src/Inspector.tsx` (TextSection display) |
+| Tests | `web/core/domain/colorStyleRef.test.ts` (effectiveTextStyle cases added) + existing nodeRender regressions |
+| Siblings | round 15 (Inspector library color / text-style label), round 26 (textStyleRuns — per-character overrides) |
 
-## 1. 배경 — 원인 분석
+## 1. Background — root-cause analysis
 
-`.fig` 의 TEXT 노드는 두 가지 layer 의 typography 정보를 carry 한다:
+A `.fig` TEXT node carries typography information at two layers:
 
-1. **Node-level raw 필드** — `fontName`, `fontSize`, `lineHeight`,
-   `letterSpacing`, `textCase`, `textDecoration` 등이 노드 자체에 직접 set.
-2. **Style asset 참조** — `node.styleIdForText.guid` 가 있으면 별도 노드
-   (type=`TEXT` + `styleType='TEXT'`) 가 *style 정의* 를 carry.
+1. **Node-level raw fields** — `fontName`, `fontSize`, `lineHeight`, `letterSpacing`, `textCase`, `textDecoration` etc. are set directly on the node.
+2. **Style-asset reference** — when `node.styleIdForText.guid` is present, a separate node (type=`TEXT` + `styleType='TEXT'`) carries the *style definition*.
 
-Figma 의 동작 — **`styleIdForText` 가 있으면 style asset 의 typography 가
-*effective* 값** 이고 노드의 raw 필드는 stale 잔재로 *무시* 된다 (per-
-character override 가 없는 한). 즉:
+Figma's behavior — **when `styleIdForText` is present, the style asset's typography is the *effective* value** and the node's raw fields are stale leftovers, *ignored* (unless a per-character override applies). That is:
 
 ```
 effective_fontName  = styleAsset.fontName  ?? node.fontName
 effective_fontSize  = styleAsset.fontSize  ?? node.fontSize
-... (이하 동일)
+... (and so on)
 ```
 
-### 1.1 메타리치 toast popup 케이스 (사용자 발견)
+### 1.1 Meta-rich toast popup case (reported by user)
 
-| 노드 | raw fontName | raw fontSize | styleIdForText | 결과 |
+| Node | raw fontName | raw fontSize | styleIdForText | Effective |
 |---|---|---|---|---|
-| `53:303` ("수정이 완료되었습니다.") | Inter Regular | 12 | `16:727` | Pretendard SemiBold 16 (effective) |
-| `53:349` ("저장에 실패했습니다.") | Pretendard SemiBold | 18 | `16:727` | Pretendard SemiBold 16 (effective) |
+| `53:303` ("Edit complete.") | Inter Regular | 12 | `16:727` | Pretendard SemiBold 16 (effective) |
+| `53:349` ("Save failed.") | Pretendard SemiBold | 18 | `16:727` | Pretendard SemiBold 16 (effective) |
 
-→ `16:727` = `Body/L_sb` (Pretendard SemiBold 16). Figma 에선 두 노드가
-동일하게 보임. 우리 클라이언트는 raw 만 사용 → Inter 12 vs Pretendard 18
-로 다르게 그려짐. 이게 시각 격차의 직접 원인.
+→ `16:727` = `Body/L_sb` (Pretendard SemiBold 16). Figma renders the two nodes identically. Our client uses raw only → renders as Inter 12 vs Pretendard 18. That is the direct cause of the visual gap.
 
-### 1.2 Round 15 와의 차이
+### 1.2 Difference from round 15
 
-Round 15 는 *라벨로* style name 표시만 (`Style: Body/L_sb`). 본 라운드는
-*실제 typography 적용* — Canvas + Inspector 가 effective 값 기반 동작.
+Round 15 displays only the style name *as a label* (`Style: Body/L_sb`). This round actually *applies the typography* — the Canvas + Inspector both operate on effective values.
 
-### 1.3 Round 26 (textStyleRuns) 와의 관계
+### 1.3 Relationship to round 26 (textStyleRuns)
 
-Round 26 은 *per-character* override (한 노드 안 부분 영역의 다른 style).
-본 라운드는 *node-level base*. 둘은 직교 — character override 가 base
-위에 stack 됨:
+Round 26 handles *per-character* overrides (a different style applied to a sub-range inside a single node). This round handles the *node-level base*. The two are orthogonal — character overrides stack on top of the base:
 
 ```
 char_effective_fontSize = override.fontSize ?? base_effective_fontSize
                                               ↑
-                                     (round 16 이 정의)
+                                     (defined by round 16)
 ```
 
-## 2. 처리 방향
+## 2. Approach
 
-### 2.1 Effective text style resolver
+### 2.1 Effective text-style resolver
 
-신규 헬퍼 `effectiveTextStyle(node, root) → EffectiveTextStyle` —
-`web/core/domain/colorStyleRef.ts` 에 collocate (이미 `textStyleName` 이
-같은 alias path 를 walk 하므로 같은 모듈).
+A new helper `effectiveTextStyle(node, root) → EffectiveTextStyle` — collocated in `web/core/domain/colorStyleRef.ts` (it walks the same alias path that `textStyleName` already does, so it belongs in the same module).
 
 ```ts
 interface EffectiveTextStyle {
@@ -75,78 +64,50 @@ interface EffectiveTextStyle {
 }
 ```
 
-룰:
+Rules:
 
-- I-1 `node.styleIdForText.guid` 가 있고 lookup 성공 + 타깃의 `type ==='TEXT'`
-  + `styleType === 'TEXT'` 이면 → 타깃 노드의 위 필드들을 그대로 채택.
-  타깃에 어떤 필드가 *없으면* node 의 raw 필드로 *필드 단위 fallback*.
-  (style asset 이 fontSize 만 정의하고 textCase 는 미정의 → fontSize 는
-  asset, textCase 는 node raw 에서.)
-- I-2 styleIdForText 부재 / lookup 실패 / 타깃이 style asset 형태 아님
-  → 모든 필드가 node raw 에서. round 16 이전과 동일 동작.
-- I-3 root 가 null/undefined 면 lookup 불가 → I-2 의 fallback. (Inspector
-  callers 가 root 를 항상 전달하지만 방어).
-- I-4 헬퍼는 *pure* — no IO, no React. Canvas plan + Inspector 모두 사용.
+- I-1 When `node.styleIdForText.guid` is present and the lookup succeeds and the target's `type === 'TEXT'` + `styleType === 'TEXT'` → adopt the above fields from the target node verbatim. If any field is *missing* on the target, fall back to the node's raw field *per field*. (Style asset defines fontSize only and not textCase → fontSize from the asset, textCase from the node raw.)
+- I-2 styleIdForText missing / lookup failed / target is not a style asset → every field comes from the node raw. Same behavior as before round 16.
+- I-3 If root is null/undefined → lookup impossible → fall back as in I-2. (Inspector callers always pass root, but defend regardless.)
+- I-4 The helper is *pure* — no IO, no React. Used by both the Canvas plan and the Inspector.
 
-### 2.2 Canvas 렌더 (nodeRender)
+### 2.2 Canvas render (nodeRender)
 
-- I-5 `nodeRender.ts` 의 `RenderContext` 에 새 필드 `documentRoot?: unknown`
-  추가. `App.tsx` 가 `nodeRender(node, ctx)` 호출 시점에 `doc` 을 ctx 로
-  넘긴다.
-- I-6 `planTextSimple` / `planTextStyled` 가 raw 필드 대신 `effectiveTextStyle(
-  node, ctx.documentRoot)` 결과를 사용해 fontFamily / fontSize /
-  fontStyle / lineHeight / letterSpacing / textCase / textDecoration 을
-  채운다. raw 필드 직접 접근 코드 모두 헬퍼 통과.
-- I-7 round 26 의 character-level override 는 `effectiveTextStyle` 의
-  base 위에 stack — round 26 의 `splitTextRuns` 는 base 를 입력 받도록
-  변경 (필요하면 별도 라운드, round 16 은 base 만 정확). round 26 의
-  per-run fontSize/fontFamily 가 v1 비대상 (`Canvas.tsx` 주석) 이라
-  현재는 base 만 효과적이면 시각이 충분히 figma 에 가까워진다.
+- I-5 Add a new field `documentRoot?: unknown` to `RenderContext` in `nodeRender.ts`. `App.tsx` passes `doc` through ctx at the call site of `nodeRender(node, ctx)`.
+- I-6 `planTextSimple` / `planTextStyled` use the result of `effectiveTextStyle(node, ctx.documentRoot)` instead of raw fields to populate fontFamily / fontSize / fontStyle / lineHeight / letterSpacing / textCase / textDecoration. Every direct access to a raw field now goes through the helper.
+- I-7 Round 26's character-level overrides stack on top of the `effectiveTextStyle` base — round 26's `splitTextRuns` is updated to accept the base as input (if not, a separate round will follow; round 16 only locks in the base). Round 26's per-run fontSize/fontFamily is out of scope in v1 (per the `Canvas.tsx` comment), so getting the base right is sufficient for visuals close enough to Figma at this point.
 
 ### 2.3 Inspector — Text section
 
-- I-8 Inspector Text section 의 *표시* 는 effective 값. 즉 사용자가 보는
-  `Family`, `Weight`, `Size`, `L Height`, `Letter` 등 input 의 *value*
-  prop 이 effective 에서 읽힘.
-- I-9 *편집* (TextInput / NumberInput 의 onCommit) 은 raw 필드를 patch.
-  v1 비대상: style 적용된 노드 편집 시 raw 가 변경돼도 effective 는
-  여전히 style asset 값이라 화면에 변화 없을 수 있음 — Inspector 의
-  Style row (round 15 가 추가) 가 사용자에게 "style 적용 중" 신호 역할.
-  Detach (편집 시 styleIdForText 자동 제거 + raw 로 전환) 는 *별도
-  라운드 후보*. round 16 은 이 시나리오를 *알려진 한계* 로 명시.
-- I-10 Inspector 가 `root` prop 을 이미 받음 (round 15) — Text section
-  도 같은 root 를 헬퍼에 전달.
+- I-8 The *display* in the Inspector Text section uses effective values. The `Family` / `Weight` / `Size` / `L Height` / `Letter` etc. inputs the user sees read their *value* prop from effective.
+- I-9 *Editing* (the onCommit of TextInput / NumberInput) patches raw fields. Known v1 limitation: editing a styled node may change raw without affecting effective (which still comes from the asset), so nothing visible changes — Inspector's Style row (added in round 15) signals "style is applied" to the user. Detach (auto-remove styleIdForText on edit + switch to raw) is a *separate-round candidate*. Round 16 documents this scenario as a *known limitation*.
+- I-10 Inspector already receives the `root` prop (round 15) — the Text section passes the same root into the helper.
 
-### 2.4 audit harness 영향
+### 2.4 Audit harness impact
 
-- I-11 `audit-oracle.spec.md` 의 COMPARABLE_FIELDS 의 `fontSize`,
-  `fontName.family`, `fontName.style` 은 *node raw* 를 읽는다 (`pickOurs`).
-  본 라운드 후에도 audit 비교 자체는 raw 사용 — figma plugin/REST 가
-  resolved effective 를 emit 하므로 *기존 audit* 의 mismatch 가 일부
-  생길 수 있음. 별도 라운드에서 audit pickOurs 를 effective 로 전환 권장.
-  round 16 자체는 audit 비교 룰 변경 안 함.
+- I-11 `audit-oracle.spec.md`'s COMPARABLE_FIELDS `fontSize`, `fontName.family`, `fontName.style` read *node raw* (`pickOurs`). After this round the audit still compares raw — but the figma plugin/REST emits resolved effective, so existing *audit* mismatches may appear in places. Switching audit pickOurs to effective is recommended in a separate round. Round 16 itself does not change audit comparison rules.
 
-## 3. Invariants — 한 줄 요약
+## 3. Invariants — one-liners
 
-| ID | 명제 | 검증 |
+| ID | Statement | Verified by |
 |---|---|---|
-| I-1 | styleIdForText 있고 asset 정상 → style 필드 우선, 빈 필드는 node raw fallback | unit |
-| I-2 | styleIdForText 부재 / 잘못된 타깃 → 모두 node raw | unit |
-| I-3 | root null → 모두 node raw | unit |
-| I-6 | nodeRender text plan 들이 effective 값 사용 | unit (nodeRender.test.ts) |
-| I-8 | Inspector Text section 표시값 = effective | manual UI |
-| I-9 | Inspector edit onCommit 은 raw 필드 patch | manual UI |
+| I-1 | styleIdForText present and asset valid → style fields take precedence, missing fields fall back to node raw | unit |
+| I-2 | styleIdForText missing / target invalid → everything from node raw | unit |
+| I-3 | root null → everything from node raw | unit |
+| I-6 | nodeRender text plans use effective values | unit (nodeRender.test.ts) |
+| I-8 | Inspector Text section displayed value = effective | manual UI |
+| I-9 | Inspector edit onCommit patches raw fields | manual UI |
 
 ## 4. Out of scope
 
-- ❌ Inspector edit detach 정책 (편집 시 자동 styleIdForText 제거). round 17 후보.
-- ❌ Audit pickOurs 의 effective 전환. round 17 후보.
-- ❌ Per-character `styleOverrideTable` 의 fontSize/fontFamily override (round 26 의 v1 비대상). round 17/18 후보.
-- ❌ Component 에 적용된 style asset 의 nested resolution (style asset → 또 다른 style asset alias). 단일 hop.
-- ❌ Style asset 자체의 *편집*. 본 라운드는 read-only 적용.
+- ❌ Inspector edit-detach policy (auto-remove styleIdForText on edit). Round 17 candidate.
+- ❌ Switching audit pickOurs to effective. Round 17 candidate.
+- ❌ Per-character `styleOverrideTable` fontSize/fontFamily overrides (round 26 v1 out-of-scope). Round 17/18 candidate.
+- ❌ Nested resolution of style assets applied to a component (style asset → another style-asset alias). Single hop.
+- ❌ *Editing* the style asset itself. This round is read-only application.
 
-## 5. 참조
+## 5. References
 
-- Round 15: `colorVarName` / `textStyleName` (라벨 표시)
+- Round 15: `colorVarName` / `textStyleName` (label display)
 - Round 26: `textStyleRuns` (per-character overrides)
-- 메타리치 fixture: `53:303`, `53:349`, `16:727 "Body/L_sb"`
+- Meta-rich fixture: `53:303`, `53:349`, `16:727 "Body/L_sb"`

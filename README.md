@@ -56,7 +56,7 @@ Built for designers exporting backups, engineers migrating off Figma, RAG pipeli
 | 🧪 784 tests | 162 main (unit + integration) + 622 web (component + helpers) + Playwright e2e |
 | 🖥 Web editor | React 19 + Konva canvas + Inspector panel + chat agent (Anthropic Messages API tool loop) |
 | 📐 Spec-driven | 60+ `docs/specs/*.spec.md` with invariants; every round of work documented |
-| 🌍 Bilingual docs | Single-file `docs/dev-guide.html` (한국어 / English toggle, 8 mermaid diagrams) |
+| 🌍 Bilingual docs | Single-file `docs/dev-guide.html` (Korean / English toggle, 8 mermaid diagrams) |
 
 ---
 
@@ -166,7 +166,7 @@ Need a different output? Plug into any stage:
 
 For the data-shape glossary (Kiwi Record / Tree Node / Pen Node / Master / Instance / Override / Expansion / GUID / Pen ID / Direct vs Effective Visibility / …), see [`CONTEXT.md`](./CONTEXT.md).
 
-For diagrams of all of the above plus the Web editor, the SDD methodology, and the Round 11~18-B history, see **[`docs/dev-guide.html`](./docs/dev-guide.html)** (한국어 / English toggle, 8 mermaid diagrams).
+For diagrams of all of the above plus the Web editor, the SDD methodology, and the Round 11~18-B history, see **[`docs/dev-guide.html`](./docs/dev-guide.html)** (Korean / English toggle, 8 mermaid diagrams).
 
 ---
 
@@ -377,7 +377,7 @@ Bug reports, edge-case `.fig` files, and PRs welcome. Before opening a PR:
 2. Run `npm run typecheck` — both projects must stay at baseline 0 new errors
 3. If you're touching the pipeline, read [`CONTEXT.md`](./CONTEXT.md) for the domain language
 4. If you're proposing a new output format / repack mode / Inspector field, sketch a spec in `docs/specs/<feature>.spec.md` first (SDD iron rule)
-5. Sample fixtures live in `docs/` (`bvp.fig` 6 MB, `메타리치 화면 UI Design.fig` 35 K nodes). For other reproductions please attach the `.fig` to the issue.
+5. Sample fixtures live in `docs/` (`bvp.fig` 6 MB, a 35K-node design file). For other reproductions please attach the `.fig` to the issue.
 
 For Claude Code users: this repo ships with three project skills in `.claude/skills/` (`figma-cli`, `figma-pen-export`, `figma-internals`) that auto-load when you work in the relevant area.
 

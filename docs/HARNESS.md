@@ -1,118 +1,118 @@
 # HARNESS — Test Harness Engineering
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 문서 버전 | v1.0 |
-| 작성일 | 2026-04-30 |
-| 적용 대상 | figma-reverse v2 (양방향 round-trip — [SPEC-roundtrip.md](./SPEC-roundtrip.md)) |
-| 자매 문서 | [SDD.md](./SDD.md) (개발 방법론) |
+| Document version | v1.0 |
+| Written | 2026-04-30 |
+| Applies to | figma-reverse v2 (bidirectional round-trip — [SPEC-roundtrip.md](./SPEC-roundtrip.md)) |
+| Sibling doc | [SDD.md](./SDD.md) (development methodology) |
 
 ---
 
-## 1. 정의
+## 1. Definition
 
-> **Test Harness Engineering** = "사람이 손으로 검증할 일을 점진적으로 자동화 하네스로 옮기는 엔지니어링 활동."
+> **Test Harness Engineering** = "the engineering activity of progressively moving what humans verify by hand into an automated harness."
 
-본 도구는 양방향 round-trip이 핵심 기능이라 **검증을 자동화하지 않으면 변경마다 회귀 발생 위험**이 매우 높다. 모든 변경은:
+Because bidirectional round-trip is this tool's core feature, **failing to automate verification carries a very high regression risk per change**. Every change is:
 
 ```
-변경 → 하네스 통과 → merge
-       ▲
-       │ 하네스가 자동으로:
-       │  ① 35,660 노드 GUID 보존 확인
-       │  ② 페이지 6개 트리 구조 동등 확인
-       │  ③ 1599 SVG 모두 round-trip
-       │  ④ 12 이미지 sha256 동등
-       │  ⑤ V-01~V-12 자동 검증
-       └───────────────────────
+change → harness pass → merge
+         ▲
+         │ Automatically the harness:
+         │  ① confirms preservation of 35,660 node GUIDs
+         │  ② confirms tree-structure equivalence across 6 pages
+         │  ③ confirms all 1,599 SVGs round-trip
+         │  ④ confirms sha256 equality of 12 images
+         │  ⑤ runs V-01~V-12 automatically
+         └───────────────────────
 ```
 
-**Iron Law**: "하네스를 우회한 변경은 어떤 이유로도 merge하지 않는다."
+**Iron Law**: "no change that bypasses the harness is merged for any reason."
 
 ---
 
-## 2. 왜 하네스가 필요한가
+## 2. Why a harness is required
 
-| 우려 | 빈도 | 손실 |
+| Concern | Frequency | Loss |
 |---|---|---|
-| repack 모드에서 노드 1개 빠짐 (35,659 → 35,660) | 변경 시 흔함 | 사용자가 1개 노드 사라진 디자인 받음, 재현 어려움 |
-| HTML → message 변환에서 raw 필드 일부 손실 | 변경 시 흔함 | Figma import 후 효과(blur 등) 사라짐 |
-| 새 Figma archive version에서 schema 일부 변경 | 드뭄 | 도구 자체 동작 안 함 |
-| 사용자 편집 후 GUID 충돌 | 종종 | 잘못된 노드가 사라지거나 중복 |
-| zstd 디코드 결과 byte-level 미세 차이 | 매우 드뭄 | 디코드 후 의미는 같지만 sha 차이 |
+| repack mode drops a node (35,659 → 35,660) | Common on changes | Users receive a design with one missing node; hard to reproduce |
+| HTML → message conversion loses some raw fields | Common on changes | Effects (e.g. blur) disappear after Figma import |
+| Schema partly changes with a new Figma archive version | Rare | The tool itself stops working |
+| GUID collision after user edits | Sometimes | The wrong node disappears or duplicates |
+| Tiny byte-level differences in zstd decode results | Very rare | Decoded meaning is the same but sha differs |
 
-수동 검증으로는:
-- "Figma에서 열어보니 이상해"라는 막연한 보고만 가능
-- 어느 단계에서 깨졌는지 추적 불가
-- 변경자에게 "당신 변경이 깨뜨렸다"고 명확히 말하지 못함
+With manual verification:
+- You only get vague reports like "it looks weird in Figma"
+- Cannot trace which stage broke it
+- Cannot tell the change author "your change broke it" clearly
 
-하네스로:
-- 깨지면 **CI에서 정확히 어느 검증 항목에서 실패**했는지 표시
-- 변경자가 PR 머지 전에 **자기 변경이 어떤 invariant 깨는지** 알 수 있음
-- 새 변경자도 **하네스만 통과하면 안전**하다고 신뢰 가능
+With a harness:
+- Failures show **exactly which verification item failed in CI**
+- The change author can see **which invariant their change breaks** before PR merge
+- New contributors can trust that **passing the harness is safe**
 
 ---
 
-## 3. 하네스 구조 (5 레이어)
+## 3. Harness structure (5 layers)
 
-### Layer 0 — Pure Unit Tests (즉시·1초 미만)
+### Layer 0 — Pure Unit Tests (instant, under 1s)
 
-**목적**: 함수 단위 입력→출력 매핑 검증 (의존성 없음)
+**Purpose**: verify function-level input → output mappings (no dependencies)
 
-| 모듈 | 테스트 파일 | 검증 항목 |
+| Module | Test file | Items |
 |---|---|---|
-| `archive.ts` | `test/archive.test.ts` | fig-kiwi prelude 검증, 청크 분해, 손상 감지 |
-| `decompress.ts` | `test/decompress.test.ts` | deflate-raw / deflate-zlib / zstd 자동 분기, fallback chain |
-| `tree.ts` | `test/tree.test.ts` | parent-child 트리 빌드, position 정렬, orphan 처리 |
-| `assets.ts` | `test/assets.test.ts` | magic 기반 확장자, hashToHex 정확성 |
-| `vector.ts` | `test/vector.test.ts` | commandsBlob 디코드 (MOVE/LINE/CUBIC/QUAD/CLOSE) |
-| `container.ts` | `test/container.test.ts` | ZIP/raw 자동 분기 |
-| `editable-html.ts` ★v2 | `test/editable-html.test.ts` | 노드 → HTML element 매핑 |
+| `archive.ts` | `test/archive.test.ts` | fig-kiwi prelude validation, chunk split, corruption detection |
+| `decompress.ts` | `test/decompress.test.ts` | deflate-raw / deflate-zlib / zstd auto-branch, fallback chain |
+| `tree.ts` | `test/tree.test.ts` | parent-child tree build, position ordering, orphan handling |
+| `assets.ts` | `test/assets.test.ts` | magic-based extension, hashToHex accuracy |
+| `vector.ts` | `test/vector.test.ts` | commandsBlob decode (MOVE/LINE/CUBIC/QUAD/CLOSE) |
+| `container.ts` | `test/container.test.ts` | ZIP / raw auto-branch |
+| `editable-html.ts` ★v2 | `test/editable-html.test.ts` | Node → HTML element mapping |
 | `html-to-message.ts` ★v2 | `test/html-to-message.test.ts` | HTML element → message patch |
 
-**기준**: 100% 통과, 8초 미만 실행, 모든 분기 커버.
+**Bar**: 100% pass, runtime under 8 s, every branch covered.
 
-### Layer 1 — Module Integration (10초 이내)
+### Layer 1 — Module Integration (within 10s)
 
-**목적**: 모듈 간 데이터 흐름 검증
+**Purpose**: verify data flow between modules
 
-| 통합 시나리오 | 검증 |
+| Integration scenario | Verification |
 |---|---|
-| `loadContainer` → `parseFigArchive` → `decodeFigCanvas` | 35,660 노드 디코드 |
-| `decodeFigCanvas` → `buildTree` → `getPages` | 6 페이지 (CANVAS) 식별 |
-| `buildTree` → `extractVectors` (with blobs) | 1599 SVG 생성 |
-| `decodeFigCanvas` → `buildByteLevelFigBuffer` → `decodeFigCanvas` (round-trip) | 노드 수·schema 동등 |
-| `editable-html.ts` → `html-to-message.ts` (편집 없이) ★v2 | 메시지 동등 |
+| `loadContainer` → `parseFigArchive` → `decodeFigCanvas` | 35,660 nodes decoded |
+| `decodeFigCanvas` → `buildTree` → `getPages` | 6 pages (CANVAS) identified |
+| `buildTree` → `extractVectors` (with blobs) | 1,599 SVGs produced |
+| `decodeFigCanvas` → `buildByteLevelFigBuffer` → `decodeFigCanvas` (round-trip) | Node count · schema equal |
+| `editable-html.ts` → `html-to-message.ts` (no edits) ★v2 | Message equal |
 
-**기준**: real sample (`docs/메타리치...fig`)으로 실행, 10초 이내, 변경 없는 경우 PASS.
+**Bar**: runs on the real sample (`docs/sample.fig`), under 10 s, PASS when there are no changes.
 
-### Layer 2 — Round-trip Harness (★ 핵심, 30초 이내)
+### Layer 2 — Round-trip Harness (★ core, within 30 s)
 
-**목적**: 양방향 변환의 invariant 검증
+**Purpose**: verify invariants of the bidirectional conversion
 
 ```
-원본 .fig
+original .fig
   ↓ extract
-extracted/ (5+1 단계 산출물)
+extracted/ (5+1 stage outputs)
   ↓ editable-html
 figma.editable.html
-  ↓ html-to-message (편집 없이)
-새 message
-  ↓ kiwi.encodeMessage + 압축 + ZIP
-새 .fig
-  ↓ extract (다시)
+  ↓ html-to-message (no edits)
+new message
+  ↓ kiwi.encodeMessage + compress + ZIP
+new .fig
+  ↓ extract (again)
 extracted'/
 
-비교: extracted vs extracted'
-  - 01_container/canvas.fig 동등성 ✅ (byte mode면 sha256 일치)
-  - 04_decoded message.type 동등 (NODE_CHANGES)
-  - 05_tree/nodes-flat.json: GUID 집합 동등, 노드 수 일치
-  - 04_decoded/schema.json: 568 정의 동등
-  - assets/images/* 동등
-  - assets/vectors/* 개수 동등
+Compare extracted vs extracted':
+  - 01_container/canvas.fig equality ✅ (sha256 match in byte mode)
+  - 04_decoded message.type equal (NODE_CHANGES)
+  - 05_tree/nodes-flat.json: GUID set equal, node count equal
+  - 04_decoded/schema.json: 568 definitions equal
+  - assets/images/* equal
+  - assets/vectors/* count equal
 ```
 
-**Invariants** (코드로 표현):
+**Invariants** (expressed in code):
 
 ```typescript
 // test/harness/roundtrip.harness.test.ts
@@ -141,23 +141,23 @@ describe('round-trip harness', () => {
 });
 ```
 
-**기준**: 모든 invariant 통과. 어느 하나라도 실패면 변경 reject.
+**Bar**: every invariant passes. Any single failure rejects the change.
 
-### Layer 3 — Edit Simulation Harness (★ 의도된 변형, 30초 이내)
+### Layer 3 — Edit Simulation Harness (★ intentional transformations, within 30 s)
 
-**목적**: "사용자가 편집했을 때" 시나리오를 자동화
+**Purpose**: automate "what if the user edited X" scenarios
 
-| 편집 시나리오 | 자동 변형 룰 | 검증 |
+| Edit scenario | Auto-transform rule | Verification |
 |---|---|---|
-| **E1. 텍스트 일괄 교체** | 모든 TEXT 노드의 `innerText`를 "TRANSLATED" prefix 붙임 | 새 .fig 추출 시 모든 TEXT 노드의 characters에 prefix 있음 |
-| **E2. 색상 swap** | 모든 SOLID fill의 R·B 채널 swap | 새 .fig 추출 시 모든 fill의 r·b 값이 swap됨 |
-| **E3. 위치 평행 이동** | 모든 top-level frame의 left+100px | bbox.x가 +100 |
-| **E4. 사이즈 2배** | 특정 노드의 width/height 2배 | size.x/y가 2배 |
-| **E5. opacity 일괄 0.5** | 모든 노드 opacity 0.5 | raw.opacity = 0.5 |
-| **E6. 노드 삭제** | 임의 leaf 노드 1개 DOM에서 제거 | message에 phase=REMOVED 등장 |
-| **E7. 노드 추가** ★v2 후반 | 새 RECTANGLE 추가 | 새 GUID 생성, parentIndex.position 자동 |
+| **E1. Bulk text replace** | Prefix every TEXT node's `innerText` with "TRANSLATED " | Every TEXT node's characters has the prefix after re-extract |
+| **E2. Color swap** | Swap R · B channels of every SOLID fill | Every fill's r · b are swapped after re-extract |
+| **E3. Translate position** | Shift every top-level frame's left by +100px | bbox.x is +100 |
+| **E4. Double size** | Double the width/height of a specific node | size.x/y is doubled |
+| **E5. Bulk opacity 0.5** | Set opacity = 0.5 on all nodes | raw.opacity = 0.5 |
+| **E6. Delete node** | Remove one random leaf node from the DOM | phase=REMOVED appears in the message |
+| **E7. Add node** ★late v2 | Add a new RECTANGLE | New GUID + auto parentIndex.position |
 
-**구조** (예시):
+**Structure** (example):
 
 ```typescript
 // test/harness/edit-sim.harness.test.ts
@@ -174,7 +174,7 @@ async function simulate(
   invariant(newExtract);
 }
 
-it('E1: 텍스트 일괄 교체', async () => {
+it('E1: bulk text replace', async () => {
   await simulate('E1',
     (html) => html.replace(/<p class="fig-text"([^>]*)>([^<]+)<\/p>/g, '<p$1>TRANSLATED $2</p>'),
     (e) => {
@@ -184,130 +184,130 @@ it('E1: 텍스트 일괄 교체', async () => {
 });
 ```
 
-### Layer 4 — Figma Compatibility (수동, 분 단위)
+### Layer 4 — Figma Compatibility (manual, minutes)
 
-**목적**: 실제 Figma가 우리가 만든 .fig를 받는지
+**Purpose**: confirm that Figma actually accepts the `.fig` we generate
 
-자동화 어려움 (Figma는 GUI 앱이고 import API 미공개). **수동 체크리스트**:
+Hard to automate (Figma is a GUI app and the import API is not published). **Manual checklist**:
 
-| 항목 | 절차 | 합격 기준 |
+| Item | Procedure | Pass criterion |
 |---|---|---|
-| F1. 원본 byte-level repack 결과 import | Figma 데스크톱에서 Import → repacked.fig 선택 | 원본과 시각 동일하게 열림 |
-| F2. kiwi 재인코드 결과 import | 동일 | 노드 수·내용 동일 |
-| F3. 편집 안 한 editable.html → .fig import | 동일 | 원본과 의미 동등 |
-| F4. E1 시나리오 (텍스트 교체) → .fig import | 동일 | 모든 텍스트가 "TRANSLATED" prefix |
-| F5. 노드 추가 → .fig import | 동일 | 새 노드 보임 |
+| F1. Import a byte-level repack of the original | Figma Desktop → Import → choose repacked.fig | Opens visually identical to the original |
+| F2. Import a kiwi re-encoded result | Same | Node count · content identical |
+| F3. Import an unedited editable.html → .fig | Same | Semantically equivalent to the original |
+| F4. Import scenario E1 (text replace) → .fig | Same | Every text has the "TRANSLATED " prefix |
+| F5. Import "add node" → .fig | Same | The new node is visible |
 
-**문서화**: `.gstack/qa-reports/figma-import-{date}.md` 에 화면 캡처 + PASS/FAIL.
+**Documentation**: write `.gstack/qa-reports/figma-import-{date}.md` with screenshots + PASS/FAIL.
 
-CI 자동화는 v3 (Figma plugin/headless 환경) 후보.
+CI automation is a v3 candidate (Figma plugin / headless environment).
 
 ---
 
-## 4. 메트릭 (Metrics)
+## 4. Metrics
 
-하네스 결과를 정량화. 낮은 메트릭 → 변경 reject.
+Quantify the harness results. Low metrics → reject the change.
 
-### 4.1 GUID 보존율 (Identity Preservation)
+### 4.1 GUID preservation rate (Identity Preservation)
 
 ```
-identityRate = |원본 GUID ∩ 결과 GUID| / |원본 GUID|
+identityRate = |source GUIDs ∩ result GUIDs| / |source GUIDs|
 ```
 
-| 임계 | 정책 |
+| Threshold | Policy |
 |---|---|
-| `1.0` | merge 가능 |
-| `[0.99, 1.0)` | warning, 사라진 GUID 명시 필요 (의도적 deletion 케이스만 허용) |
+| `1.0` | mergeable |
+| `[0.99, 1.0)` | warning; must explicitly list the missing GUIDs (allowed only when deletion is intentional) |
 | `< 0.99` | reject |
 
-### 4.2 트리 형태 동등성 (Tree Shape Equality)
+### 4.2 Tree-shape equality
 
 ```
-shapeEqual = parent-child 관계 집합 동등
+shapeEqual = parent-child relation sets are equal
 ```
 
-각 GUID에 대해 `(self, parentGuid)` 쌍의 집합이 같으면 동등. 100% 동등이 정상.
+For each GUID, compare the set of `(self, parentGuid)` pairs. 100% equality is expected.
 
-### 4.3 시각 fidelity (Pixel Diff, optional)
+### 4.3 Visual fidelity (Pixel Diff, optional)
 
-`thumbnail.png` 또는 페이지별 렌더 이미지 비교 (브라우저 렌더 vs 원본). v2에선 best-effort.
+Compare `thumbnail.png` or per-page rendered images (browser render vs original). Best-effort in v2.
 
 ```
-pixelDiffRate = (다른 픽셀 수) / (전체 픽셀 수)
+pixelDiffRate = (different pixels) / (total pixels)
 ```
 
-| 임계 | 정책 |
+| Threshold | Policy |
 |---|---|
-| `< 0.01` (99% 동일) | PASS |
+| `< 0.01` (99% identical) | PASS |
 | `[0.01, 0.05)` | WARN |
 | `>= 0.05` | INVESTIGATE |
 
-### 4.4 메타 보존율 (Raw Field Preservation)
+### 4.4 Metadata preservation rate
 
-각 노드의 raw 필드 키 집합 비교.
+Compare the raw-field key set of each node.
 
 ```
-metaRate = avg(|원본 raw 키 ∩ 결과 raw 키| / |원본 raw 키|, over all nodes)
+metaRate = avg(|source raw keys ∩ result raw keys| / |source raw keys|, over all nodes)
 ```
 
-| 임계 | 정책 |
+| Threshold | Policy |
 |---|---|
-| `>= 0.99` | merge 가능 |
+| `>= 0.99` | mergeable |
 | `[0.95, 0.99)` | warning |
 | `< 0.95` | reject |
 
-### 4.5 Schema 보존
+### 4.5 Schema preservation
 
 ```
-schemaDefCount(결과) === schemaDefCount(원본)  // 568
-schemaDefSet(결과) === schemaDefSet(원본)      // 정의 이름 집합
+schemaDefCount(result) === schemaDefCount(source)  // 568
+schemaDefSet(result)   === schemaDefSet(source)    // set of definition names
 ```
 
-100% 일치 필수.
+100% match required.
 
 ---
 
-## 5. 테스트 데이터셋 (Fixtures)
+## 5. Test datasets (fixtures)
 
-### 5.1 기존 (v1)
+### 5.1 Existing (v1)
 
-- `docs/메타리치 화면 UI Design.fig` (5.77 MB, 35,660 노드, 6 페이지)
+- `docs/sample.fig` (5.77 MB, 35,660 nodes, 6 pages)
 
-### 5.2 추가 권장 (v2)
+### 5.2 Recommended additions (v2)
 
-상황별 fixture 추가하면 하네스 신뢰도 향상:
+Adding situational fixtures improves harness confidence:
 
-| Fixture | 목적 | 우선순위 |
+| Fixture | Purpose | Priority |
 |---|---|---|
-| `fixtures/minimal.fig` | DOCUMENT + 1 CANVAS + 1 RECTANGLE만 | 🟢 high (디버깅 빠름) |
-| `fixtures/text-heavy.fig` | TEXT 노드 100개+ (다국어 시나리오) | 🟢 high |
-| `fixtures/vector-heavy.fig` | VECTOR + commandsBlob 다양 | 🟡 medium |
+| `fixtures/minimal.fig` | DOCUMENT + 1 CANVAS + 1 RECTANGLE only | 🟢 high (quick debugging) |
+| `fixtures/text-heavy.fig` | 100+ TEXT nodes (localization scenarios) | 🟢 high |
+| `fixtures/vector-heavy.fig` | VECTOR + varied commandsBlob | 🟡 medium |
 | `fixtures/components.fig` | SYMBOL + INSTANCE | 🟡 medium |
-| `fixtures/effects.fig` | drop-shadow / blur / gradient | 🟢 high (편집 시 손실 가능 영역) |
+| `fixtures/effects.fig` | drop-shadow / blur / gradient | 🟢 high (loss-prone areas during edits) |
 
-각 fixture는 **무료 또는 자체 작성 디자인**이어야 함 (라이선스).
+Each fixture must be **free-to-use or self-authored** (licensing).
 
-### 5.3 외부 의존 없는 합성 fixture
+### 5.3 Synthetic fixtures with no external dependency
 
-테스트 안에서 합성 가능한 최소 .fig:
+A minimal `.fig` that can be synthesized inside a test:
 
 ```typescript
 // test/fixtures/synth.ts
 export function synthMinimalFig(): Uint8Array {
-  // 코드로 .fig 합성
-  // - schema는 sample에서 차용
-  // - DOCUMENT + 1 CANVAS + 1 RECTANGLE만
-  // - 모든 GUID 결정적 (재현 가능)
+  // synthesize a .fig in code
+  // - reuse the schema from a sample
+  // - DOCUMENT + 1 CANVAS + 1 RECTANGLE only
+  // - deterministic GUIDs (reproducible)
 }
 ```
 
-이렇게 하면 Layer 0 단위 테스트에서도 진짜 .fig 생성·디코드 가능.
+This enables real `.fig` synthesis + decode even in Layer 0 unit tests.
 
 ---
 
-## 6. CI 통합
+## 6. CI integration
 
-### 6.1 GitHub Actions 워크플로 (제안)
+### 6.1 GitHub Actions workflow (proposed)
 
 ```yaml
 # .github/workflows/test.yml
@@ -334,7 +334,7 @@ jobs:
         if: always()
 ```
 
-### 6.2 실패 시 출력 형식
+### 6.2 Output format on failure
 
 ```
 🔴 Round-trip harness FAILED
@@ -356,74 +356,74 @@ Last known PASS: commit abc123 (2026-04-29)
 Bisect candidates: commits def456..ghi789 changed src/html-to-message.ts
 ```
 
-이런 메시지가 나와야 변경자가 즉시 어디 봤는지 안다.
+Output like this tells change authors immediately where to look.
 
-### 6.3 성능 추적
+### 6.3 Performance tracking
 
-각 하네스 실행 시간을 기록:
+Record each harness run's duration:
 
 ```
 hardness/perf-history.jsonl
 {"ts":"2026-04-30T...", "layer":"L2", "duration_ms":18200, "pass":true}
-{"ts":"2026-05-01T...", "layer":"L2", "duration_ms":24500, "pass":true} ← 회귀 감지!
+{"ts":"2026-05-01T...", "layer":"L2", "duration_ms":24500, "pass":true} ← regression!
 ```
 
-10% 이상 느려지면 PR에 경고 코멘트.
+A slowdown ≥10% triggers a warning comment on the PR.
 
 ---
 
-## 7. 회귀 방지 정책 (Iron Law)
+## 7. Regression-prevention policy (Iron Law)
 
-| 상황 | 행동 |
+| Situation | Action |
 |---|---|
-| 하네스 한 개라도 FAIL | merge 금지 |
-| 변경자가 invariant를 의도적으로 변경 (e.g. 노드 트리 구조 의도적 변경) | invariant 자체 업데이트 + 명시적 reviewer 승인 + CHANGELOG 기록 |
-| 새 기능 추가 시 새 하네스 안 만듦 | merge 금지 (SDD 정책) |
-| 시간이 오래 걸려서 하네스 skip | 절대 금지 (대신 fixture 줄여 빠르게) |
+| Even one harness FAILs | merge forbidden |
+| Author intentionally changes an invariant (e.g. node tree shape) | Update the invariant + explicit reviewer approval + CHANGELOG entry |
+| New feature added without a new harness | merge forbidden (SDD policy) |
+| Skip the harness because it's slow | Absolutely forbidden (shrink the fixture for speed instead) |
 
-**예외 처리**: 정말 긴급한 보안 패치 등 — 사용자 직접 확인 후 `--bypass-harness` 플래그 사용 (CI에선 별도 알림).
+**Exception handling**: for truly urgent security patches, use the `--bypass-harness` flag with direct user confirmation (CI fires a separate alert).
 
 ---
 
-## 8. 운영 (Daily Workflow)
+## 8. Operations (daily workflow)
 
-### 8.1 개발자 흐름
-
-```
-1. 변경 작성
-2. 로컬: npm test (L0+L1, ~10s)
-3. 로컬: npm run harness:roundtrip (L2, ~20s)
-4. 통과 → PR 생성
-5. CI: L0~L3 자동 실행
-6. 모두 통과 → review → merge
-7. 정기 (월 1회): L4 (Figma 수동 import) 실행, 보고서 갱신
-```
-
-### 8.2 신규 기능 추가 흐름 (SDD와 결합 — [SDD.md](./SDD.md) 참조)
+### 8.1 Developer flow
 
 ```
-1. spec 작성 (docs/specs/<feature>.md)
-2. spec에 invariant 명시
-3. invariant를 코드로 표현 (test/harness/<feature>.harness.test.ts)
-4. test 실행 → 실패 (당연, 미구현)
-5. 구현
-6. test 다시 → 통과
+1. Write the change
+2. Local: npm test (L0+L1, ~10s)
+3. Local: npm run harness:roundtrip (L2, ~20s)
+4. Pass → open PR
+5. CI: L0~L3 run automatically
+6. All pass → review → merge
+7. Periodically (once a month): run L4 (Figma manual import); refresh the report
+```
+
+### 8.2 New-feature flow (combined with SDD — see [SDD.md](./SDD.md))
+
+```
+1. Write the spec (docs/specs/<feature>.md)
+2. Capture invariants in the spec
+3. Express invariants as code (test/harness/<feature>.harness.test.ts)
+4. Run the test → fails (as expected, unimplemented)
+5. Implement
+6. Re-run the test → passes
 7. PR
 ```
 
 ---
 
-## 9. 기존 vitest 활용
+## 9. Reuse of existing vitest
 
-이미 [SPEC.md](./SPEC.md) v1에서 vitest 도입됨 (`test/` 8 파일, 62 tests). 본 하네스는 **vitest 위에 구축**:
+vitest was already introduced in [SPEC.md](./SPEC.md) v1 (`test/` with 8 files, 62 tests). This harness is **built on top of vitest**:
 
-- L0 단위 → 기존 `test/*.test.ts` (확장)
-- L1 통합 → 기존 `test/e2e.test.ts` (확장)
-- L2 round-trip → 신규 `test/harness/roundtrip.harness.test.ts`
-- L3 edit sim → 신규 `test/harness/edit-sim.harness.test.ts`
-- L4 Figma → 수동 (`.gstack/qa-reports/figma-import-*.md`)
+- L0 unit → existing `test/*.test.ts` (extended)
+- L1 integration → existing `test/e2e.test.ts` (extended)
+- L2 round-trip → new `test/harness/roundtrip.harness.test.ts`
+- L3 edit sim → new `test/harness/edit-sim.harness.test.ts`
+- L4 Figma → manual (`.gstack/qa-reports/figma-import-*.md`)
 
-`vitest.config.ts`에 harness 디렉토리 패턴 추가:
+Add the harness directory pattern in `vitest.config.ts`:
 
 ```typescript
 test: {
@@ -433,7 +433,7 @@ test: {
 }
 ```
 
-`package.json` 스크립트:
+`package.json` scripts:
 
 ```json
 {
@@ -447,19 +447,19 @@ test: {
 
 ---
 
-## 10. 부록 — 빠른 참조
+## 10. Appendix — quick reference
 
 ```
-하네스 명령 요약
+Harness command summary
 ─────────────────────────────────────
-npm run test:unit         L0 단위 (8s)
+npm run test:unit         L0 unit (8s)
 npm test                  L0 + L1 (10s)
 npm run harness:roundtrip L2 (20s)
 npm run harness:edit-sim  L3 (30s)
 npm run harness:all       L2 + L3 (50s)
 
-수동 (월 1회)
-.gstack/qa-reports/figma-import-{date}.md 작성
+Manual (once a month)
+write .gstack/qa-reports/figma-import-{date}.md
 ```
 
 ---

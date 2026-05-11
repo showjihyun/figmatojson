@@ -1,44 +1,44 @@
 # spec/sidecar-meta
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved (Iteration 10) |
-| 책임 모듈 | `src/sidecar-meta.ts` (신규) |
-| 의존 | `src/decoder.ts`, `src/tree.ts`, `src/assets.ts::hashToHex` |
-| 테스트 | `test/sidecar-meta.test.ts` |
-| 부모 SPEC | [SPEC-roundtrip §3.5 Tier B, §3.6](../SPEC-roundtrip.md) |
+| Status | Approved (Iteration 10) |
+| Responsible module | `src/sidecar-meta.ts` (new) |
+| Dependencies | `src/decoder.ts`, `src/tree.ts`, `src/assets.ts::hashToHex` |
+| Tests | `test/sidecar-meta.test.ts` |
+| Parent SPEC | [SPEC-roundtrip §3.5 Tier B, §3.6](../SPEC-roundtrip.md) |
 
-## 1. 목적
+## 1. Purpose
 
-모든 노드의 raw 필드를 사용자 편집 가능한 JSON으로 표현하는 sidecar 파일 (`figma.editable.meta.js`) 생성. **Tier A로 HTML에 표현되는 필드도 sidecar에 함께 보유** (HTML 우선이지만 sidecar는 ground truth).
+Generate a sidecar file (`figma.editable.meta.js`) that represents the raw fields of every node as user-editable JSON. **Fields represented in HTML as Tier A are also carried in the sidecar** (HTML takes precedence, but the sidecar is the ground truth).
 
-## 2. 입력
+## 2. Inputs
 
 ```ts
 interface SidecarMetaInputs {
   decoded: DecodedFig;            // schema, message, archive version, sha256
-  tree: BuildTreeResult;          // 노드 GUID 인덱스
-  outputDir: string;              // assets/blobs/ 출력 위치
+  tree: BuildTreeResult;          // node GUID index
+  outputDir: string;              // output location for assets/blobs/
   options?: {
-    blobInlineThresholdBytes?: number;  // default 1024 — 작은 blob은 hex inline, 큰 건 파일 참조
-    nodesPerFile?: number;        // default 0 (단일 파일). >0 시 nodes-by-page/<n>.js로 분할
+    blobInlineThresholdBytes?: number;  // default 1024 — small blobs are inlined as hex, large ones are file-referenced
+    nodesPerFile?: number;        // default 0 (single file). >0 splits into nodes-by-page/<n>.js
   };
 }
 ```
 
-## 3. 출력
+## 3. Output
 
-디렉토리 모드:
+Directory mode:
 ```
 <htmlOutDir>/figma.editable.meta.js
-또는 (분할 시):
-<htmlOutDir>/figma.editable.meta.js     ← __meta + message만
+or (when split):
+<htmlOutDir>/figma.editable.meta.js     ← __meta + message only
 <htmlOutDir>/data/nodes-page-00.js      ← page 0 nodes
 <htmlOutDir>/data/nodes-page-01.js
 ...
 ```
 
-`figma.editable.meta.js` 내용 형식:
+`figma.editable.meta.js` content format:
 
 ```javascript
 window.FIGMA_RAW = {
@@ -51,45 +51,45 @@ window.FIGMA_RAW = {
     generatedAt: "2026-04-30T..."
   },
   message: { type: "NODE_CHANGES", sessionID: 0, ackID: 0 },
-  nodes: { /* GUID → raw 객체 */ },
-  blobs: [ /* commandsBlob 등 */ ]
+  nodes: { /* GUID → raw object */ },
+  blobs: [ /* commandsBlob, etc. */ ]
 };
 ```
 
-큰 blob은 `assets/blobs/<idx>.bin`에 분리하고 `{ ref: "assets/blobs/<idx>.bin", bytes: N }` 참조.
+Large blobs are separated into `assets/blobs/<idx>.bin` and referenced as `{ ref: "assets/blobs/<idx>.bin", bytes: N }`.
 
 ## 4. Invariants
 
-### I-1 모든 노드 보존
+### I-1 All nodes preserved
 
 ```
 ∀ node ∈ tree.allNodes:
    FIGMA_RAW.nodes[node.guidStr] !== undefined
-   ∧ raw 키 집합이 원본 message.nodeChanges의 해당 노드와 동등 (Tier C 제외)
+   ∧ the raw key set is equivalent to the corresponding node in the original message.nodeChanges (excluding Tier C)
 ```
 
-### I-2 Uint8Array → hex 문자열 (lossless)
+### I-2 Uint8Array → hex string (lossless)
 
 ```
 ∀ field ∈ raw, type(field) === Uint8Array:
    typeof FIGMA_RAW.nodes[guid][field] === 'string'
-   ∧ Buffer.from(value, 'hex').equals(원본 Uint8Array)
+   ∧ Buffer.from(value, 'hex').equals(original Uint8Array)
 ```
 
-### I-3 BigInt → 문자열 보존
+### I-3 BigInt → string preservation
 
 ```
 ∀ field ∈ raw, type(field) === BigInt:
    typeof FIGMA_RAW.nodes[guid][field] === 'string'
-   ∧ BigInt(value) === 원본 BigInt
+   ∧ BigInt(value) === original BigInt
 ```
 
-### I-4 Tier C 필드 제외
+### I-4 Tier C fields excluded
 
-다음 필드는 sidecar에 포함하지 않는다 (HTML 또는 도구가 자동 결정):
-- `guid` (또는 `{sessionID, localID}`)  — key가 GUID이므로 중복
-- `parentIndex` — DOM 구조로 결정
-- `phase` — 도구가 CREATED/REMOVED 자동 설정
+The following fields are not included in the sidecar (determined automatically by HTML or the tool):
+- `guid` (or `{sessionID, localID}`) — duplicates the key, which is the GUID
+- `parentIndex` — determined by DOM structure
+- `phase` — the tool sets CREATED/REMOVED automatically
 
 ```
 FIGMA_RAW.nodes[guid].guid === undefined
@@ -97,9 +97,9 @@ FIGMA_RAW.nodes[guid].parentIndex === undefined
 FIGMA_RAW.nodes[guid].phase === undefined
 ```
 
-### I-5 Tier A 필드 동기화 (HTML 우선)
+### I-5 Tier A field sync (HTML wins)
 
-HTML에 표현된 필드(예: size, transform, fillPaints)는 sidecar에도 있다. 변환 시 **HTML 값 우선**, sidecar는 fallback.
+Fields represented in HTML (e.g. size, transform, fillPaints) are also in the sidecar. On conversion, **HTML values win**; the sidecar is the fallback.
 
 ```
 ∀ guid:
@@ -107,15 +107,15 @@ HTML에 표현된 필드(예: size, transform, fillPaints)는 sidecar에도 있�
   htmlValue === undefined ⇒ result = sidecarValue
 ```
 
-(이 invariant는 [html-to-message.spec.md](./html-to-message.spec.md) 책임)
+(This invariant is the responsibility of [html-to-message.spec.md](./html-to-message.spec.md).)
 
-### I-6 Blob 인덱스 안정성
+### I-6 Blob index stability
 
-`FIGMA_RAW.blobs[i]`의 인덱스 `i`는 원본 message.blobs의 인덱스와 일치. 노드의 `commandsBlob: 203` 같은 참조가 그대로 유효.
+The index `i` in `FIGMA_RAW.blobs[i]` matches the index in the original message.blobs. Node references like `commandsBlob: 203` remain valid as-is.
 
 ```
 ∀ i ∈ [0, blobs.length):
-   blobs[i].hex 또는 blobs[i].ref → 원본 message.blobs[i].bytes와 동등
+   blobs[i].hex or blobs[i].ref → equivalent to original message.blobs[i].bytes
 ```
 
 ### I-7 Inline vs ref threshold
@@ -126,33 +126,33 @@ HTML에 표현된 필드(예: size, transform, fillPaints)는 sidecar에도 있�
      blobs[i] === { hex: <hex string> }
    blob.bytes > threshold:
      blobs[i] === { ref: "assets/blobs/<padded i>.bin", bytes: N }
-     ∧ <htmlOutDir>/assets/blobs/<padded i>.bin 파일 존재 (raw bytes)
+     ∧ <htmlOutDir>/assets/blobs/<padded i>.bin file exists (raw bytes)
 ```
 
-### I-8 결정성
+### I-8 Determinism
 
-같은 입력 → 같은 sidecar JSON (타임스탬프 필드 외).
+Same input → same sidecar JSON (apart from the timestamp field).
 
-### I-9 형식 안전성 (HTML 임베드 호환)
+### I-9 Format safety (HTML embed compatibility)
 
-`</script>` 시퀀스는 자동 escape (`<\/script>`). 사용자가 raw 데이터에 그 시퀀스를 넣어도 sidecar가 깨지지 않음.
+The `</script>` sequence is automatically escaped (`<\/script>`). The sidecar will not break even if the user places that sequence in the raw data.
 
 ## 5. Error Cases
 
-- E-1: 노드 raw 객체 직렬화 실패 (cycle 등) → throw `Error("sidecar: cyclic reference at <guid>")`
-- E-2: blob 인덱스 갭 (예: 0,1,3) → 비어있는 인덱스는 `null`로 채워 array 인덱스 안정성 보장
-- E-3: `outputDir` 작성 권한 없음 → throw (fs 에러 전파)
+- E-1: Node raw object serialization failure (cycle, etc.) → throw `Error("sidecar: cyclic reference at <guid>")`
+- E-2: Gap in blob indices (e.g. 0,1,3) → fill missing indices with `null` to keep array index stability
+- E-3: No write permission for `outputDir` → throw (propagate fs error)
 
 ## 6. Out of Scope
 
-- O-1: HTML 생성 — [editable-html.spec.md](./editable-html.spec.md)
-- O-2: HTML → message 변환 — [html-to-message.spec.md](./html-to-message.spec.md)
-- O-3: blob 의미 디코드 (commandsBlob → SVG path 등) — `vector.ts` 책임 (편집은 SVG에서, sidecar는 raw 보존만)
-- O-4: 사용자 편집 시 schema 검증 — html-to-message가 책임
-- O-5: 노드별 분할(`data/nodes-page-N.js` 분할)의 lazy load 코드 — HTML/JS 측 책임
+- O-1: HTML generation — [editable-html.spec.md](./editable-html.spec.md)
+- O-2: HTML → message conversion — [html-to-message.spec.md](./html-to-message.spec.md)
+- O-3: Semantic decoding of blobs (commandsBlob → SVG path, etc.) — responsibility of `vector.ts` (edits happen in SVG; the sidecar only preserves raw)
+- O-4: Schema validation for user edits — owned by html-to-message
+- O-5: Lazy-load code for per-node splitting (`data/nodes-page-N.js` split) — responsibility of the HTML/JS side
 
-## 7. 참조
+## 7. References
 
-- 부모: [SPEC-roundtrip §3.6](../SPEC-roundtrip.md)
-- 데이터 형식 예시: [SPEC-roundtrip §3.6](../SPEC-roundtrip.md)의 `figma.editable.meta.js` 구조 블록
-- 형제: [editable-html.spec.md](./editable-html.spec.md), [html-to-message.spec.md](./html-to-message.spec.md)
+- Parent: [SPEC-roundtrip §3.6](../SPEC-roundtrip.md)
+- Data format example: the `figma.editable.meta.js` structure block in [SPEC-roundtrip §3.6](../SPEC-roundtrip.md)
+- Siblings: [editable-html.spec.md](./editable-html.spec.md), [html-to-message.spec.md](./html-to-message.spec.md)
