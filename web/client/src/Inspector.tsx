@@ -17,7 +17,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import { documentService } from '@/services';
 import { usePatch } from './hooks/usePatch';
 import { rgbaToHex, hexToRgb01 } from '@core/domain/color';
-import { findById } from '@core/domain/tree';
+import { findByIdDeep } from '@core/domain/tree';
 import { colorVarName, textStyleName, effectiveTextStyle, colorVarTrail, type ColorVarTrailResult } from '@core/domain/colorStyleRef';
 import { variantLabelText } from './lib/variantLabel';
 import { Button } from '@/components/ui/button';
@@ -49,10 +49,14 @@ interface InspectorProps {
 }
 
 // `findByGuid` here used to traverse via the raw `guid` object; the core
-// `findById` traverses by the precomputed `id` string. The page tree this
-// Inspector reads always has `id = guidStr(guid)` set during decode, so the
-// two are equivalent in practice — alias kept for callers below.
-const findByGuid = findById;
+// `findByIdDeep` traverses by the precomputed `id` string. The page tree
+// this Inspector reads always has `id = guidStr(guid)` set during decode,
+// so the two are equivalent for page-resident nodes — and the deep variant
+// also reaches into INSTANCE `_renderChildren` so a drilled-in master
+// child (selected by canvas double-click, spec web-canvas-drill-selection
+// v2 §5) resolves to its instance-specific copy instead of erroring out
+// with "Selected node X not found in current page".
+const findByGuid = findByIdDeep;
 
 /**
  * Round 18-B — render a colorVar alias trail as "A → B → C" with a small

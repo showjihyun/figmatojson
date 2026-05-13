@@ -16,16 +16,19 @@ import {
   collectDerivedSizesFromInstance,
   collectDerivedTransformsFromInstance,
   collectFillOverridesFromInstance,
+  collectLibraryBoundFillOverridesFromInstance,
   collectPropAssignmentsAtPathFromInstance,
   collectPropAssignmentsFromInstance,
   collectStackOverridesFromInstance,
   collectSwapTargetsAtPathFromInstance,
+  collectSymbolIdPropAssignmentsFromInstance,
   collectTextOverridesFromInstance,
   collectTextPropAssignmentsFromInstance,
   collectTextStyleOverridesFromInstance,
   collectVisibilityOverridesFromInstance,
   collectVisualStyleOverridesFromInstance,
   mergeOverridesForNested,
+  symbolIdFromPropRefs,
   textFromPropRefs,
   type Transform2D,
 } from '../../../src/instanceOverrides.js';
@@ -132,9 +135,18 @@ export function toClientNode(
 
         const textOverrides = collectTextOverridesFromInstance(sd?.symbolOverrides);
         const fillOverrides = collectFillOverridesFromInstance(sd?.symbolOverrides);
+        // Round 33.1 — library-bound (external assetRef) fillPaints are
+        // applied only as a fallback when the master itself has no fill.
+        const libFillOverrides = collectLibraryBoundFillOverridesFromInstance(sd?.symbolOverrides);
         const visOverrides = collectVisibilityOverridesFromInstance(sd?.symbolOverrides);
         const propAssignments = collectPropAssignmentsFromInstance(data);
         const textPropAssignments = collectTextPropAssignmentsFromInstance(data);
+        // I-C9 — SYMBOL_ID prop assignments propagate inward the same way
+        // bool / TEXT_DATA assignments do. Inner Icon INSTANCEs whose
+        // `componentPropRefs[].componentPropNodeField === 'OVERRIDDEN_SYMBOL_ID'`
+        // resolve their master swap via this map (Material 3 calendar
+        // nav < > arrows etc.).
+        const symbolIdPropAssignments = collectSymbolIdPropAssignmentsFromInstance(data);
         const propAssignmentsByPath = collectPropAssignmentsAtPathFromInstance(sd?.symbolOverrides);
         const swapTargetsByPath = collectSwapTargetsAtPathFromInstance(sd?.symbolOverrides);
         const derivedSizesByPath = collectDerivedSizesFromInstance(data);
@@ -159,7 +171,7 @@ export function toClientNode(
         // variant-stamped values instead of master defaults.
         const stackOverridesByPath = collectStackOverridesFromInstance(sd?.symbolOverrides);
         const expanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath, visualStyleOverridesByPath, textPropAssignments),
+          toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visOverrides, 0, [], propAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath, visualStyleOverridesByPath, textPropAssignments, symbolIdPropAssignments, libFillOverrides),
         );
         if (expanded.length > 0) {
           // Spec web-instance-autolayout-reflow: when the INSTANCE size
@@ -532,6 +544,20 @@ export function toClientChildForRender(
   // whose `componentPropRefs` carry `componentPropNodeField === 'TEXT_DATA'`
   // gets its `characters` replaced when the defID matches.
   textPropAssignments: Map<string, string> = new Map(),
+  // I-C9 — SYMBOL_ID prop bindings (Map<defIdKey, swapTargetGuidStr>)
+  // propagated inward. A nested INSTANCE whose `componentPropRefs` carry
+  // `componentPropNodeField === 'OVERRIDDEN_SYMBOL_ID'` resolves its
+  // master swap from this map — Material 3 Icon button - standard binds
+  // its inner Icon INSTANCE's symbolID to a component property so the
+  // outer instance can swap chevron-left / chevron-right / etc. without
+  // editing the master.
+  symbolIdPropAssignments: Map<string, string> = new Map(),
+  // I-C10 — library-bound fillPaints overrides (assetRef styleIdForFill)
+  // used as a FALLBACK only. Applied to descendants whose master has no
+  // fillPaints of its own — supplies the Material 3 Text field input box
+  // bg (`#fef7ff`) etc. while still letting calendar cell masters keep
+  // their own state-specific paints.
+  libFillOverrides: Map<string, unknown[]> = new Map(),
 ): DocumentNode {
   if (depth > 8) {
     return { id: n.guidStr, guid: n.guid, type: n.type, name: n.name, _isInstanceChild: true };
@@ -580,7 +606,7 @@ export function toClientChildForRender(
     name: n.name,
     _isInstanceChild: true,
     children: n.children.map((c) =>
-      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, childPathFromOuter, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath, visualStyleOverridesByPath, textPropAssignments),
+      toClientChildForRender(c, blobs, symbolIndex, textOverrides, fillOverrides, visibilityOverrides, depth + 1, childPathFromOuter, effectivePropAssignments, propAssignmentsByPath, swapTargetsByPath, derivedSizesByPath, derivedTransformsByPath, textStyleOverridesByPath, visualStyleOverridesByPath, textPropAssignments, symbolIdPropAssignments, libFillOverrides),
     ),
   };
   if (VECTOR_TYPES.has(n.type)) {
@@ -627,7 +653,19 @@ export function toClientChildForRender(
       // use that swapped master for expansion instead of the default
       // `sd.symbolID`. The metarich Dropdown's "직접 선택" option flows
       // through here.
-      const swapTargetKey = swapTargetsByPath.get(currentKey);
+      //
+      // I-C9 (round 33) — when neither a path-keyed swap nor a direct
+      // swap is present, but the master INSTANCE carries a
+      // `componentPropRefs[].componentPropNodeField === 'OVERRIDDEN_SYMBOL_ID'`
+      // pointing at a defID that the outer instance has assigned, use
+      // that assignment as the swap target. Path-keyed swaps still win
+      // (more specific intent) — only fall back to the prop-driven swap
+      // when no explicit path swap exists.
+      const pathSwap = swapTargetsByPath.get(currentKey);
+      const propSwap = pathSwap === undefined
+        ? symbolIdFromPropRefs(data, symbolIdPropAssignments)
+        : undefined;
+      const swapTargetKey = pathSwap ?? propSwap;
       const masterKey = swapTargetKey ?? `${sid.sessionID}:${sid.localID}`;
       const master = symbolIndex.get(masterKey)
         // I-E1: corrupt swap target falls back to the default master.
@@ -662,9 +700,11 @@ export function toClientChildForRender(
       if (master) {
         const innerText = collectTextOverridesFromInstance(sd?.symbolOverrides);
         const innerFill = collectFillOverridesFromInstance(sd?.symbolOverrides);
+        const innerLibFill = collectLibraryBoundFillOverridesFromInstance(sd?.symbolOverrides);
         const innerVis = collectVisibilityOverridesFromInstance(sd?.symbolOverrides);
         const mergedText = mergeOverridesForNested(textOverrides, innerText, currentPath);
         const mergedFill = mergeOverridesForNested(fillOverrides, innerFill, currentPath);
+        const mergedLibFill = mergeOverridesForNested(libFillOverrides, innerLibFill, currentPath);
         const mergedVis = mergeOverridesForNested(visibilityOverrides, innerVis, currentPath);
         // Spec §3.4 I-P9: prop assignments are defID-keyed, not path-keyed,
         // so the merge is a flat overwrite of the outer map (inner wins
@@ -683,6 +723,15 @@ export function toClientChildForRender(
         const mergedTextPropAssignments = innerTextPropAssignments.size > 0
           ? new Map([...textPropAssignments, ...innerTextPropAssignments])
           : textPropAssignments;
+        // I-C9 — same defID-keyed flat-overwrite merge for SYMBOL_ID
+        // assignments. Inner INSTANCE's own symbolID prop assignments
+        // override the outer ones in nested expansion. (Most Icon-button
+        // inner INSTANCEs don't redefine the prop, so this typically just
+        // forwards the outer assignment intact.)
+        const innerSymbolIdPropAssignments = collectSymbolIdPropAssignmentsFromInstance(data);
+        const mergedSymbolIdPropAssignments = innerSymbolIdPropAssignments.size > 0
+          ? new Map([...symbolIdPropAssignments, ...innerSymbolIdPropAssignments])
+          : symbolIdPropAssignments;
         // Spec §3.4 I-P11: also collect path-keyed prop assignments from
         // the inner INSTANCE's own symbolOverrides, prefixed with currentPath
         // so they reach descendants of the inner expansion. Outer
@@ -758,7 +807,7 @@ export function toClientChildForRender(
         // affects its own reflow below.
         const innerStackOv = collectStackOverridesFromInstance((data as { symbolData?: { symbolOverrides?: Array<Record<string, unknown>> } }).symbolData?.symbolOverrides);
         const nestedExpanded = master.children.map((c) =>
-          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes, mergedDerivedTransforms, mergedTextStyle, mergedVisualStyle, mergedTextPropAssignments),
+          toClientChildForRender(c, blobs, symbolIndex, mergedText, mergedFill, mergedVis, depth + 1, currentPath, mergedPropAssignments, mergedPropAssignsByPath, mergedSwapTargets, mergedDerivedSizes, mergedDerivedTransforms, mergedTextStyle, mergedVisualStyle, mergedTextPropAssignments, mergedSymbolIdPropAssignments, mergedLibFill),
         );
         // Round 20: AUTO-grow primarySizing also fires for nested INSTANCEs
         // (the dashboard "Excel 다운로드" button is a nested INSTANCE inside
@@ -810,7 +859,23 @@ export function toClientChildForRender(
   }
   // Apply fillPaints override AFTER the data spread so it wins. Spec §3.2 I-P3.
   const fillOv = fillOverrides.get(currentKey);
-  if (fillOv) out.fillPaints = fillOv;
+  if (fillOv) {
+    out.fillPaints = fillOv;
+  } else {
+    // Round 33.1 — library-bound fillPaints fallback. When the master
+    // contributes no fillPaints to `out` and the outer instance carries
+    // an assetRef-bound override at this path, use the override's
+    // snapshot as the only available source of a fill. Without this,
+    // Material 3 Text-field-style backgrounds (input box `#fef7ff`)
+    // never render and dark text on the dark editor canvas vanishes.
+    // Spec I-C10.
+    const libOv = libFillOverrides.get(currentKey);
+    const masterFills = out.fillPaints;
+    const masterHasFills = Array.isArray(masterFills) && masterFills.length > 0;
+    if (libOv && !masterHasFills) {
+      out.fillPaints = libOv;
+    }
+  }
   // Apply per-instance visibility override (spec round 4 extension). The
   // 397 metarich entries that hide e.g. an arrow icon inside a Button
   // variant flow through here.

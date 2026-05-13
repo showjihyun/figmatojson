@@ -234,6 +234,57 @@ export function colorVarTrail(paint: unknown, root: unknown): ColorVarTrailResul
   return { entries, end: chainResult.end };
 }
 
+/**
+ * Resolve a paint's effective {r,g,b,a} color, following a `colorVar` alias
+ * chain (paint → VARIABLE → ALIAS → … → leaf VARIABLE with a COLOR entry)
+ * when present.
+ *
+ * Why this exists: in Figma a paint that's bound to a color variable
+ * carries BOTH a snapshot `paint.color` (the value at write time, often
+ * the master's design-time default — black for typical on-primary text)
+ * AND `paint.colorVar` (the actual binding). The renderer must follow the
+ * binding so a Material 3 filled button's label stays white on its primary
+ * background instead of falling back to the snapshot black.
+ *
+ * Returns `paint.color` when:
+ *   - The paint has no `colorVar`.
+ *   - The colorVar guid is incomplete / can't be resolved.
+ *   - The chain ends without a usable COLOR entry (e.g. dead-end, cycle,
+ *     non-VARIABLE leaf).
+ * Returns the leaf VARIABLE's entries[0].variableData.value.color when the
+ * chain resolves cleanly. Single-mode only (entries[0]) — matching the
+ * existing `resolveVariableChain` limit.
+ *
+ * Spec: docs/specs/web-render-fidelity-colorvar.spec.md (Material 3 filled
+ * button + selected-date-cell text on Docked input date picker).
+ */
+export interface ResolvedColor { r?: number; g?: number; b?: number; a?: number }
+
+export function resolvePaintColor(paint: unknown, root: unknown): ResolvedColor | undefined {
+  if (!paint || typeof paint !== 'object') return undefined;
+  const p = paint as {
+    color?: ResolvedColor;
+    colorVar?: { value?: { alias?: { guid?: AliasGuid } } };
+  };
+  if (!p.colorVar || !root) return p.color;
+  const id = readGuid(p.colorVar.value?.alias?.guid);
+  if (!id) return p.color;
+  const target = findById(root, id) as { type?: string } | null;
+  if (!target || target.type !== 'VARIABLE') return p.color;
+  const chain = resolveVariableChain(target, root);
+  if (!chain || !chain.leaf) return p.color;
+  // Leaf VARIABLE's entries[0] should carry the concrete color. The chain
+  // walker returns the leaf when entries[0] is NOT an ALIAS (== `leaf` kind)
+  // or when the alias target wasn't a VARIABLE (`non-variable` kind, rare).
+  const leaf = chain.leaf as { variableDataValues?: { entries?: unknown[] } };
+  const entry = leaf.variableDataValues?.entries?.[0];
+  if (!entry || typeof entry !== 'object') return p.color;
+  const data = (entry as { variableData?: { value?: { color?: ResolvedColor }; dataType?: string } })
+    .variableData;
+  if (data?.dataType === 'COLOR' && data.value?.color) return data.value.color;
+  return p.color;
+}
+
 export function effectiveTextStyle(node: unknown, root: unknown): EffectiveTextStyle {
   if (!node || typeof node !== 'object') return {};
   const raw = node as Record<string, unknown>;

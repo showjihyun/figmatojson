@@ -70,7 +70,30 @@ export function collectTextOverridesFromInstance(
  * for the rationale on multi-step keys.
  *
  * Spec: docs/specs/web-instance-render-overrides.spec.md §3.1
+ *
+ * **Library-bound overrides are skipped (round 33).** When an override
+ * entry carries `styleIdForFill` referencing an EXTERNAL design-system
+ * style (`assetRef: { key, version }` — i.e. a remote library style, not
+ * a local guid into this doc), Figma resolves the live library value at
+ * render time. Our pipeline doesn't have access to the library; the
+ * `fillPaints` snapshot baked into the override is whichever mode the
+ * file was last saved in. Concrete failure case: every cell INSTANCE
+ * inside Docked input date picker [desktop] carries a `styleIdForFill`
+ * override at the date TEXT path with snapshot `#ffffff`. The Default /
+ * Prev-Next / Selected master variants already differentiate the text
+ * fill correctly (`#1d1b20` for normal cells, `#ffffff` for selected),
+ * so dropping the library-bound snapshot lets the master's own paint
+ * shine through and matches Figma's actual render. Locally-resolvable
+ * `styleIdForFill` (with a `guid` field) is treated as legitimate and
+ * kept — only the external `assetRef` form is skipped.
  */
+function hasExternalStyleBinding(entry: Record<string, unknown>): boolean {
+  const s = entry.styleIdForFill as { assetRef?: unknown; guid?: unknown } | undefined;
+  if (!s || typeof s !== 'object') return false;
+  // assetRef = published library style. guid = local style — we can resolve.
+  return s.assetRef != null && s.guid == null;
+}
+
 export function collectFillOverridesFromInstance(
   overrides: Array<Record<string, unknown>> | undefined,
 ): Map<string, unknown[]> {
@@ -79,6 +102,45 @@ export function collectFillOverridesFromInstance(
   for (const o of overrides) {
     const fps = o.fillPaints;
     if (!Array.isArray(fps)) continue;
+    if (hasExternalStyleBinding(o)) continue;
+    const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
+    const key = pathKeyFromGuids(guids);
+    if (key === null) continue;
+    m.set(key, fps);
+  }
+  return m;
+}
+
+/**
+ * Sister of `collectFillOverridesFromInstance` that collects the entries
+ * SKIPPED there — fillPaints overrides whose `styleIdForFill` is an
+ * external library `assetRef`. Used as a FALLBACK in
+ * `toClientChildForRender`: when the master itself has no fillPaints to
+ * spread into `out`, the library-bound override's snapshot becomes the
+ * only source of a fill, so we use it instead of leaving the node
+ * background empty.
+ *
+ * Spec: docs/specs/web-instance-render-overrides.spec.md §3.1 I-C10
+ * (round 33.1 — refines the Round 33 over-aggressive skip).
+ *
+ * Concrete failure case this re-enables: Material 3 Text field's input
+ * box bg (`#fef7ff` surface-container-highest). The master has no
+ * fillPaints on the input container; every INSTANCE carries the bg as
+ * an `assetRef`-bound override. Round 33 dropped the bg entirely,
+ * making dark `#1d1b20` text invisible on the dark editor background.
+ * Round 33.1 keeps it as a fallback exactly when the master is empty,
+ * still discarding the snapshot in cases like calendar day cells where
+ * the master already paints the right color.
+ */
+export function collectLibraryBoundFillOverridesFromInstance(
+  overrides: Array<Record<string, unknown>> | undefined,
+): Map<string, unknown[]> {
+  const m = new Map<string, unknown[]>();
+  if (!Array.isArray(overrides)) return m;
+  for (const o of overrides) {
+    const fps = o.fillPaints;
+    if (!Array.isArray(fps)) continue;
+    if (!hasExternalStyleBinding(o)) continue;
     const guids = (o.guidPath as { guids?: Array<{ sessionID?: number; localID?: number }> } | undefined)?.guids;
     const key = pathKeyFromGuids(guids);
     if (key === null) continue;
@@ -367,6 +429,90 @@ export function collectTextPropAssignmentsFromInstance(
     m.set(`${d.sessionID}:${d.localID}`, s);
   }
   return m;
+}
+
+/**
+ * Pull SYMBOL_ID component-property assignments off an INSTANCE node's
+ * `data`. Sister of `collectPropAssignmentsFromInstance` (bool) and
+ * `collectTextPropAssignmentsFromInstance` (string) — this collector
+ * handles the `symbolIdValue` shape used by Material 3 (and similar
+ * design systems) to swap an inner Icon's master via a component
+ * property. Each assignment is `defID → swap-target-guidStr`.
+ *
+ * Concrete failure case without this collector: Docked input date picker
+ * [desktop] (figma_reverse.fig) has 6 calendar nav "Icon button -
+ * standard" INSTANCEs. Each carries `componentPropAssignments` with a
+ * `dataType: 'SYMBOL_ID'` entry whose `symbolIdValue.guid` is the actual
+ * icon master (chevron-left, chevron-right, etc.). The inner Icon
+ * INSTANCE inside the Icon-button master is bound via
+ * `componentPropRefs[].componentPropNodeField === 'OVERRIDDEN_SYMBOL_ID'`
+ * to the same defID. Without resolving this swap, every nav button
+ * renders the master's default placeholder (a 5-point star) instead of
+ * the actual chevron.
+ *
+ * Spec: docs/specs/web-instance-render-overrides.spec.md §3.4 I-C9.
+ */
+export function collectSymbolIdPropAssignmentsFromInstance(
+  instData: Record<string, unknown> | undefined,
+): Map<string, string> {
+  const m = new Map<string, string>();
+  const cpa = instData?.componentPropAssignments as
+    | Array<{
+        defID?: { sessionID?: number; localID?: number };
+        value?: { guidValue?: { sessionID?: number; localID?: number } };
+        varValue?: {
+          value?: { symbolIdValue?: { guid?: { sessionID?: number; localID?: number } } };
+          dataType?: string;
+        };
+      }>
+    | undefined;
+  if (!Array.isArray(cpa)) return m;
+  for (const a of cpa) {
+    const d = a.defID;
+    if (!d || typeof d.sessionID !== 'number' || typeof d.localID !== 'number') continue;
+    // Two paths to the swap target — direct guidValue (when the designer
+    // explicitly assigned a symbol on this INSTANCE) and the variant
+    // default tunnelled through varValue.value.symbolIdValue.guid. Match
+    // the resolution order of the bool/text collectors.
+    const direct = a.value?.guidValue;
+    const variant = a.varValue?.value?.symbolIdValue?.guid;
+    const swap =
+      direct && typeof direct.sessionID === 'number' && typeof direct.localID === 'number'
+        ? direct
+        : variant && typeof variant.sessionID === 'number' && typeof variant.localID === 'number'
+          ? variant
+          : null;
+    if (!swap) continue;
+    m.set(`${d.sessionID}:${d.localID}`, `${swap.sessionID}:${swap.localID}`);
+  }
+  return m;
+}
+
+/**
+ * Resolve an INSTANCE node's `componentPropRefs` against a
+ * symbolIdPropAssignments map. Returns the swap-target guid string when
+ * the node has a propRef whose `componentPropNodeField ===
+ * 'OVERRIDDEN_SYMBOL_ID'` and whose defID resolves to an assignment,
+ * else `undefined`. Mirror of `textFromPropRefs` for the symbol-swap
+ * field.
+ */
+export function symbolIdFromPropRefs(
+  data: Record<string, unknown>,
+  symbolIdPropAssignments: Map<string, string>,
+): string | undefined {
+  if (symbolIdPropAssignments.size === 0) return undefined;
+  const refs = data?.componentPropRefs as
+    | Array<{ defID?: { sessionID?: number; localID?: number }; componentPropNodeField?: string }>
+    | undefined;
+  if (!Array.isArray(refs)) return undefined;
+  for (const r of refs) {
+    if (r?.componentPropNodeField !== 'OVERRIDDEN_SYMBOL_ID') continue;
+    const d = r.defID;
+    if (!d || typeof d.sessionID !== 'number' || typeof d.localID !== 'number') continue;
+    const v = symbolIdPropAssignments.get(`${d.sessionID}:${d.localID}`);
+    if (typeof v === 'string') return v;
+  }
+  return undefined;
 }
 
 /**

@@ -246,7 +246,7 @@ export function App() {
     return () => {
       delete (window as unknown as { __select?: unknown }).__select;
     };
-  }, []);
+  }, [handleSelect]);
 
   // Cmd/Ctrl+Z = Undo, Cmd/Ctrl+Shift+Z (and Cmd/Ctrl+Y) = Redo. Skipped
   // when focus is in a text input — typing inside an Inspector field should
@@ -446,17 +446,19 @@ export function App() {
             onDocChange={onRefreshDoc}
           />
         </aside>
-        {/* Round-23 audit-tooling: ?audit=1 swaps the dark editor chrome for a
-            white canvas bg so screenshots compare like-for-like against Figma's
-            REST API renders (which use a transparent → white background).
-            Without this, nodes with NO_FILL containers (right_top breadcrumb
-            strip etc.) show #0e0e0e in our capture vs white in figma.png and
-            register as 9 spurious "background mismatch" gaps in the audit.
-            See docs/audit-round11/GAPS.md "Round 22 follow-up". */}
+        {/* Canvas surface — matches Figma's default canvas background
+            `#F5F5F5` so designs authored against a light Figma render show
+            their dark text against the same light grey here. Editor
+            chrome (sidebars, top bar) stays dark; only the canvas pane
+            tracks Figma. Static editor color; no per-document state.
+            Audit mode (?audit=1) still uses pure white so screenshot
+            diffs against Figma's REST API renders (transparent → white)
+            stay pixel-accurate without `#F5F5F5` showing as a 5-pixel-
+            grey "bg mismatch" everywhere. */}
         <div className={`relative flex-1 overflow-hidden ${
           typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('audit') === '1'
             ? 'bg-white'
-            : 'bg-[#0e0e0e]'
+            : 'bg-[#F5F5F5]'
         }`}>
           {currentPage ? (
             <Suspense

@@ -8,6 +8,8 @@
  * implementation.
  */
 
+import { resolvePaintColor } from './colorStyleRef.js';
+
 export interface Rgba01 {
   r: number;
   g: number;
@@ -61,9 +63,14 @@ export function rgbaToCss(c?: Rgba01, layerOpacity: number = 1): string {
  * visible SOLID wins, matching `pickTopPaint` semantics in lib/paint.ts.
  *
  * Caller passes the entire node so the helper can also pick up `opacity`
- * on the paint when present.
+ * on the paint when present. The optional `root` argument enables
+ * `paint.colorVar` alias resolution (Material 3 on-primary etc.) — without
+ * it, the snapshot `paint.color` is used unchanged.
  */
-export function solidFillCss(node: { fillPaints?: unknown }): string {
+export function solidFillCss(
+  node: { fillPaints?: unknown },
+  root?: unknown,
+): string {
   const fills = node?.fillPaints;
   if (!Array.isArray(fills)) return 'transparent';
   for (let i = fills.length - 1; i >= 0; i--) {
@@ -72,7 +79,8 @@ export function solidFillCss(node: { fillPaints?: unknown }): string {
     if (p.type !== 'SOLID') continue;
     if (!p.color) continue;
     const op = typeof p.opacity === 'number' ? p.opacity : 1;
-    return rgbaToCss(p.color, op);
+    const color = root ? (resolvePaintColor(p, root) ?? p.color) : p.color;
+    return rgbaToCss(color as never, op);
   }
   return 'transparent';
 }
@@ -83,6 +91,7 @@ export function solidFillCss(node: { fillPaints?: unknown }): string {
  */
 export function solidStrokeCss(
   node: { strokeWeight?: unknown; strokePaints?: unknown },
+  root?: unknown,
 ): { color: string; width: number } | null {
   const w = node?.strokeWeight;
   if (typeof w !== 'number' || w <= 0) return null;
@@ -94,7 +103,8 @@ export function solidStrokeCss(
     if (p.type !== 'SOLID') continue;
     if (!p.color) continue;
     const op = typeof p.opacity === 'number' ? p.opacity : 1;
-    return { color: rgbaToCss(p.color, op), width: w };
+    const color = root ? (resolvePaintColor(p, root) ?? p.color) : p.color;
+    return { color: rgbaToCss(color as never, op), width: w };
   }
   return null;
 }
@@ -111,6 +121,7 @@ export function solidStrokeCss(
  */
 export function strokeFromPaints(
   node: { strokeWeight?: unknown; strokePaints?: unknown },
+  root?: unknown,
 ): { color: string; width: number } | null {
   const w = node?.strokeWeight;
   if (typeof w !== 'number' || w <= 0) return null;
@@ -128,7 +139,8 @@ export function strokeFromPaints(
     if (!p || p.visible === false) continue;
     const op = typeof p.opacity === 'number' ? p.opacity : 1;
     if (p.type === 'SOLID' && p.color) {
-      return { color: rgbaToCss(p.color, op), width: w };
+      const color = root ? (resolvePaintColor(p, root) ?? p.color) : p.color;
+      return { color: rgbaToCss(color as never, op), width: w };
     }
     if (p.type && p.type.startsWith('GRADIENT_') && Array.isArray(p.stops) && p.stops.length > 0) {
       const c = p.stops[0]?.color;

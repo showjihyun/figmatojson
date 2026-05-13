@@ -23,6 +23,7 @@ import {
 import { cn } from '@/lib/utils';
 import { countVariantChildren } from '@/lib/variants';
 import { variantLabelText } from '@/lib/variantLabel';
+import { buildAncestorIndex as buildAncestorIndexShared } from '@core/domain/tree';
 
 interface DocNode {
   guid?: { sessionID?: number; localID?: number };
@@ -76,11 +77,17 @@ interface LayerRowProps {
   revealRef: React.RefObject<HTMLDivElement | null>;
   /**
    * Set on every descendant of an INSTANCE's `_renderChildren` expansion.
-   * Two consequences (spec I-F6.1 / I-F6.2):
+   *
+   * Encoded as a `/`-joined path of INSTANCE guids, outermost first
+   * (e.g. `"0:9289"` for one level, `"0:9289/1:9212"` once we step into a
+   * nested INSTANCE inside the outer master subtree). Two consequences
+   * (spec I-F6.1 / I-F6.2 / I-F6.4):
    *   - This row's expand key is `${outerInstanceGuid}/${guid}` (composite)
-   *     so two instances of the same master keep independent expand state.
-   *   - Row-body click selects `outerInstanceGuid` instead of the row's own
-   *     guid (the master child guid lives in a different page tree).
+   *     so two instances of the same master keep independent expand state,
+   *     and nested copies of the same sub-master don't collide either.
+   *   - Row-body click selects the *first* segment (outermost, page-
+   *     reachable INSTANCE) — inner segments are themselves master-page
+   *     guids that the Inspector can't find in the current page tree.
    * `undefined` for normal rows (the INSTANCE itself + everything outside
    * an instance expansion).
    */
@@ -118,19 +125,31 @@ const LayerRow = memo(function LayerRow({
   const isExpanded = expandKey ? expanded.has(expandKey) : false;
   const isSelected = guid ? selectedGuids.has(guid) : false;
   // When we're entering the master expansion of THIS INSTANCE, descendant
-  // rows pick up `outerInstanceGuid = guid` (the INSTANCE itself). Otherwise
-  // descendants inherit the current value.
+  // rows extend the path by appending `guid`. If we're already inside an
+  // outer expansion (outerInstanceGuid set), the chain is appended — that
+  // keeps the OUTERMOST page-reachable INSTANCE at the front of the path
+  // (needed for selection bubble — spec I-F6.4) while still disambiguating
+  // expand state across nested copies of the same sub-master. Non-INSTANCE
+  // rows inherit the current path unchanged.
   const enteringExpansion =
     directChildren.length === 0 && fallbackChildren.length > 0;
-  const childOuterInstanceGuid = enteringExpansion ? guid : outerInstanceGuid;
+  const childOuterInstanceGuid = enteringExpansion
+    ? outerInstanceGuid
+      ? `${outerInstanceGuid}/${guid}`
+      : guid
+    : outerInstanceGuid;
 
   const Icon = iconFor(node.type);
 
   const onRowClick = (e: React.MouseEvent): void => {
-    // I-F6.2 — `_isInstanceChild` rows bubble selection up to the outer
-    // INSTANCE; the row's own guid (master child) wouldn't be findable in
-    // the current page tree.
-    const selectGuid = outerInstanceGuid ?? guid;
+    // I-F6.2 / I-F6.4 — `_isInstanceChild` rows bubble selection up to the
+    // *outermost* (page-reachable) INSTANCE. outerInstanceGuid is a path
+    // "g1/g2/..." of INSTANCE guids from outermost to innermost; only the
+    // first segment is findable in the current page tree (inner segments
+    // live in master pages). Selecting an inner segment would produce
+    // "Selected node X not found in current page" in the Inspector.
+    const outermost = outerInstanceGuid?.split('/', 1)[0];
+    const selectGuid = outermost ?? guid;
     if (!selectGuid) return;
     onSelect(selectGuid, e.shiftKey ? 'toggle' : 'replace');
   };
@@ -245,21 +264,70 @@ const LayerRow = memo(function LayerRow({
  * map. Used by the auto-reveal effect (I-F11.5) to expand every parent of
  * a selected node without scanning the tree on each render.
  *
- * Exported for unit testing.
+ * Thin wrapper around `@core/domain/tree.ts:buildAncestorIndex` so this
+ * module's existing imports (test fixtures, internal callers) stay
+ * unchanged while Canvas drill-in selection consumes the same helper from
+ * the shared domain location. Spec:
+ * docs/specs/web-canvas-drill-selection.spec.md §I-C4.
  */
 export function buildAncestorIndex(page: DocNode | null): Map<string, string[]> {
-  const out = new Map<string, string[]>();
-  if (!page || !Array.isArray(page.children)) return out;
-  function walk(node: DocNode, ancestors: string[]): void {
-    const g = guidStrOf(node);
-    if (g) out.set(g, ancestors);
-    if (Array.isArray(node.children) && node.children.length > 0) {
-      const nextAncestors = g ? [...ancestors, g] : ancestors;
-      for (const c of node.children) walk(c, nextAncestors);
+  return buildAncestorIndexShared(page);
+}
+
+/**
+ * Find the chain of composite expand keys that must be added to the
+ * `expanded` Set for a row matching `targetGuid` to become visible —
+ * including rows that live inside an INSTANCE's `_renderChildren` master
+ * subtree expansion. Single-traversal of `page` from each top-level child;
+ * short-circuits as soon as the target is reached.
+ *
+ * Spec: web-canvas-drill-selection v2 §5 (LayerTree mirrors a canvas
+ * double-click drill into a master subtree). The keys returned match
+ * `LayerRow.expandKey` exactly so adding them to `expanded` flips the
+ * right rows open.
+ *
+ * Returns an empty array when:
+ *   - `page` is null / has no children
+ *   - The target guid isn't reachable from page.children via `.children`
+ *     or `_renderChildren`
+ *
+ * Exported for unit testing.
+ */
+export function findExpandKeyChain(page: DocNode | null, targetGuid: string): string[] {
+  if (!page || !Array.isArray(page.children) || !targetGuid) return [];
+  let found: string[] | null = null;
+
+  function walk(node: DocNode, ancestorKeys: string[], outerPath: string): void {
+    if (found) return;
+    const guid = guidStrOf(node);
+    if (!guid) return;
+    const expandKey = outerPath ? `${outerPath}/${guid}` : guid;
+    if (guid === targetGuid) {
+      // Found — caller adds these ancestor keys to `expanded`. The target
+      // row itself does not need to be expanded (we just need it visible).
+      found = ancestorKeys;
+      return;
+    }
+    const direct = Array.isArray(node.children) ? node.children : [];
+    const fallback =
+      direct.length === 0 && Array.isArray(node._renderChildren)
+        ? node._renderChildren
+        : [];
+    if (direct.length > 0) {
+      const nextKeys = [...ancestorKeys, expandKey];
+      for (const c of direct) walk(c, nextKeys, outerPath);
+    } else if (fallback.length > 0) {
+      // Entering this INSTANCE's master subtree expansion — descendants'
+      // outerPath gains this node so their composite keys match the same
+      // scheme LayerRow uses when rendering inside an expansion.
+      const nextKeys = [...ancestorKeys, expandKey];
+      const nextOuter = outerPath ? `${outerPath}/${guid}` : guid;
+      for (const c of fallback) walk(c, nextKeys, nextOuter);
     }
   }
-  for (const c of page.children) walk(c, []);
-  return out;
+
+  for (const c of page.children) walk(c, [], '');
+  return found ?? [];
 }
 
 /**
@@ -309,21 +377,46 @@ export function LayerTree({ page, selectedGuids, onSelect, pageKey }: LayerTreeP
   // page so individual selection ticks just do an O(1) Set.has().
   const variantContainers = useMemo(() => buildVariantContainerSet(page), [page, pageKey]);
 
-  // ── Auto-reveal (spec I-F11.5–I-F11.8) ────────────────────────────────
+  // ── Auto-reveal (spec I-F11.5–I-F11.8 + drill-selection v2 §5) ──────
   // When selectedGuids changes, union every selected guid's ancestor chain
-  // into `expanded`. Manual collapse persists between selection changes
-  // (the effect dep is selectedGuids only, so unrelated re-renders don't
-  // re-expand). Empty selection is a no-op.
+  // into `expanded`. Walks both `.children` AND `_renderChildren` so a
+  // canvas double-click that drilled into a master subtree (e.g. selected
+  // a Date Picker / Selection Row inside Docked input date picker) also
+  // reveals + highlights the row here. Manual collapse persists between
+  // selection changes (the effect dep is selectedGuids only, so unrelated
+  // re-renders don't re-expand). Empty selection is a no-op.
   const revealRef = useRef<HTMLDivElement | null>(null);
+
+  // Per-selected-guid expand-key chain. Memo so the auto-reveal effect
+  // doesn't repeat the walk, and the revealGuid lookup below stays cheap.
+  const chainsBySelected = useMemo(() => {
+    const out = new Map<string, string[]>();
+    if (selectedGuids.size === 0 || !page) return out;
+    for (const g of selectedGuids) {
+      // Fast path: shallow ancestors are enough for page-resident nodes.
+      const shallow = ancestorIndex.get(g);
+      if (shallow) {
+        out.set(g, shallow);
+        continue;
+      }
+      // Drill case: target is a master-page guid reachable only through
+      // some INSTANCE's `_renderChildren`. Fall back to the deep walker.
+      const deep = findExpandKeyChain(page, g);
+      if (deep.length > 0) out.set(g, deep);
+    }
+    return out;
+  }, [page, selectedGuids, ancestorIndex]);
+
   const revealGuid = useMemo(() => {
     if (selectedGuids.size === 0) return null;
     // Pick the first selected guid that exists in this page — multi-select
-    // across pages is rare; first-match-on-this-page is the row we scroll to.
+    // across pages is rare; first-match-on-this-page is the row we scroll
+    // to. Deep walker covers master subtree drill targets too.
     for (const g of selectedGuids) {
-      if (ancestorIndex.has(g)) return g;
+      if (chainsBySelected.has(g)) return g;
     }
     return null;
-  }, [selectedGuids, ancestorIndex]);
+  }, [selectedGuids, chainsBySelected]);
 
   useEffect(() => {
     if (selectedGuids.size === 0) return;
@@ -331,7 +424,7 @@ export function LayerTree({ page, selectedGuids, onSelect, pageKey }: LayerTreeP
       let changed = false;
       const next = new Set(prev);
       for (const g of selectedGuids) {
-        const ancestors = ancestorIndex.get(g);
+        const ancestors = chainsBySelected.get(g);
         if (!ancestors) continue;
         for (const a of ancestors) {
           if (!next.has(a)) {
@@ -350,7 +443,7 @@ export function LayerTree({ page, selectedGuids, onSelect, pageKey }: LayerTreeP
       }
       return changed ? next : prev;
     });
-  }, [selectedGuids, ancestorIndex, variantContainers]);
+  }, [selectedGuids, chainsBySelected, variantContainers]);
 
   // After expand has committed (so the row is mounted), scroll it into view.
   // useLayoutEffect runs before paint, avoiding a frame where the user sees
