@@ -10,10 +10,17 @@
 
 import { resolvePaintColor } from './colorStyleRef.js';
 
+// Channels are all optional because Figma's wire format doesn't always
+// populate every component (e.g., non-SOLID paints, library-bound style
+// snapshots where r/g/b are derived from a variable, and resolveVariableChain
+// returning a leaf with partial entries). The downstream `chan` helper
+// defaults missing channels to 0 — matching what the renderer drew before
+// the type was tightened. Making this match reality removes the `as never`
+// casts at the resolvePaintColor → rgbaToCss handoff.
 export interface Rgba01 {
-  r: number;
-  g: number;
-  b: number;
+  r?: number;
+  g?: number;
+  b?: number;
   a?: number;
 }
 
@@ -80,7 +87,7 @@ export function solidFillCss(
     if (!p.color) continue;
     const op = typeof p.opacity === 'number' ? p.opacity : 1;
     const color = root ? (resolvePaintColor(p, root) ?? p.color) : p.color;
-    return rgbaToCss(color as never, op);
+    return rgbaToCss(color, op);
   }
   return 'transparent';
 }
@@ -104,7 +111,7 @@ export function solidStrokeCss(
     if (!p.color) continue;
     const op = typeof p.opacity === 'number' ? p.opacity : 1;
     const color = root ? (resolvePaintColor(p, root) ?? p.color) : p.color;
-    return { color: rgbaToCss(color as never, op), width: w };
+    return { color: rgbaToCss(color, op), width: w };
   }
   return null;
 }
@@ -140,7 +147,7 @@ export function strokeFromPaints(
     const op = typeof p.opacity === 'number' ? p.opacity : 1;
     if (p.type === 'SOLID' && p.color) {
       const color = root ? (resolvePaintColor(p, root) ?? p.color) : p.color;
-      return { color: rgbaToCss(color as never, op), width: w };
+      return { color: rgbaToCss(color, op), width: w };
     }
     if (p.type && p.type.startsWith('GRADIENT_') && Array.isArray(p.stops) && p.stops.length > 0) {
       const c = p.stops[0]?.color;

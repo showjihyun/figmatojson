@@ -192,7 +192,12 @@ export function toClientNode(
           const masterSize = masterData.size as { x?: number; y?: number } | undefined;
           const origInstSize = data.size as { x?: number; y?: number } | undefined;
           // Round 20: AUTO-grow primarySizing — see detectAutoGrownSize.
-          const grownSize = detectAutoGrownSize(sd?.symbolOverrides, sid, masterData, origInstSize);
+          // sid is narrowed to non-optional fields at the enclosing guard
+          // (line 128); the assertion re-states that narrowing so tsc stops
+          // complaining about the `{sessionID?: number}` shape leaking
+          // through the `as` cast on sd.
+          const sidStrict = sid as { sessionID: number; localID: number };
+          const grownSize = detectAutoGrownSize(sd?.symbolOverrides, sidStrict, masterData, origInstSize);
           if (grownSize) {
             (out as { _autoGrownSize?: { x?: number; y?: number } })._autoGrownSize = grownSize;
           }
@@ -816,7 +821,11 @@ export function toClientChildForRender(
         const nestedMasterData = (master.data ?? {}) as Record<string, unknown>;
         const nestedMasterSize = nestedMasterData.size as { x?: number; y?: number } | undefined;
         const nestedOrigInstSize = data.size as { x?: number; y?: number } | undefined;
-        const nestedGrownSize = detectAutoGrownSize(sd?.symbolOverrides, sid, nestedMasterData, nestedOrigInstSize);
+        // sid is narrowed to non-optional fields by the enclosing guard;
+        // the assertion re-states the narrowing for tsc (same fix as the
+        // outer-INSTANCE branch above).
+        const sidStrict = sid as { sessionID: number; localID: number };
+        const nestedGrownSize = detectAutoGrownSize(sd?.symbolOverrides, sidStrict, nestedMasterData, nestedOrigInstSize);
         if (nestedGrownSize) {
           (out as { _autoGrownSize?: { x?: number; y?: number } })._autoGrownSize = nestedGrownSize;
         }

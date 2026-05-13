@@ -376,7 +376,7 @@ function textBaseFillColor(node: Record<string, unknown>, root: unknown): string
   // Follow paint.colorVar to the leaf VARIABLE's resolved color so M3
   // on-primary text (filled / tonal buttons + selected date cell on
   // Docked input date picker) renders white instead of the snapshot black.
-  const color = (resolvePaintColor(p, root) ?? p.color) as never;
+  const color = resolvePaintColor(p, root) ?? p.color;
   return rgbaToCss(color, op);
 }
 
@@ -605,7 +605,7 @@ function resolveStyledRunFill(
   const p = top as { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number };
   if (!p.color) return baseFill;
   const op = typeof p.opacity === 'number' ? p.opacity : 1;
-  const color = (resolvePaintColor(p, root) ?? p.color) as never;
+  const color = resolvePaintColor(p, root) ?? p.color;
   return rgbaToCss(color, op);
 }
 
