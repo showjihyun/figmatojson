@@ -10,7 +10,8 @@
  * Inspector to label the fill/stroke color row (e.g. "Button/Primary/Default").
  */
 
-import { findById } from './tree.js';
+import { walk } from './tree.js';
+import type { DocumentNode } from './entities/Document';
 
 interface AliasGuid {
   sessionID?: unknown;
@@ -21,6 +22,41 @@ function readGuid(g: AliasGuid | null | undefined): string | null {
   if (!g || typeof g !== 'object') return null;
   if (typeof g.sessionID !== 'number' || typeof g.localID !== 'number') return null;
   return `${g.sessionID}:${g.localID}`;
+}
+
+/**
+ * `findById` is O(N) tree-walk every call. The resolvers in this file
+ * (`resolveVariableChain`, `resolvePaintColor`, `colorVarName`,
+ * `textStyleName`, `colorVarTrail`, `effectiveTextStyle`) are called
+ * per-paint-per-node during rendering, with up to 8 hops each through the
+ * variable alias chain. On a 35K-node Material 3 document where every
+ * paint is bound to a color VARIABLE, that's O(N²·hops) — multi-second
+ * hitch at document load.
+ *
+ * Cache lazily: on first lookup against a root, walk the tree once
+ * (O(N)) building a `Map<idString, node>`, stash it in a WeakMap keyed
+ * by root. Subsequent lookups are O(1). The WeakMap releases the index
+ * automatically when the root is garbage-collected.
+ *
+ * Read-only: if a caller MUTATES the tree (e.g., the server PATCH
+ * endpoint), they should keep using `findById` directly so they don't
+ * see a stale cache entry. All consumers in this file are render-side
+ * (read-only).
+ */
+const rootIndexCache = new WeakMap<object, Map<string, DocumentNode>>();
+
+function findByIdCached(root: unknown, id: string): DocumentNode | null {
+  if (!root || typeof root !== 'object') return null;
+  let idx = rootIndexCache.get(root);
+  if (!idx) {
+    idx = new Map();
+    walk(root, (n) => {
+      const ng = (n as { id?: unknown }).id;
+      if (typeof ng === 'string') idx!.set(ng, n);
+    });
+    rootIndexCache.set(root, idx);
+  }
+  return idx.get(id) ?? null;
 }
 
 /**
@@ -37,7 +73,7 @@ export function colorVarName(paint: unknown, root: unknown): string | null {
   const p = paint as { colorVar?: { value?: { alias?: { guid?: AliasGuid } } } };
   const id = readGuid(p.colorVar?.value?.alias?.guid);
   if (!id) return null;
-  const target = findById(root, id);
+  const target = findByIdCached(root, id);
   if (!target || (target as { type?: string }).type !== 'VARIABLE') return null;
   const name = (target as { name?: unknown }).name;
   return typeof name === 'string' ? name : null;
@@ -55,7 +91,7 @@ export function textStyleName(node: unknown, root: unknown): string | null {
   const n = node as { styleIdForText?: { guid?: AliasGuid } };
   const id = readGuid(n.styleIdForText?.guid);
   if (!id) return null;
-  const target = findById(root, id) as { type?: string; styleType?: string; name?: unknown } | null;
+  const target = findByIdCached(root, id) as { type?: string; styleType?: string; name?: unknown } | null;
   if (!target || target.type !== 'TEXT' || target.styleType !== 'TEXT') return null;
   return typeof target.name === 'string' ? target.name : null;
 }
@@ -101,7 +137,7 @@ function resolveStyleAsset(node: unknown, root: unknown): Record<string, unknown
   const n = node as { styleIdForText?: { guid?: AliasGuid } };
   const id = readGuid(n.styleIdForText?.guid);
   if (!id) return null;
-  const target = findById(root, id) as Record<string, unknown> | null;
+  const target = findByIdCached(root, id) as Record<string, unknown> | null;
   if (!target || target.type !== 'TEXT' || target.styleType !== 'TEXT') return null;
   return target;
 }
@@ -179,7 +215,7 @@ export function resolveVariableChain(
       return { leaf: cur, chain, end: { kind: 'cycle', cycledAt: aliasId } };
     }
 
-    const next = findById(root, aliasId) as Record<string, unknown> | null;
+    const next = findByIdCached(root, aliasId) as Record<string, unknown> | null;
     if (!next) return { leaf: cur, chain, end: { kind: 'dead-end' } };
     if ((next as { type?: string }).type !== 'VARIABLE') {
       chain.push(aliasId);
@@ -219,14 +255,14 @@ export function colorVarTrail(paint: unknown, root: unknown): ColorVarTrailResul
   const p = paint as { colorVar?: { value?: { alias?: { guid?: AliasGuid } } } };
   const id = readGuid(p.colorVar?.value?.alias?.guid);
   if (!id) return null;
-  const target = findById(root, id) as Record<string, unknown> | null;
+  const target = findByIdCached(root, id) as Record<string, unknown> | null;
   if (!target || target.type !== 'VARIABLE') return null;
 
   const chainResult = resolveVariableChain(target, root);
   if (!chainResult) return null;
 
   const entries: ColorVarTrailEntry[] = chainResult.chain.map((cid) => {
-    const node = findById(root, cid) as { name?: unknown } | null;
+    const node = findByIdCached(root, cid) as { name?: unknown } | null;
     const name = node && typeof node.name === 'string' ? node.name : null;
     return { id: cid, name };
   });
@@ -269,7 +305,7 @@ export function resolvePaintColor(paint: unknown, root: unknown): ResolvedColor 
   if (!p.colorVar || !root) return p.color;
   const id = readGuid(p.colorVar.value?.alias?.guid);
   if (!id) return p.color;
-  const target = findById(root, id) as { type?: string } | null;
+  const target = findByIdCached(root, id) as { type?: string } | null;
   if (!target || target.type !== 'VARIABLE') return p.color;
   const chain = resolveVariableChain(target, root);
   if (!chain || !chain.leaf) return p.color;
