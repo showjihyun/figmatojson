@@ -42,6 +42,12 @@ function renderRow(overrideProps: Partial<{
       onChange={onChange}
     />,
   );
+  // Rows render collapsed by default; expand so the textarea + Apply/Cancel
+  // buttons are mounted for the rest of the test to interact with.
+  const disclosure = screen.getByRole('button', { name: /Label/ });
+  act(() => {
+    disclosure.click();
+  });
   return { ...utils, onChange };
 }
 
