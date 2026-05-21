@@ -3,7 +3,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { useState } from 'react';
 
-import { LayerTree, buildAncestorIndex } from './LayerTree';
+import { LayerTree, buildAncestorIndex, findExpandKeyChain } from './LayerTree';
 
 interface DocNode {
   guid?: { sessionID?: number; localID?: number };
@@ -172,6 +172,47 @@ describe('LayerTree', () => {
       />,
     );
     expect(screen.getByText('No document open')).toBeTruthy();
+  });
+
+  it('I-F14 — double-click on a row with direct children expands AND selects first child', () => {
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    // Header is collapsed initially; its first child is TEXT "Title" (guid 0:11)
+    const headerRow = screen.getByText('Header').closest('[role="treeitem"]')!;
+    expect(headerRow.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.doubleClick(headerRow);
+
+    // Drilled in: now expanded and first child selected
+    expect(headerRow.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText('Title')).toBeTruthy();
+    expect(onSelect).toHaveBeenCalledWith('0:11', 'replace');
+  });
+
+  it('I-F14 — double-click on a leaf row (no children) is a no-op for drill', () => {
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    const footerRow = screen.getByText('Footer').closest('[role="treeitem"]')!;
+    fireEvent.doubleClick(footerRow);
+    // jsdom `fireEvent.doubleClick` does NOT auto-fire click — only dblclick.
+    // The dblclick handler has nothing to drill into and nothing to expand,
+    // so onSelect should not be called.
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   it('renders <unnamed> for nodes with empty/null name', () => {
@@ -531,5 +572,677 @@ describe('LayerTree — auto-reveal on selection (spec I-F11.5–I-F11.8)', () =
     expect(screen.getByText('typography')).toBeTruthy();
     // No scroll because there's no selected row to focus on.
     expect(scrollSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('LayerTree — instance master expansion (spec I-F6, I-F6.1, I-F6.2)', () => {
+  // Page contains one INSTANCE whose `.children` is empty and whose
+  // `_renderChildren` holds the master subtree. Mirrors the production
+  // shape produced by `toClientNode` + `toClientChildForRender`: every
+  // expansion descendant carries `_isInstanceChild: true`, and master
+  // descendant guids live in a different page (NOT in this page tree).
+  function instance(localID: number, name: string, expanded: DocNode[]): DocNode {
+    return {
+      guid: { sessionID: 0, localID },
+      type: 'INSTANCE',
+      name,
+      children: [], // empty — the fallback to _renderChildren is the whole point
+      _renderChildren: expanded,
+    } as DocNode;
+  }
+  function masterChild(localID: number, type: string, name: string, children?: DocNode[]): DocNode {
+    return {
+      guid: { sessionID: 1, localID }, // sessionID:1 to mark "master page" guids
+      type,
+      name,
+      children,
+      _isInstanceChild: true,
+    } as DocNode;
+  }
+
+  const MASTER_TREE = [
+    masterChild(9177, 'FRAME', 'Docked input date picker [desktop]', [
+      masterChild(9180, 'SYMBOL', 'Day', [
+        masterChild(9209, 'FRAME', 'Date Picker'),
+      ]),
+    ]),
+  ];
+
+  const PAGE_WITH_INSTANCE: DocNode = {
+    guid: { sessionID: 0, localID: 100 },
+    type: 'CANVAS',
+    name: 'Page 1',
+    children: [
+      instance(9289, 'Docked input date picker [desktop]', MASTER_TREE),
+    ],
+  };
+
+  it('I-F6 — exposes _renderChildren when .children is empty', () => {
+    render(
+      <LayerTree
+        page={PAGE_WITH_INSTANCE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    // The INSTANCE row shows a chevron (has expandable children)
+    const instanceRow = screen.getByText('Docked input date picker [desktop]').closest('[role="treeitem"]')!;
+    const instanceChevron = instanceRow.querySelector('button[aria-label="Expand"]');
+    expect(instanceChevron).not.toBeNull();
+
+    // Master children hidden until expanded
+    expect(screen.queryByText('Day')).toBeNull();
+
+    // Expand INSTANCE → master's outer FRAME (depth 1) becomes visible — its
+    // display name matches the INSTANCE's, so the row count goes 1 → 2.
+    fireEvent.click(instanceChevron!);
+    expect(screen.getAllByText('Docked input date picker [desktop]').length).toBe(2);
+
+    // Expand the master FRAME row → SYMBOL "Type=Day" rendered as "Day" appears
+    const masterFrameRow = screen.getAllByText('Docked input date picker [desktop]')[1]!
+      .closest('[role="treeitem"]')!;
+    fireEvent.click(masterFrameRow.querySelector('button[aria-label="Expand"]')!);
+    expect(screen.getByText('Day')).toBeTruthy();
+
+    // Expand SYMBOL "Day" → "Date Picker" leaf visible
+    fireEvent.click(
+      screen.getByText('Day').closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    expect(screen.getByText('Date Picker')).toBeTruthy();
+  });
+
+  it('I-F6.1 — master expansion rows carry italic + muted styling', () => {
+    render(
+      <LayerTree
+        page={PAGE_WITH_INSTANCE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByText('Docked input date picker [desktop]')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+
+    // First match is the master's outer FRAME (depth 1 inside expansion)
+    const masterFrameRow = screen.getAllByText('Docked input date picker [desktop]')[1]!
+      .closest('[role="treeitem"]')!;
+    expect(masterFrameRow.getAttribute('data-instance-child')).toBe('true');
+    expect(masterFrameRow.className).toContain('italic');
+    expect(masterFrameRow.className).toContain('text-muted-foreground');
+  });
+
+  it('I-F6.2 — row-body click on _isInstanceChild selects the outer INSTANCE guid (not master child)', () => {
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE_WITH_INSTANCE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    // Drill down 3 levels: INSTANCE → master FRAME → SYMBOL "Day"
+    fireEvent.click(
+      screen.getByText('Docked input date picker [desktop]')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getAllByText('Docked input date picker [desktop]')[1]!
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Day').closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+
+    onSelect.mockClear();
+    // Click "Date Picker" (master child guid 1:9209)
+    fireEvent.click(screen.getByText('Date Picker').closest('[role="treeitem"]')!);
+
+    // Should NOT select 1:9209 (master child) — bubbles to outer INSTANCE 0:9289
+    expect(onSelect).toHaveBeenCalledWith('0:9289', 'replace');
+    expect(onSelect).not.toHaveBeenCalledWith('1:9209', expect.anything());
+  });
+
+  it('I-F6.3 — chevron click on _isInstanceChild row does NOT call onSelect (still expand-only)', () => {
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE_WITH_INSTANCE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    // Drill: INSTANCE → master FRAME → expose "Day"
+    fireEvent.click(
+      screen.getByText('Docked input date picker [desktop]')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getAllByText('Docked input date picker [desktop]')[1]!
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    onSelect.mockClear();
+
+    // Chevron on the _isInstanceChild "Day" SYMBOL toggles expand without selection
+    const dayRow = screen.getByText('Day').closest('[role="treeitem"]')!;
+    fireEvent.click(dayRow.querySelector('button[aria-label="Expand"]')!);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(screen.getByText('Date Picker')).toBeTruthy();
+  });
+
+  it('I-F14 — double-click on a row INSIDE an instance expansion (outerInstanceGuid set) suppresses drill (expand-only)', () => {
+    // Repro of "Selected node X not found in current page" when drilling
+    // into Date Picker → Month drop down → first icon button. The FRAME
+    // "Month drop down" has direct children but those children are
+    // themselves `_isInstanceChild` (master subtree descendants), so
+    // dispatching onSelect with the first child's guid would set
+    // selectedGuid to a master child guid the Inspector can't find in
+    // the current page tree. The drill must be suppressed.
+    const PAGE_WITH_DRILL_TRAP: DocNode = {
+      guid: { sessionID: 0, localID: 100 },
+      type: 'CANVAS',
+      name: 'Page 1',
+      children: [
+        instance(9289, 'Docked input date picker [desktop]', [
+          masterChild(9209, 'FRAME', 'Date Picker', [
+            masterChild(9210, 'FRAME', 'Selection Row', [
+              masterChild(9211, 'FRAME', 'Month drop down', [
+                masterChild(9212, 'INSTANCE', 'Icon button - standard'),
+              ]),
+            ]),
+          ]),
+        ]),
+      ],
+    };
+
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE_WITH_DRILL_TRAP}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    // Expand down to Month drop down so it's the row we double-click
+    fireEvent.click(
+      screen.getByText('Docked input date picker [desktop]')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Date Picker')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Selection Row')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    onSelect.mockClear();
+
+    // Double-click "Month drop down" — has direct children (the master's
+    // own `.children`), but the row itself is inside the master expansion
+    // (outerInstanceGuid = 1:9289). The drill must NOT call onSelect with
+    // the first child's guid (1:9212 — _isInstanceChild). Expand-only.
+    const monthRow = screen.getByText('Month drop down').closest('[role="treeitem"]')!;
+    fireEvent.doubleClick(monthRow);
+
+    expect(onSelect).not.toHaveBeenCalled();
+    // Expand fired so the icon button is now in the DOM.
+    expect(screen.getByText('Icon button - standard')).toBeTruthy();
+  });
+
+  it('I-F14 — double-click on INSTANCE with only _renderChildren expands but keeps selection on outer INSTANCE', () => {
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={PAGE_WITH_INSTANCE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    const instanceRow = screen.getByText('Docked input date picker [desktop]').closest('[role="treeitem"]')!;
+    fireEvent.doubleClick(instanceRow);
+
+    // Expanded — master subtree row is now in DOM (the inner FRAME duplicate)
+    expect(screen.getAllByText('Docked input date picker [desktop]').length).toBe(2);
+    // INSTANCE has no .children (master expansion children come from
+    // _renderChildren). The drill leg therefore doesn't move selection;
+    // jsdom's fireEvent.doubleClick doesn't auto-fire click either, so
+    // onSelect should not be called at all.
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('I-F6.4 — row click inside a NESTED instance expansion bubbles to the OUTERMOST page-reachable INSTANCE', () => {
+    // Reproduces "Selected node 1:9212 not found in current page" along the
+    // path  Docked input date picker → Date Picker → Selection Row →
+    // Month drop down → Icon button-standard → Content. The icon button
+    // (1:9212) is itself a nested INSTANCE inside the outer INSTANCE's
+    // master expansion — its `_renderChildren` houses "Content". Clicking
+    // any row inside the inner expansion must select the OUTER instance
+    // (0:9289), not the nested-instance's own master-page guid.
+    function nestedInstance(localID: number, name: string, expanded: DocNode[]): DocNode {
+      return {
+        guid: { sessionID: 1, localID },
+        type: 'INSTANCE',
+        name,
+        children: [],
+        _renderChildren: expanded,
+        _isInstanceChild: true,
+      } as DocNode;
+    }
+
+    const NESTED_PAGE: DocNode = {
+      guid: { sessionID: 0, localID: 100 },
+      type: 'CANVAS',
+      name: 'Page 1',
+      children: [
+        instance(9289, 'Docked input date picker [desktop]', [
+          masterChild(9209, 'FRAME', 'Date Picker', [
+            masterChild(9210, 'FRAME', 'Selection Row', [
+              masterChild(9211, 'FRAME', 'Month drop down', [
+                // Nested INSTANCE — has _renderChildren of its own (its
+                // master's subtree), all _isInstanceChild.
+                nestedInstance(9212, 'Icon button - standard', [
+                  {
+                    guid: { sessionID: 2, localID: 1000 },
+                    type: 'TEXT',
+                    name: 'Content',
+                    _isInstanceChild: true,
+                  } as DocNode,
+                ]),
+              ]),
+            ]),
+          ]),
+        ]),
+      ],
+    };
+
+    const onSelect = vi.fn();
+    render(
+      <LayerTree
+        page={NESTED_PAGE}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={onSelect}
+      />,
+    );
+
+    // Drill down to expose the inner-instance "Content" row.
+    fireEvent.click(
+      screen.getByText('Docked input date picker [desktop]')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Date Picker')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Selection Row')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Month drop down')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Icon button - standard')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    onSelect.mockClear();
+
+    // Clicking the deep "Content" row must bubble to the OUTERMOST INSTANCE
+    // (0:9289), NOT the nested-instance's master-page guid (1:9212).
+    fireEvent.click(screen.getByText('Content').closest('[role="treeitem"]')!);
+    expect(onSelect).toHaveBeenCalledWith('0:9289', 'replace');
+    expect(onSelect).not.toHaveBeenCalledWith('1:9212', expect.anything());
+
+    // Same rule for the nested INSTANCE row itself — its own guid 1:9212
+    // is a master-page guid; selection must bubble to 0:9289.
+    onSelect.mockClear();
+    fireEvent.click(
+      screen.getByText('Icon button - standard').closest('[role="treeitem"]')!,
+    );
+    expect(onSelect).toHaveBeenCalledWith('0:9289', 'replace');
+    expect(onSelect).not.toHaveBeenCalledWith('1:9212', expect.anything());
+  });
+
+  it('I-F6.4 — nested copies of the same sub-master keep independent expand state', () => {
+    // Two nested INSTANCEs of the same sub-master inside one outer INSTANCE's
+    // expansion. Their grandchildren share the same master-page guid, so the
+    // expand-key must include the full ancestor INSTANCE path to disambiguate.
+    function nestedInstance(localID: number, name: string, expanded: DocNode[]): DocNode {
+      return {
+        guid: { sessionID: 1, localID },
+        type: 'INSTANCE',
+        name,
+        children: [],
+        _renderChildren: expanded,
+        _isInstanceChild: true,
+      } as DocNode;
+    }
+    const grandchild = (): DocNode => ({
+      guid: { sessionID: 2, localID: 1000 },
+      type: 'FRAME',
+      name: 'shared-grandchild',
+      _isInstanceChild: true,
+      children: [
+        {
+          guid: { sessionID: 2, localID: 1001 },
+          type: 'TEXT',
+          name: 'inner-leaf',
+          _isInstanceChild: true,
+        } as DocNode,
+      ],
+    } as DocNode);
+
+    const PAGE_TWIN: DocNode = {
+      guid: { sessionID: 0, localID: 100 },
+      type: 'CANVAS',
+      name: 'Page 1',
+      children: [
+        instance(9289, 'Outer', [
+          masterChild(9210, 'FRAME', 'Container', [
+            nestedInstance(9212, 'Inner A', [grandchild()]),
+            nestedInstance(9215, 'Inner B', [grandchild()]),
+          ]),
+        ]),
+      ],
+    };
+
+    render(
+      <LayerTree
+        page={PAGE_TWIN}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByText('Outer').closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Container').closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    // Expand only Inner A. Inner B's identical-guid grandchild must stay hidden.
+    fireEvent.click(
+      screen.getByText('Inner A').closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+
+    // Inner A's grandchild visible; Inner B's not yet.
+    expect(screen.getAllByText('shared-grandchild').length).toBe(1);
+  });
+
+  it('I-F6.1 composite expand key — two instances of the same master keep independent expand state', () => {
+    const PAGE_DUAL: DocNode = {
+      guid: { sessionID: 0, localID: 100 },
+      type: 'CANVAS',
+      name: 'Page 1',
+      children: [
+        instance(9289, 'Docked A', MASTER_TREE),
+        instance(9388, 'Docked B', MASTER_TREE),
+      ],
+    };
+
+    render(
+      <LayerTree
+        page={PAGE_DUAL}
+        pageKey={0}
+        selectedGuids={new Set()}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    // Drill into instance A: expand A → expand A's outer master FRAME
+    fireEvent.click(
+      screen.getByText('Docked A')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    fireEvent.click(
+      screen.getByText('Docked input date picker [desktop]')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+
+    // "Day" SYMBOL under A is now visible. Instance B is still collapsed, so
+    // its own master expansion never rendered — exactly one row of "Day".
+    expect(screen.getAllByText('Day').length).toBe(1);
+
+    // Now expand B → its master expansion mounts, with "Day" hidden until
+    // we expand B's outer FRAME (separate state, not bound to A's).
+    fireEvent.click(
+      screen.getByText('Docked B')
+        .closest('[role="treeitem"]')!
+        .querySelector('button[aria-label="Expand"]')!,
+    );
+    // B's outer master FRAME shows up but its "Day" is collapsed — A still
+    // has its "Day" visible. Net: exactly one "Day" still in DOM.
+    expect(screen.getAllByText('Day').length).toBe(1);
+  });
+});
+
+describe('findExpandKeyChain — composite keys for drill-in auto-reveal', () => {
+  function n(localID: number, type: string, name: string, children?: DocNode[]): DocNode {
+    return {
+      guid: { sessionID: 0, localID },
+      type,
+      name,
+      children,
+    };
+  }
+
+  it('returns plain guid keys for page-resident ancestors', () => {
+    const page: DocNode = {
+      guid: { sessionID: 0, localID: 100 },
+      type: 'CANVAS',
+      name: 'p',
+      children: [n(1, 'FRAME', 'A', [n(2, 'FRAME', 'B', [n(3, 'TEXT', 'C')])])],
+    };
+    expect(findExpandKeyChain(page, '0:3')).toEqual(['0:1', '0:2']);
+    expect(findExpandKeyChain(page, '0:2')).toEqual(['0:1']);
+    expect(findExpandKeyChain(page, '0:1')).toEqual([]);
+  });
+
+  it('returns composite keys for descendants inside an INSTANCE master subtree', () => {
+    const masterChild = (lid: number, type: string, name: string, kids?: DocNode[]): DocNode =>
+      ({
+        guid: { sessionID: 1, localID: lid },
+        type,
+        name,
+        children: kids,
+        _isInstanceChild: true,
+      } as DocNode);
+    const instance: DocNode = {
+      guid: { sessionID: 0, localID: 9289 },
+      type: 'INSTANCE',
+      name: 'Docked input date picker [desktop]',
+      children: [],
+      _renderChildren: [
+        masterChild(9209, 'FRAME', 'Date Picker', [
+          masterChild(9210, 'FRAME', 'Selection Row', [
+            masterChild(9211, 'FRAME', 'Month drop down'),
+          ]),
+        ]),
+      ],
+    } as DocNode;
+    const page: DocNode = {
+      guid: { sessionID: 0, localID: 100 },
+      type: 'CANVAS',
+      name: 'p',
+      children: [instance],
+    };
+
+    // For the deepest master-page guid, every ancestor key uses the
+    // composite scheme `outer/.../guid` so it matches the rows' expandKey.
+    expect(findExpandKeyChain(page, '1:9211')).toEqual([
+      '0:9289',         // outer INSTANCE row itself (page-resident, plain)
+      '0:9289/1:9209',  // Date Picker row inside outer's expansion
+      '0:9289/1:9210',  // Selection Row row inside outer's expansion
+    ]);
+    expect(findExpandKeyChain(page, '1:9209')).toEqual(['0:9289']);
+    expect(findExpandKeyChain(page, '0:9289')).toEqual([]);
+  });
+
+  it('handles nested INSTANCEs inside the outer master subtree (composite keys keep stacking)', () => {
+    const masterChild = (lid: number, type: string, name: string, kids?: DocNode[], rkids?: DocNode[]): DocNode =>
+      ({
+        guid: { sessionID: 1, localID: lid },
+        type,
+        name,
+        children: kids ?? [],
+        ...(rkids ? { _renderChildren: rkids } : {}),
+        _isInstanceChild: true,
+      } as DocNode);
+    // outer 0:9289 → m1 (1:9209) → m2 (1:9212 INSTANCE) → m3 (2:1000)
+    const innerLeaf: DocNode = {
+      guid: { sessionID: 2, localID: 1000 },
+      type: 'TEXT',
+      name: 'Content',
+      _isInstanceChild: true,
+    } as DocNode;
+    const innerInstance = masterChild(9212, 'INSTANCE', 'Icon button - standard', [], [innerLeaf]);
+    const m1 = masterChild(9209, 'FRAME', 'Date Picker', [innerInstance]);
+    const outer: DocNode = {
+      guid: { sessionID: 0, localID: 9289 },
+      type: 'INSTANCE',
+      name: 'Docked',
+      children: [],
+      _renderChildren: [m1],
+    } as DocNode;
+    const page: DocNode = {
+      guid: { sessionID: 0, localID: 100 },
+      type: 'CANVAS',
+      name: 'p',
+      children: [outer],
+    };
+
+    expect(findExpandKeyChain(page, '2:1000')).toEqual([
+      '0:9289',                // outer row
+      '0:9289/1:9209',         // Date Picker row inside outer's expansion
+      '0:9289/1:9212',         // Icon button-standard row inside outer's expansion.
+                               // Its composite key prefixes ONLY the outermost
+                               // INSTANCE — not the intermediate FRAME (master
+                               // subtree FRAMEs don't enter a new expansion).
+                               // Matches LayerRow's expandKey scheme.
+    ]);
+  });
+
+  it('returns [] when target guid is unreachable', () => {
+    const page: DocNode = {
+      guid: { sessionID: 0, localID: 100 },
+      type: 'CANVAS',
+      name: 'p',
+      children: [n(1, 'FRAME', 'A')],
+    };
+    expect(findExpandKeyChain(page, '99:99')).toEqual([]);
+    expect(findExpandKeyChain(null, '0:1')).toEqual([]);
+    expect(findExpandKeyChain(page, '')).toEqual([]);
+  });
+});
+
+describe('LayerTree — drill-in selection auto-reveal (drill-selection v2 §5)', () => {
+  let scrollSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    scrollSpy = vi.spyOn(HTMLElement.prototype, 'scrollIntoView').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    scrollSpy.mockRestore();
+  });
+
+  function masterChild(lid: number, type: string, name: string, kids?: DocNode[]): DocNode {
+    return {
+      guid: { sessionID: 1, localID: lid },
+      type,
+      name,
+      children: kids,
+      _isInstanceChild: true,
+    } as DocNode;
+  }
+
+  const PAGE: DocNode = {
+    guid: { sessionID: 0, localID: 100 },
+    type: 'CANVAS',
+    name: 'Page 1',
+    children: [
+      {
+        guid: { sessionID: 0, localID: 9289 },
+        type: 'INSTANCE',
+        name: 'Docked input date picker [desktop]',
+        children: [],
+        _renderChildren: [
+          masterChild(9209, 'FRAME', 'Date Picker', [
+            masterChild(9210, 'FRAME', 'Selection Row'),
+          ]),
+        ],
+      } as DocNode,
+    ],
+  };
+
+  it('selecting a master-page guid externally expands the outer INSTANCE and its intermediate master FRAME', () => {
+    function Harness({ sel }: { sel: Set<string> }) {
+      return (
+        <LayerTree page={PAGE} pageKey={0} selectedGuids={sel} onSelect={vi.fn()} />
+      );
+    }
+    const { rerender } = render(<Harness sel={new Set()} />);
+    // Default: outer INSTANCE row visible; master subtree collapsed.
+    expect(screen.queryByText('Date Picker')).toBeNull();
+    expect(screen.queryByText('Selection Row')).toBeNull();
+
+    // Canvas drill picked 1:9210 (Selection Row). LayerTree must auto-
+    // reveal it — outer INSTANCE expands, Date Picker expands, the row
+    // becomes selected.
+    rerender(<Harness sel={new Set(['1:9210'])} />);
+    expect(screen.getByText('Date Picker')).toBeTruthy();
+    expect(screen.getByText('Selection Row')).toBeTruthy();
+    const selRow = screen.getByText('Selection Row').closest('[role="treeitem"]')!;
+    expect(selRow.getAttribute('aria-selected')).toBe('true');
+    expect(scrollSpy).toHaveBeenCalled();
+  });
+
+  it('selecting an intermediate master-page guid expands only its outer INSTANCE', () => {
+    function Harness({ sel }: { sel: Set<string> }) {
+      return (
+        <LayerTree page={PAGE} pageKey={0} selectedGuids={sel} onSelect={vi.fn()} />
+      );
+    }
+    const { rerender } = render(<Harness sel={new Set()} />);
+    rerender(<Harness sel={new Set(['1:9209'])} />);
+    // Date Picker visible AND highlighted.
+    const dpRow = screen.getByText('Date Picker').closest('[role="treeitem"]')!;
+    expect(dpRow.getAttribute('aria-selected')).toBe('true');
+    // Date Picker is the target itself, so its OWN children stay collapsed
+    // (we only auto-expand ancestors). Selection Row stays hidden.
+    expect(screen.queryByText('Selection Row')).toBeNull();
   });
 });

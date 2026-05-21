@@ -1,20 +1,20 @@
 # spec/web-chat-duplicate
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/server/adapters/driven/applyTool.ts` 의 `'duplicate'` 케이스 |
-| 테스트 | `web/server/adapters/driven/applyTool.test.ts` (`describe('duplicate')` 블록 + 누적/혼합 undo 스트레스) |
-| 의존 | `__msg__` sentinel patch + `rebuildDocumentFromMessage`, `between()` (fractional-index) |
-| 형제 | `web-group-ungroup.spec.md` (동일 sentinel 패턴), `web-chat-leaf-tools.spec.md` (leaf 패턴), `web-undo-redo.spec.md` |
+| Status | Approved |
+| Implementation | `'duplicate'` case in `web/server/adapters/driven/applyTool.ts` |
+| Tests | `web/server/adapters/driven/applyTool.test.ts` (`describe('duplicate')` block + cumulative / mixed undo stress) |
+| Dependencies | `__msg__` sentinel patch + `rebuildDocumentFromMessage`, `between()` (fractional-index) |
+| Siblings | `web-group-ungroup.spec.md` (same sentinel pattern), `web-chat-leaf-tools.spec.md` (leaf pattern), `web-undo-redo.spec.md` |
 
-## 1. 목적
+## 1. Goal
 
-AI 채팅 도구 `duplicate` 는 단일 노드와 그 하위 트리 전체를 복제해 같은 부모의 다음 sibling 으로 삽입한다. group/ungroup 과 마찬가지로 트리 구조를 변경하므로 `__msg__` sentinel + `nodeChanges` 전체 스냅샷 patch 패턴을 사용한다.
+The AI chat tool `duplicate` clones a single node and its entire subtree, then inserts the copy as the next sibling under the same parent. Like group/ungroup, this modifies tree structure, so it uses the `__msg__` sentinel + full `nodeChanges` snapshot patch pattern.
 
-쓰임:
-- "이 카드 한 번 더 복사해줘" 같은 일상적 요청.
-- 사용자 수동 Cmd+D 가 아직 인스펙터에 없을 때의 유일한 복제 경로 (채팅 전용).
+Uses:
+- Everyday requests like "duplicate this card once more."
+- The only duplication path while the Inspector lacks user-driven Cmd+D (chat-only).
 
 ## 2. Input / Output
 
@@ -25,73 +25,73 @@ label  = 'AI: duplicate'
 patches = [{ guid: '__msg__', field: 'nodeChanges', before, after }]
 ```
 
-- `guid` 는 복제할 root 노드. 이 노드의 모든 후손 (parentIndex.guid 로 연결된 직간접 자손) 이 함께 복제된다.
-- `dx` / `dy` 는 root clone 의 transform offset (default 20px 씩). 후손 clone 들의 transform 은 변경하지 않음 — root 만 이동.
+- `guid` is the root node to duplicate. All of its descendants (any node reachable via parentIndex.guid) are duplicated together.
+- `dx` / `dy` are the root clone's transform offset (default 20px each). Descendant clones' transforms are unchanged — only the root is offset.
 
 ## 3. Invariants
 
 ### 3.1 Subtree discovery (BFS by parentIndex.guid)
 
-- I-S1 root + 후손 집합은 `msg.nodeChanges` 의 flat list 위에서 BFS 로 수집한다 — `parentIndex.guid` 가 currently-known node 를 가리키는 노드들을 반복 추가.
-- I-S2 root 의 후손이 0개여도 OK (단일 노드 복제). subtree.length === 1.
-- I-S3 INSTANCE 노드의 symbolData 가 가리키는 master / component 노드는 후손이 아니다 — `parentIndex.guid` 가 가리키지 않으므로 BFS 범위 밖. 복제 결과는 원본 INSTANCE 와 동일한 master 를 참조한다 (instance 자체만 새 GUID, master 는 공유).
+- I-S1 The root + descendants set is collected via BFS over `msg.nodeChanges`'s flat list — repeatedly add nodes whose `parentIndex.guid` references a currently-known node.
+- I-S2 0 descendants is fine (single-node duplication). subtree.length === 1.
+- I-S3 The master/component referenced by an INSTANCE node's symbolData is not a descendant — its `parentIndex.guid` does not point to a subtree member, so it lies outside the BFS. The duplicated INSTANCE references the same master as the original (only the instance gets a new GUID; the master is shared).
 
-### 3.2 GUID 할당
+### 3.2 GUID allocation
 
-- I-G1 `nextLocalId = max(localID in msg.nodeChanges) + 1`. subtree 의 모든 노드에 대해 `{sessionID: 0, localID: nextLocalId++}` 로 새 GUID 발급. group/ungroup 과 동일 규칙.
-- I-G2 `guidMap: Map<oldKey, newGuid>` 에 모든 매핑을 저장 — 후손 clone 의 `parentIndex.guid` rewrite 에 사용.
-- I-G3 sessionID 는 0 (현재 사용자 세션) 으로 통일. multi-user collaboration 은 비대상.
+- I-G1 `nextLocalId = max(localID in msg.nodeChanges) + 1`. Issue `{sessionID: 0, localID: nextLocalId++}` to every node in the subtree. Same rule as group/ungroup.
+- I-G2 `guidMap: Map<oldKey, newGuid>` records every mapping — used to rewrite descendant clones' `parentIndex.guid`.
+- I-G3 sessionID is fixed at 0 (current user session). Multi-user collaboration is out of scope.
 
 ### 3.3 Root clone
 
-- I-R1 root clone 의 `parentIndex.guid` = 원본의 `parentIndex.guid` (같은 부모 아래 sibling 으로 삽입).
-- I-R2 root clone 의 `parentIndex.position` = `between(원본.position, null)` — 원본보다 lex 큰 새 position 문자열. 다음 sibling 이 실제로 존재해도 `between` 의 alphabet padding 으로 인해 원본 < clone < 다음sibling 이 보장된다.
-- I-R3 root clone 의 `transform.m02 = 원본.m02 + dx`, `transform.m12 = 원본.m12 + dy`. 회전 채널 (m00/m01/m10/m11) 은 그대로.
-- I-R4 root 가 `parentIndex` 가 없는 경우 (DOCUMENT 등 root 노드) → `parentIndex` 도 없는 채로 clone 된다 (현재 코드 경로). 의미 없는 호출이라 호출자 책임.
+- I-R1 Root clone's `parentIndex.guid` = the original's `parentIndex.guid` (insert as sibling under the same parent).
+- I-R2 Root clone's `parentIndex.position` = `between(original.position, null)` — a new position string lex-greater than the original. Even if a next sibling exists, the alphabet padding in `between` guarantees original < clone < nextSibling.
+- I-R3 Root clone's `transform.m02 = original.m02 + dx`, `transform.m12 = original.m12 + dy`. Rotation channels (m00/m01/m10/m11) unchanged.
+- I-R4 If the root has no `parentIndex` (DOCUMENT or other root nodes) → the clone has no `parentIndex` either (current code path). A meaningless invocation; the caller takes responsibility.
 
 ### 3.4 Descendant clone
 
-- I-D1 후손 clone 의 `parentIndex.guid` = `guidMap` 에서 lookup 한 새 부모 GUID — 원본 부모 (subtree 안의 다른 노드) 가 아니라 그 노드의 clone 을 가리킨다.
-- I-D2 후손 clone 의 `parentIndex.position` = 원본 그대로 — clone 된 부모 안에서의 sibling lex 순서가 원본과 동일하게 유지.
-- I-D3 후손 clone 의 `transform`, `size`, `fillPaints`, `textData`, `symbolData` 등 나머지 필드는 원본의 deep clone 그대로. dx/dy offset 은 root 에만 적용.
-- I-D4 INSTANCE 후손 clone 의 `symbolData.symbolOverrides` 는 verbatim copy — `guidPath` 가 master text 의 GUID 를 절대 경로로 참조하므로 parent 변경에 영향받지 않는다 (`web-group-ungroup.spec.md §10 `guidPath` 갱신` 와 동일 근거).
+- I-D1 Descendant clone's `parentIndex.guid` = the new parent GUID looked up in `guidMap` — not the original parent (which is another node in the subtree) but its clone.
+- I-D2 Descendant clone's `parentIndex.position` = original as-is — sibling lex order inside the cloned parent matches the original.
+- I-D3 Descendant clone's `transform`, `size`, `fillPaints`, `textData`, `symbolData`, etc. are deep-cloned from the original verbatim. dx/dy applies only to the root.
+- I-D4 An INSTANCE descendant clone's `symbolData.symbolOverrides` is a verbatim copy — `guidPath` references master text GUIDs by absolute path, so parent changes do not affect it (same rationale as `web-group-ungroup.spec.md §10 `guidPath` updates`).
 
 ### 3.5 Journal / message / documentJson
 
-- I-J1 `beforeNodeChanges = clone(msg.nodeChanges)` 를 진입 시점에 캡처.
-- I-J2 mutation 후 `msg.nodeChanges = [...원본 배열, ...cloned]` (cloned 는 BFS 순서 — root 가 첫 항목, 후손은 그 뒤).
-- I-J3 `writeFileSync(messagePath, JSON.stringify(msg))` 로 디스크 동기 반영.
-- I-J4 `s.documentJson = rebuildDocumentFromMessage(JSON.stringify(msg))` 로 client tree 재생성. group/ungroup 과 동일 — leaf 도구의 `mirrorClient` 와 달리 wholesale rebuild.
+- I-J1 Capture `beforeNodeChanges = clone(msg.nodeChanges)` on entry.
+- I-J2 After mutation, `msg.nodeChanges = [...original array, ...cloned]` (cloned is in BFS order — root first, then descendants).
+- I-J3 `writeFileSync(messagePath, JSON.stringify(msg))` synchronously persists to disk.
+- I-J4 `s.documentJson = rebuildDocumentFromMessage(JSON.stringify(msg))` regenerates the client tree. Same as group/ungroup — wholesale rebuild rather than the leaf-tool `mirrorClient`.
 - I-J5 `recordChatEdit('duplicate', [{guid: '__msg__', field: 'nodeChanges', before: beforeNodeChanges, after: clone(msg.nodeChanges)}])`. label = `"AI: duplicate"`.
 
 ## 4. Round-trip with Undo
 
-- I-U1 Undo 는 `MSG_SENTINEL_GUID` 분기에서 `msg.nodeChanges = before` 로 swap 하고 `documentJson` 을 rebuild — clone 된 모든 노드가 사라진다 (`web-undo-redo.spec.md §4.2`).
-- I-U2 N회 연속 duplicate 후 N회 Undo → `nodeChanges` 가 baseline byte-for-byte 동일 (테스트: `applyTool.test.ts` cumulative undo 블록).
-- I-U3 duplicate 와 leaf 도구를 섞어 호출한 뒤 Undo 해도 baseline 으로 복원 (테스트: 동일 파일의 mixed leaf+structural interleave 블록).
+- I-U1 Undo's `MSG_SENTINEL_GUID` branch swaps `msg.nodeChanges = before` and rebuilds `documentJson` — every cloned node disappears (`web-undo-redo.spec.md §4.2`).
+- I-U2 N consecutive `duplicate` calls followed by N Undos → `nodeChanges` is byte-for-byte identical to the baseline (tested by `applyTool.test.ts` cumulative undo block).
+- I-U3 Mixed sequences of duplicate and leaf tools followed by Undo restore the baseline (tested in the same file's mixed leaf+structural interleave block).
 
 ## 5. Error cases
 
-- I-E1 root 노드 미존재 → `Error("node <guid> not found")`. throw 전 어떤 disk write 도 일어나지 않는다.
-- I-E2 `findNode` 가 root 만 검증 — 후손이 BFS 도중 사라지는 경우는 불가능 (단일 호출 안에서 race 없음).
-- I-E3 `dx` / `dy` 가 NaN / non-numeric 이면 `Number(...)` 강제 변환 결과 NaN 이 transform 에 들어갈 수 있음 — 호출자 책임 (current 한계).
-- I-E4 `nodeChanges` 가 매우 커서 `JSON.stringify` 가 메모리 한계에 닿는 경우는 비대상 (current PoC 35K-node 까지 검증).
+- I-E1 Root node missing → `Error("node <guid> not found")`. No disk write occurs before the throw.
+- I-E2 `findNode` only validates the root — a descendant cannot disappear mid-BFS (no races within one invocation).
+- I-E3 If `dx` / `dy` is NaN / non-numeric, `Number(...)` coercion may write NaN into the transform — caller's responsibility (current limitation).
+- I-E4 `nodeChanges` so large that `JSON.stringify` hits memory limits is out of scope (current PoC validated up to 35K nodes).
 
-## 6. 비대상
+## 6. Out of scope
 
-- **deep duplicate of an INSTANCE master** — INSTANCE 만 복제할 수 있고, INSTANCE 가 참조하는 master/component 는 복제하지 않는다. master 까지 복제하려면 별도 도구 (master-detach 등).
-- **link-preserving duplicate** — clone 된 INSTANCE 끼리 변수/스타일이 자동으로 동기화되는 등의 동작 없음.
-- **smart positioning** — dx/dy 는 단순 offset. 캔버스 빈 공간 자동 탐색은 별도 도구 (`mcp__pencil__find_empty_space_on_canvas` 류, 본 코드베이스 비대상).
-- **multi-source duplicate** — 한 호출에 한 root 만. 여러 노드를 동시에 복제하려면 dispatcher 가 N회 호출.
+- **Deep duplicate of an INSTANCE master** — only the INSTANCE is duplicated; the master/component it references is not. Duplicating the master too requires a separate tool (master-detach, etc.).
+- **Link-preserving duplicate** — no automatic variable/style synchronization between cloned INSTANCEs.
+- **Smart positioning** — dx/dy is a plain offset. Auto-search for empty canvas space belongs in a separate tool (something like `mcp__pencil__find_empty_space_on_canvas`; not in this codebase).
+- **Multi-source duplicate** — one root per call. To duplicate multiple nodes at once, the dispatcher issues N calls.
 
-## 7. 라우팅 결합
+## 7. Routing coupling
 
-채팅 전용. 사용자 수동 인스펙터에 Cmd+D 추가 시:
-- `POST /api/duplicate/:sid` body `{guid, dx?, dy?}` 로 노출 가능.
-- 같은 use case (`applyTool` 의 duplicate 분기) 호출.
+Chat-only. When user-driven Cmd+D is added to the Inspector:
+- Expose `POST /api/duplicate/:sid` body `{guid, dx?, dy?}`.
+- It calls the same use case (the duplicate branch of `applyTool`).
 
 ## 8. Resolved questions
 
-- **default offset 20px 의 적정성** — Figma 자체 Cmd+D 도 ~20px offset 으로 복제 — 동일 UX 채택. 호출자가 0 을 명시하면 원본과 정확히 겹친다 (현재 의도된 동작).
-- **descendant 의 parentIndex.position 보존 vs 재생성** — 원본 그대로 유지 (I-D2). 어차피 새 parent 안의 lex 순서만 의미 있으므로 충돌 없음. ungroup 처럼 `between` 으로 ladder 할 필요 없음.
-- **`fillPaints` 의 `imageRef` 같은 binary asset 참조** — `clone(...)` = `JSON.parse(JSON.stringify(...))` 가 처리 — Uint8Array 는 `__bytes` reviver tag 로 round-trip (`messageJson.ts:25` 참조). 단순 hash 참조는 string 으로 그대로 복제됨.
+- **Whether the 20px default offset is appropriate** — Figma's native Cmd+D also duplicates with ~20px offset — same UX adopted. If the caller passes 0, the clone overlaps the original exactly (current intended behavior).
+- **Preserving vs regenerating descendant `parentIndex.position`** — preserved as-is (I-D2). Only the lex order inside the new parent matters, so there is no collision. No need to ladder via `between` as in ungroup.
+- **Binary asset references such as `fillPaints` `imageRef`** — handled by `clone(...)` = `JSON.parse(JSON.stringify(...))` — Uint8Array round-trips through the `__bytes` reviver tag (see `messageJson.ts:25`). Plain hash references are copied as strings as-is.

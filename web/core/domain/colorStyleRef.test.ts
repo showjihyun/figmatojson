@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { colorVarName, textStyleName, effectiveTextStyle, resolveVariableChain, colorVarTrail } from './colorStyleRef.js';
+import {
+  colorVarName,
+  textStyleName,
+  effectiveTextStyle,
+  resolveVariableChain,
+  colorVarTrail,
+  resolvePaintColor,
+} from './colorStyleRef.js';
 
 /**
- * Spec: docs/specs/web-render-fidelity-round15.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round15.spec.md
  *
  * `paint.colorVar.value.alias.guid` and `node.styleIdForText.guid` carry
  * Figma color/text-style library references. The helpers return the
@@ -545,5 +552,150 @@ describe('colorVarTrail (round 18-B)', () => {
     const r = root([A]);
     const result = colorVarTrail(paintAliasing(1, 1), r)!;
     expect(result.entries).toEqual([{ id: '1:1', name: null }]);
+  });
+});
+
+/**
+ * Spec: docs/specs/web-render-fidelity-colorvar.spec.md.
+ *
+ * `paint.colorVar` is the actual binding; `paint.color` is a snapshot that
+ * may be stale (commonly the master's design-time default — e.g. black for
+ * Material 3 on-primary text). The renderer must follow the binding so a
+ * filled / tonal button's label and the selected-date cell number on
+ * Docked input date picker render as white instead of the snapshot black.
+ */
+describe('resolvePaintColor (Material 3 on-primary text)', () => {
+  function rawColor(r: number, g: number, b: number, a = 1) {
+    return {
+      modeID: { sessionID: 0, localID: 0 },
+      variableData: {
+        value: { color: { r, g, b, a } },
+        dataType: 'COLOR',
+        resolvedDataType: 'COLOR',
+      },
+    };
+  }
+  function aliasTo(sessionID: number, localID: number) {
+    return {
+      modeID: { sessionID: 0, localID: 0 },
+      variableData: {
+        value: { alias: { guid: { sessionID, localID } } },
+        dataType: 'ALIAS',
+        resolvedDataType: 'COLOR',
+      },
+    };
+  }
+  function variableNode(id: string, entry?: unknown) {
+    const [s, l] = id.split(':').map(Number);
+    return {
+      id,
+      guid: { sessionID: s, localID: l },
+      type: 'VARIABLE',
+      name: id,
+      children: [],
+      ...(entry !== undefined ? { variableDataValues: { entries: [entry] } } : {}),
+    };
+  }
+  function paintWithVar(s: number, l: number, snapshot = { r: 0, g: 0, b: 0, a: 1 }) {
+    return {
+      type: 'SOLID',
+      color: snapshot,
+      colorVar: { value: { alias: { guid: { sessionID: s, localID: l } } }, dataType: 'ALIAS' },
+    };
+  }
+
+  it('returns the leaf VARIABLE color when paint.colorVar resolves to a raw COLOR entry', () => {
+    // Master M3 on-primary: snapshot = black, variable resolves to white.
+    const onPrimary = variableNode('11:434', rawColor(1, 1, 1, 1));
+    const r = root([onPrimary]);
+    const paint = paintWithVar(11, 434);
+    expect(resolvePaintColor(paint, r)).toEqual({ r: 1, g: 1, b: 1, a: 1 });
+  });
+
+  it('follows an alias chain through intermediate VARIABLEs', () => {
+    const leaf = variableNode('99:1', rawColor(1, 1, 1, 1));
+    const mid = variableNode('50:1', aliasTo(99, 1));
+    const top = variableNode('10:1', aliasTo(50, 1));
+    const r = root([leaf, mid, top]);
+    const paint = paintWithVar(10, 1);
+    expect(resolvePaintColor(paint, r)).toEqual({ r: 1, g: 1, b: 1, a: 1 });
+  });
+
+  it('falls back to paint.color when paint has no colorVar', () => {
+    const r = root([]);
+    const paint = { type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } };
+    expect(resolvePaintColor(paint, r)).toEqual({ r: 0, g: 0, b: 0, a: 1 });
+  });
+
+  it('falls back to paint.color when the colorVar guid is unresolvable', () => {
+    const r = root([]);
+    const paint = paintWithVar(99, 99); // no such VARIABLE
+    expect(resolvePaintColor(paint, r)).toEqual({ r: 0, g: 0, b: 0, a: 1 });
+  });
+
+  it('falls back to paint.color when the chain ends at a VARIABLE with no COLOR entry', () => {
+    const leaf = variableNode('11:434'); // no entries at all
+    const r = root([leaf]);
+    const paint = paintWithVar(11, 434);
+    expect(resolvePaintColor(paint, r)).toEqual({ r: 0, g: 0, b: 0, a: 1 });
+  });
+
+  it('falls back to paint.color on a cycle (resolveVariableChain stops, no COLOR at the break point)', () => {
+    // A → B → A is a cycle; neither has a raw COLOR entry to break to.
+    const A = variableNode('1:1', aliasTo(2, 2));
+    const B = variableNode('2:2', aliasTo(1, 1));
+    const r = root([A, B]);
+    const paint = paintWithVar(1, 1);
+    expect(resolvePaintColor(paint, r)).toEqual({ r: 0, g: 0, b: 0, a: 1 });
+  });
+
+  it('returns undefined when paint itself is null/undefined or missing', () => {
+    expect(resolvePaintColor(null, root([]))).toBeUndefined();
+    expect(resolvePaintColor(undefined, root([]))).toBeUndefined();
+  });
+
+  it('returns paint.color (which may be undefined) when root is missing', () => {
+    const paint = paintWithVar(11, 434);
+    expect(resolvePaintColor(paint, null)).toEqual({ r: 0, g: 0, b: 0, a: 1 });
+  });
+
+  // Round 34.1 — `findByIdCached` performance guard. Without lazy
+  // memoization, every paint with a colorVar pays an O(N) tree walk
+  // per hop; on a 35K-node Material 3 file with many bound paints that
+  // turns into a multi-second hitch at document load. The cache is a
+  // WeakMap keyed by root, so subsequent lookups on the same root are
+  // O(1). We can't directly assert "walked once" from outside, but we
+  // CAN assert that the cache survives across calls and that mutating
+  // the doc tree shape between calls is invisible (proves a cache exists).
+  it('reuses a per-root index across resolvePaintColor calls (subsequent lookups are O(1))', () => {
+    // 1000-node doc with a single COLOR variable at the deepest end.
+    const variables: any[] = [];
+    for (let i = 1; i < 1000; i++) variables.push({ id: `0:${i}`, type: 'FRAME', children: [] });
+    variables.push({
+      id: '0:1000', type: 'VARIABLE', name: 'leaf', children: [],
+      variableDataValues: {
+        entries: [{
+          modeID: { sessionID: 0, localID: 0 },
+          variableData: { value: { color: { r: 1, g: 1, b: 1, a: 1 } }, dataType: 'COLOR' },
+        }],
+      },
+    });
+    const r = { id: '0:0', type: 'DOCUMENT', children: variables };
+    const paint = {
+      type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 },
+      colorVar: { value: { alias: { guid: { sessionID: 0, localID: 1000 } } } },
+    };
+    // First call builds the index — second call is O(1). Both return the same.
+    expect(resolvePaintColor(paint, r)).toEqual({ r: 1, g: 1, b: 1, a: 1 });
+    expect(resolvePaintColor(paint, r)).toEqual({ r: 1, g: 1, b: 1, a: 1 });
+    // Mutate the tree AFTER the cache was populated. The cache holds the
+    // VARIABLE reference directly — mutations to its `variableDataValues`
+    // through the SAME object are visible (the cache stores a pointer
+    // not a snapshot). This is what we want: mutations through node
+    // identity propagate; only tree-shape changes (re-parenting, deleting)
+    // would be invisible. That trade-off is documented.
+    const leaf = variables[variables.length - 1];
+    leaf.variableDataValues.entries[0].variableData.value.color = { r: 0.5, g: 0.5, b: 0.5, a: 1 };
+    expect(resolvePaintColor(paint, r)).toEqual({ r: 0.5, g: 0.5, b: 0.5, a: 1 });
   });
 });

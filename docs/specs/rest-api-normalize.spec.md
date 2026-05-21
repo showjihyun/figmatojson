@@ -1,164 +1,184 @@
 # spec/rest-api-normalize
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `src/normalize.ts` (`normalizeTree`, `normalizeNode`, `computeBoundingBox`, `serializableRaw`) |
-| 테스트 | `test/normalize.test.ts` (있는 한도 내) — 본 spec 의 alias / bbox / Uint8Array conversion 단위 |
-| 형제 | `SPEC.md §Stage 8` (출력 파이프라인 source), `PRD.md §10 결정 b` ("실용형" 정책 결정) |
+| Status | Approved |
+| Implementation | `src/normalize.ts` (`normalizeTree`, `normalizeNode`, `computeBoundingBox`, `serializableRaw`) |
+| Tests | `test/normalize.test.ts` (within available scope) — units for alias / bbox / Uint8Array conversion in this spec |
+| Siblings | `SPEC.md §Stage 8` (output pipeline source), `PRD.md §10 decision b` ("pragmatic" policy decision) |
 
-## 1. 목적
+## 1. Goal
 
-CLI Stage 8 의 `output/document.json` 과 `output/pages/*.json` 출력은 *Figma
-REST API 응답과 부분 호환* 되어야 한다 (PRD G4). 그러나 Kiwi 의 wire format
-이 REST 와 *완벽 일치는 아닌* 영역들 — 필드 명칭 (fillPaints vs fills),
-좌표 계산 (transform 행렬 vs absoluteBoundingBox), 직렬화 안전성 (Uint8Array,
-BigInt) — 이 있음. 본 spec 은 *어디까지 alias 하고, 무엇은 원본 그대로
-보존하는지* 를 single source 로 둔다.
+CLI Stage 8 output (`output/document.json` and `output/pages/*.json`) must
+be *partially compatible with the Figma REST API response* (PRD G4). But
+there are areas where the Kiwi wire format does *not* match REST exactly —
+field naming (fillPaints vs fills), coordinate computation (transform matrix
+vs absoluteBoundingBox), serialization safety (Uint8Array, BigInt). This
+spec is the single source on *where to alias and where to preserve the
+original*.
 
-정책: PRD §10 결정 (b) **"실용형"** — Kiwi 원본 키를 *그대로 보존* + REST
-API 별칭 *추가*. 양쪽 모두 grep 가능. (a) "REST 완전 호환" 은 변환 비용
-높고 일부 데이터 (`derivedSymbolData`) 는 REST 에 매핑 없음.
+Policy: PRD §10 decision (b) **"pragmatic"** — *preserve* the Kiwi original
+key as-is + *add* the REST alias. Both forms remain greppable. Option (a)
+"full REST compatibility" has high conversion cost and some data
+(`derivedSymbolData`) has no REST mapping.
 
-## 2. 출력 노드 형태
+## 2. Output node shape
 
 ```ts
 interface NormalizedNode {
-  id:                     string;     // "sessionID:localID" — REST 명명
-  guid:                   GUID;       // 원본 {sessionID, localID} 보존
+  id:                     string;     // "sessionID:localID" — REST naming
+  guid:                   GUID;       // preserves the original {sessionID, localID}
   type:                   string;
   name?:                  string;
   visible?:               boolean;
-  parentId?:              string;     // parent 의 id (REST 명명)
+  parentId?:              string;     // parent's id (REST naming)
   fills?:                 unknown;    // fillPaints alias
   strokes?:               unknown;    // strokePaints alias
-  effects?:               unknown;    // 그대로
+  effects?:               unknown;    // as-is
   absoluteBoundingBox?:   { x, y, width, height };
   children?:              NormalizedNode[];
-  raw:                    Record<string, unknown>;  // Kiwi 원본 (직렬화 안전)
+  raw:                    Record<string, unknown>;  // Kiwi original (serialization-safe)
 }
 ```
 
-- I-N1 `id` 와 `guid` *동시 emit*. REST consumer 는 `id`, kiwi-aware 코드는
-  `guid` 사용 — 한 node 에서 둘 다 grep 가능 (실용형 정책 핵심).
-- I-N2 `raw` 필드는 *Kiwi 의 모든 원본 필드* (직렬화 안전 변환 후) 를
-  carry. alias 가 추가되어도 원본 키 (`fillPaints` 등) 가 raw 안에 살아있음.
-- I-N3 alias 는 *별칭* (reference) 이지 deep-clone 아님 — `out.fills =
-  out.raw.fillPaints` 는 같은 array 를 가리킨다. mutation 시 양쪽이 동시
-  변경됨. 호출자가 read-only 가정.
+- I-N1 `id` and `guid` are *emitted simultaneously*. REST consumers use
+  `id`, kiwi-aware code uses `guid` — both are greppable from a single node
+  (the heart of the pragmatic policy).
+- I-N2 The `raw` field carries *every original Kiwi field* (after
+  serialization-safe conversion). Original keys (`fillPaints`, etc.) live
+  on inside raw even when aliases are added on top.
+- I-N3 Aliases are *aliases* (references), not deep clones — `out.fills =
+  out.raw.fillPaints` points to the same array. Mutating one mutates the
+  other. Callers must treat it as read-only.
 
-## 3. 필드 alias 매핑
+## 3. Field alias mapping
 
-| Kiwi 원본 | REST alias | 적용 조건 |
+| Kiwi original | REST alias | Condition |
 |---|---|---|
 | `data.fillPaints` | `node.fills` | `'fillPaints' in data` |
 | `data.strokePaints` | `node.strokes` | `'strokePaints' in data` |
 | `data.effects` | `node.effects` | `'effects' in data` |
-| `treeNode.guid` (`{sessionID, localID}`) | `node.id` (`"sessionID:localID"`) | 항상 |
-| `treeNode.parentGuid` | `node.parentId` (`"sessionID:localID"`) | parent 존재 시 |
-| `data.visible` (boolean) | `node.visible` | typeof boolean 일 때만 |
+| `treeNode.guid` (`{sessionID, localID}`) | `node.id` (`"sessionID:localID"`) | always |
+| `treeNode.parentGuid` | `node.parentId` (`"sessionID:localID"`) | when parent exists |
+| `data.visible` (boolean) | `node.visible` | only when typeof boolean |
 
-- I-A1 alias 는 *추가만* — 원본 키 삭제 안 함. `node.raw.fillPaints` 도 함께
-  존재.
-- I-A2 부재 필드는 alias 도 부재 — `'fillPaints' in data` 가 false 면
-  `node.fills` 도 emit 안 함. REST 응답의 omission 정책과 일치.
-- I-A3 `node.id` 형식 = `${sessionID}:${localID}` (decimal). pencil.dev 의
-  `Pen ID` (5-base62 chars) 와 다른 ID space (CONTEXT.md `GUID` 항목).
+- I-A1 Aliases are *additive* — original keys are not removed.
+  `node.raw.fillPaints` co-exists.
+- I-A2 Missing fields stay missing in alias too — when `'fillPaints' in
+  data` is false, `node.fills` is also omitted. Matches REST's omission
+  policy.
+- I-A3 `node.id` form = `${sessionID}:${localID}` (decimal). Distinct ID
+  space from pencil.dev's `Pen ID` (5-base62 chars) (CONTEXT.md `GUID`
+  entry).
 
-## 4. `absoluteBoundingBox` — best-effort 계산
+## 4. `absoluteBoundingBox` — best-effort computation
 
-Figma REST 의 `absoluteBoundingBox` 는 *root-relative* canvas 좌표계의
-bounding box. 우리는 transform 행렬의 *translation 컴포넌트* 만 읽어 근사.
+Figma REST's `absoluteBoundingBox` is the bounding box in *root-relative*
+canvas coordinates. We approximate by reading only the *translation
+component* of the transform matrix.
 
-- I-B1 `data.size` 가 `{x: number, y: number}` 형태가 *아니면* bbox 미생성.
-  rectangle / vector 가 아닌 노드 (e.g. DOCUMENT root) 가 size 부재라 제외.
-- I-B2 `data.transform` 부재 시: `{ x: 0, y: 0, width: size.x, height: size.y }`
-  (origin 가정).
-- I-B3 `data.transform` 존재 시: `transform.m02` / `m12` 만 사용 (translation).
-  rotation (m01, m10) 과 scale (m00, m11) **무시** — best-effort.
-- I-B4 *root-relative* 가 아님 — 본 함수는 `transform` 만 보고 부모 chain 을
-  walk 하지 않음. Figma REST 의 *진짜 absoluteBoundingBox* 는 부모 transform
-  의 누적 — 우리 출력은 *parent-relative bbox* 에 가깝다 (이름은 REST 호환
-  유지).
-- I-B5 회전된 노드의 bbox: 본 spec 미지원. rotation 이 있으면 emit 된 width/
-  height 는 *축에 정렬된 박스의 비-회전 크기*. 정확한 회전 bbox 는 별도
-  helper (현재 미구현).
+- I-B1 If `data.size` is *not* of the form `{x: number, y: number}`, no
+  bbox is emitted. Nodes that lack size (e.g. DOCUMENT root, which is
+  neither rectangle nor vector) are skipped.
+- I-B2 When `data.transform` is absent: `{ x: 0, y: 0, width: size.x, height: size.y }`
+  (origin assumed).
+- I-B3 When `data.transform` is present: use only `transform.m02` /
+  `m12` (translation). Rotation (m01, m10) and scale (m00, m11) are
+  **ignored** — best-effort.
+- I-B4 *Not actually root-relative* — this function reads only its own
+  `transform` and does not walk the parent chain. Figma REST's *true
+  absoluteBoundingBox* is the accumulated parent transforms — our output
+  is closer to *parent-relative bbox* (we keep the name for REST
+  compatibility).
+- I-B5 Bbox of rotated nodes is not supported in this spec. When rotation
+  is present, the emitted width/height is *the unrotated size of the
+  axis-aligned box*. An exact rotated bbox needs a separate helper (not
+  yet implemented).
 
-## 5. `serializableRaw` — Kiwi → JSON 안전 형태
+## 5. `serializableRaw` — Kiwi → JSON-safe form
 
-Kiwi 가 decode 한 raw 객체는 `Uint8Array` / `BigInt` 등 JSON 직렬화 불가
-값을 carry — `JSON.stringify` 가 그대로 실패하거나 `null` 로 손실. 본 함수가
-*결정적으로* 직렬화 가능 형태로 변환.
+Kiwi-decoded raw objects carry `Uint8Array` / `BigInt` and other values
+JSON cannot serialize — `JSON.stringify` either fails or loses data as
+`null`. This function *deterministically* converts to a serialization-safe
+form.
 
-### 5.1 변환 룰
+### 5.1 Conversion rules
 
-- I-S1 `null` / `undefined` → 그대로.
-- I-S2 `bigint` → `(value).toString()` (decimal string). 부호 보존 (`-1n`
-  → `"-1"`).
+- I-S1 `null` / `undefined` → as-is.
+- I-S2 `bigint` → `(value).toString()` (decimal string). Sign preserved
+  (`-1n` → `"-1"`).
 - I-S3 `Uint8Array` → `hashToHex(value)` (lowercase hex string, no `0x`
-  prefix). 빈 array → `""`.
-- I-S4 `Array` → 새 array, element 별 재귀 변환.
-- I-S5 `Object` (plain) → 새 object, property 별 재귀 변환. `for...in` +
-  `hasOwnProperty` 룰 — prototype chain 탐색 안 함.
-- I-S6 그 외 primitive (`string`, `number`, `boolean`) → 그대로.
-- I-S7 `function` / `Symbol` / 기타 exotic 타입 → 본 spec 비대상 (Kiwi 는
-  carry 안 함).
+  prefix). Empty array → `""`.
+- I-S4 `Array` → new array, each element recursively converted.
+- I-S5 `Object` (plain) → new object, each property recursively converted.
+  `for...in` + `hasOwnProperty` rule — does not walk the prototype chain.
+- I-S6 Other primitives (`string`, `number`, `boolean`) → as-is.
+- I-S7 `function` / `Symbol` / other exotic types → out of scope for this
+  spec (Kiwi does not carry them).
 
-### 5.2 결정성
+### 5.2 Determinism
 
-- I-S8 같은 입력 → 같은 출력. Kiwi-decoded 데이터는 트리 구조 (cycle 없음)
-  라 `WeakMap` cache 불필요 — 단순 재귀.
-- I-S9 입력 *읽기 전용* 가정. 본 함수가 입력 mutation 안 함.
-- I-S10 `for (const k in obj)` 의 property 순서는 V8 의 insertion order +
-  numeric-key 우선 룰을 따름. CLI 의 `extract` 와 `repack` round-trip 에서
-  동일 순서 보장이 *결정성 검증* 의 일부.
+- I-S8 Same input → same output. Kiwi-decoded data is a tree (no cycles),
+  so no `WeakMap` cache is necessary — straightforward recursion.
+- I-S9 Input is assumed *read-only*. This function does not mutate the
+  input.
+- I-S10 `for (const k in obj)` property order follows V8's insertion-order
+  + numeric-key-first rule. Equal order across CLI `extract` and `repack`
+  round-trips is part of *determinism verification*.
 
-### 5.3 `hashToHex` — `assets.spec.md` 와 공유
+### 5.3 `hashToHex` — shared with `assets.spec.md`
 
-- I-S11 `Uint8Array` → hex string 변환은 `assets.ts:hashToHex` 가 source.
-  `Buffer.from(buf.buffer, byteOffset, byteLength).toString('hex')` 사용
-  (zero-copy view). String input (이미 hex) 은 lowercase 변환 후 그대로
-  반환.
+- I-S11 `Uint8Array` → hex-string conversion's source is
+  `assets.ts:hashToHex`. Uses `Buffer.from(buf.buffer, byteOffset, byteLength).toString('hex')`
+  (zero-copy view). String input (already hex) is lowercased and returned.
 
-## 6. Tree 재귀
+## 6. Tree recursion
 
-- I-T1 `normalizeTree(root)` 가 진입점. `root === null` 이면 `null` 반환.
-- I-T2 `treeNode.children.length > 0` 이면 `children: tn.children.map(normalizeNode)`
-  emit. 빈 children 은 emit 안 함 (REST omission 일관성).
-- I-T3 자식 순서는 `tn.children` 의 array 순서 — `parentIndex.position` 의
-  fractional-index 정렬 결과 (`parent-index-position.spec.md`).
+- I-T1 `normalizeTree(root)` is the entry point. `root === null` returns
+  `null`.
+- I-T2 When `treeNode.children.length > 0`, emit `children:
+  tn.children.map(normalizeNode)`. Empty children are not emitted (REST
+  omission consistency).
+- I-T3 Child order is the array order of `tn.children` — the result of
+  fractional-index sorting on `parentIndex.position` (`parent-index-position.spec.md`).
 
-## 7. 비대상
+## 7. Out of scope
 
-- ❌ **REST 의 stylable 필드 매핑 일부** — `style`, `styles`, `componentSetId`
-  등은 우리 측 alias 안 함 (Kiwi 의 동일 데이터가 다른 shape 라 1:1 매핑
-  복잡). raw 안에서 grep.
-- ❌ **회전 bbox** — §I-B5 참조.
-- ❌ **부모 transform 누적** — §I-B4 참조. 진짜 root-relative 좌표가 필요한
-  consumer 는 `pen-export` 의 `convertNode` 사용 (parent chain walk 함).
-- ❌ **REST API 의 상위 응답 wrap** (`document.children[0]` 등의 reservation).
-  본 함수는 *node-level* 변환만 — `output/document.json` 의 root-level
-  wrap 은 `export.ts` 책임.
-- ❌ **ColorVar / variable alias 해석** — Kiwi 의 `colorVar.value.alias.guid`
-  를 literal color 로 resolve 하지 않음 (`SPEC-figma-to-pencil §3` 의 pen-export
-  측 정책과 다른 점). REST 호환성보다 raw 보존이 우선.
-- ❌ **mutation API** — 본 함수는 read-only 변환. node 편집 도구는 `web-edit-node.spec.md`.
+- ❌ **Partial mapping for REST stylable fields** — `style`, `styles`,
+  `componentSetId`, etc. are not aliased here (the same data in Kiwi has a
+  different shape, making 1:1 mapping complex). Grep inside raw.
+- ❌ **Rotated bbox** — see §I-B5.
+- ❌ **Accumulated parent transform** — see §I-B4. Consumers that need
+  true root-relative coordinates use `pen-export`'s `convertNode` (which
+  walks the parent chain).
+- ❌ **REST API top-level response wrap** (`document.children[0]`
+  reservation, etc.). This function only does *node-level* conversion —
+  root-level wrap in `output/document.json` is `export.ts`'s
+  responsibility.
+- ❌ **ColorVar / variable alias resolution** — Kiwi's
+  `colorVar.value.alias.guid` is not resolved to a literal color (differs
+  from pen-export's policy in `SPEC-figma-to-pencil §3`). Raw preservation
+  takes priority over REST compatibility.
+- ❌ **Mutation API** — this function is read-only conversion. Node
+  editing tools live in `web-edit-node.spec.md`.
 
 ## 8. Resolved questions
 
-- **왜 `fills` 가 alias 이고 `fillPaints` 가 raw 인가? 반대 아닌가?** Kiwi
-  schema 가 `fillPaints` 라는 이름으로 stamp — wire 의 *진짜 이름*. REST
-  가 `fills` 라는 *축약 별칭* 을 쓰는 거고, 우리는 *둘 다 emit* 하므로
-  consumer 의 grep 자유도 보장.
-- **`absoluteBoundingBox` 의 이름이 misleading 인가?** 약간. 진짜
-  *absolute* (root-relative) 가 아니지만 REST API 호환 차원에서 그 이름을
-  reuse. 정확한 absolute 좌표가 필요하면 pen-export 또는 client 측 transform
-  walker 사용.
-- **`raw` 필드가 `out` 에 *직접 spread* 되지 않고 별도 properties 에 들어가
-  있는 이유?** 두 단계 분리: `out.fillPaints` 가 `out.raw.fillPaints` 에서
-  분리되면 *호환성 변경* — 한 객체에 raw + alias 가 동시 존재해야 SDD 의
-  "spec 부터 검증" 이 가능. 분리 시 mutation 충돌 (`out.fills` vs `out.raw.fillPaints`)
-  도 명확.
-- **`raw` 의 deep-clone 비용?** 메타리치 35K 노드 기준 ~1.5초. 본 spec 의
-  결정 = 항상 deep-clone (안전 우선). 향후 raw 사용처가 read-only 임이
-  검증되면 shallow alias 로 최적화 가능 — 그 전엔 deep-clone 유지.
+- **Why is `fills` the alias and `fillPaints` the raw? Shouldn't it be
+  the other way?** Kiwi's schema stamps the name `fillPaints` — that is
+  the *real wire name*. REST uses `fills` as a *short alias*, and we
+  emit *both*, so consumers retain grep flexibility.
+- **Is the `absoluteBoundingBox` name misleading?** Slightly. It is not
+  *truly absolute* (root-relative) but we reuse the name for REST API
+  compatibility. For accurate absolute coordinates, use pen-export or a
+  client-side transform walker.
+- **Why isn't `raw` *directly spread* onto `out` instead of carried as a
+  separate property?** Two-stage separation: pulling `out.fillPaints` out
+  of `out.raw.fillPaints` is a *compatibility change* — coexisting raw +
+  alias on a single object is required for SDD's "verify from the spec".
+  Separation also makes mutation conflicts (`out.fills` vs
+  `out.raw.fillPaints`) explicit.
+- **Cost of `raw` deep-clone?** ~1.5s on the 35K-node meta-rich fixture.
+  This spec's decision = always deep-clone (safety first). Once it is
+  verified that all `raw` consumers are read-only, we may optimize to
+  shallow alias — until then, keep the deep clone.

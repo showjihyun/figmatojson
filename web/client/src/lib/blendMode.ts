@@ -1,7 +1,7 @@
 /**
  * Figma blendMode → Konva globalCompositeOperation.
  *
- * Spec: docs/specs/web-render-fidelity-round7.spec.md §3
+ * Spec: docs/specs/archive/web-render-fidelity-round7.spec.md §3
  *
  * Figma's enum is UPPER_SNAKE; canvas / CSS use kebab-case. The 16
  * named modes from Figma's BlendMode schema all have direct canvas

@@ -1,131 +1,131 @@
 # spec/expansion-context
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Draft — awaiting trigger (활성 버그 없음, round-13 scope 에서 제외) |
-| Trigger | (a) 두 번째 design system audit 에서 또 한 번 "CLI 는 알지만 web 은 모르는" drift 가 발견되거나, (b) prop-binding 외 새 Override 메커니즘 (variant swap, layout override 등) 을 실제 구현할 때. 그 PR 의 첫 단계가 본 spec 의 추출. |
-| 구현 | `src/expansion.ts` (entry), `src/masterIndex.ts` (private), `src/effectiveVisibility.ts` (private) |
-| 테스트 | `src/expansion.test.ts` (vitest, hand-built TreeNode fixtures — 기존 `web/core/domain/clientNode.test.ts` 의 override-pipeline 테스트들이 이쪽으로 reshape) |
-| 형제 | `web-instance-render-overrides.spec.md` (round 12 v3 — prop-binding); `CONTEXT.md` "Expansion", "Expansion Context", "Master Index" |
+| Status | Draft — awaiting trigger (no active bug, excluded from round-13 scope) |
+| Trigger | (a) A second design system audit surfaces another "the CLI knows, but the web doesn't" drift, or (b) we actually implement a new Override mechanism beyond prop-binding (variant swap, layout override, etc.). The first step of that PR is the extraction described in this spec. |
+| Implementation | `src/expansion.ts` (entry), `src/masterIndex.ts` (private), `src/effectiveVisibility.ts` (private) |
+| Tests | `src/expansion.test.ts` (vitest, hand-built TreeNode fixtures — the override-pipeline tests currently in `web/core/domain/clientNode.test.ts` reshape into here) |
+| Siblings | `web-instance-render-overrides.spec.md` (round 12 v3 — prop-binding); `CONTEXT.md` "Expansion", "Expansion Context", "Master Index" |
 | ADR | `docs/adr/0004-shared-modules-live-in-src.md` (placement) |
 
-## 1. 목적
+## 1. Goal
 
-현재 Master/Instance Expansion 의 **Resolve** 단계 (`Master + Instance + Overrides → 해결된 Tree Node 서브트리`) 는 두 군데에 독립 구현되어 있다:
+Today the **Resolve** step of Master/Instance Expansion (`Master + Instance + Overrides → resolved Tree Node subtree`) is implemented independently in two places:
 
 - `src/pen-export.ts` — `applySymbolOverrides` + `buildPropAssignmentMap` + `isHiddenByPropAssignment` + nested INSTANCE recursion (~line 600-1080)
-- `web/core/domain/clientNode.ts` — `toClientChildForRender` + 각종 `collect*FromInstance` + `mergeOverridesForNested` (line 234-321)
+- `web/core/domain/clientNode.ts` — `toClientChildForRender` + assorted `collect*FromInstance` + `mergeOverridesForNested` (line 234-321)
 
-Round-12 audit 가 이 중복의 비용을 직접 노출함: `pen-export.ts` 가 `componentPropAssignments → componentPropRefs[VISIBLE]` 바인딩을 수년 전부터 처리하고 있었지만 web 측은 모르고 있었고, 그 결과 4개 컴포넌트에서 arrow-icon leak 이 audit 까지 발견되지 않음. 본 spec 은 **Resolve 를 단일 모듈로 추출하여 두 pipeline 이 같은 답을 보장**한다.
+The round-12 audit exposed the cost of this duplication directly: `pen-export.ts` had handled the `componentPropAssignments → componentPropRefs[VISIBLE]` binding for years, but the web side did not, and as a result an arrow-icon leak across 4 components went unnoticed until the audit. This spec **extracts Resolve into a single module so that both pipelines are guaranteed to produce the same answer**.
 
-`Reduce-to-Pen` (Pen Node 4-type 축소, auto-layout reflow, Pen ID 발급) 는 Pencil 출력 한정 책임이므로 `pen-export.ts` 에 그대로 남는다 — 본 spec 의 범위 밖.
+`Reduce-to-Pen` (Pen Node 4-type reduction, auto-layout reflow, Pen ID issuance) is a Pencil-output-specific responsibility and remains in `pen-export.ts` — out of scope here.
 
 ## 2. Interface
 
 ```ts
 import { createExpansionContext, type ExpansionContext } from './expansion';
 
-const ctx = createExpansionContext(allNodes);   // 한 .fig 마다 한 번
+const ctx = createExpansionContext(allNodes);   // once per .fig
 const resolved = ctx.expandInstance(instance);  // N instances → N calls
 ```
 
-`ResolvedSubtree` (정확한 타입 이름은 구현시 결정) 의 형태:
+Shape of `ResolvedSubtree` (the exact type name is decided at implementation time):
 
 ```ts
 {
-  // Tree Node 형태 그대로 유지 — guid, type, name, children, data
-  // + 다음 추가 필드들이 노드별로 stamp 됨:
-  parentInstancePath: string[];   // outer instance master root → 현재 노드의 부모까지
-  effectiveVisibility: boolean;   // Direct ⊕ PropertyToggle ⊕ SymbolOverride 합성 결과
-  resolvedFillPaints?: Paint[];   // Override 적용된 fillPaints (있으면)
-  resolvedText?: string;          // Override 적용된 characters (TEXT 노드에 있을 때만)
+  // Same shape as Tree Node — guid, type, name, children, data
+  // + the following fields are stamped per-node:
+  parentInstancePath: string[];   // outer instance master root → parent of current node
+  effectiveVisibility: boolean;   // composed result of Direct ⊕ PropertyToggle ⊕ SymbolOverride
+  resolvedFillPaints?: Paint[];   // override-applied fillPaints (if any)
+  resolvedText?: string;          // override-applied characters (TEXT nodes only)
 }
 ```
 
-호출자가 알아야 할 것은 `createExpansionContext` 와 `expandInstance` 두 함수, 그리고 `ResolvedSubtree` 의 위 4 필드. 그 외 모든 것 (override 수집 helper, path-keyed map merge, nested INSTANCE recursion, prop-binding 해석, MasterIndex 빌드) 은 구현 내부.
+A caller only needs to know about the two functions `createExpansionContext` and `expandInstance`, plus the 4 fields of `ResolvedSubtree`. Everything else (override-collection helpers, path-keyed map merge, nested INSTANCE recursion, prop-binding resolution, MasterIndex build) is implementation internal.
 
 ## 3. Invariants
 
 ### 3.1 Expansion Context
 
-- I-CT1 `createExpansionContext(allNodes)` 는 `allNodes` 를 한 번 walk 해서 **Master Index** (`Map<GUID, Master>`) 를 빌드. `node.type ∈ {SYMBOL, COMPONENT, COMPONENT_SET}` 인 노드만 들어간다 — 일반 Tree Node 는 인덱스되지 않음. (현행 `web/core/domain/clientNode.ts:456-465` 의 무조건 set 버그 수정.)
-- I-CT2 ExpansionContext 는 read-only — 같은 컨텍스트로 동일 instance 를 여러 번 호출하면 항상 같은 결과. allNodes 가 변경되면 새 컨텍스트를 만든다.
-- I-CT3 ExpansionContext 빌드 비용은 O(allNodes); expandInstance 호출 비용은 O(master subtree size). 컨텍스트 재사용으로 N instances 를 N × buildIndex 가 아니라 1 × buildIndex + N × walk 로 amortize.
+- I-CT1 `createExpansionContext(allNodes)` walks `allNodes` once to build a **Master Index** (`Map<GUID, Master>`). Only nodes with `node.type ∈ {SYMBOL, COMPONENT, COMPONENT_SET}` enter the index — generic Tree Nodes are not indexed. (Fixes the unconditional-set bug currently at `web/core/domain/clientNode.ts:456-465`.)
+- I-CT2 ExpansionContext is read-only — calling the same instance multiple times with the same context always yields the same result. If `allNodes` changes, build a new context.
+- I-CT3 Context build cost is O(allNodes); per `expandInstance` call cost is O(master subtree size). Reusing the context amortizes N instances to 1 × buildIndex + N × walk rather than N × buildIndex.
 
 ### 3.2 Resolve walk
 
-- I-R1 `expandInstance(instance)` 는 `instance.symbolData.symbolID` 로 Master Index 조회 → master 의 children 을 per-instance 복제하며 walk. master 자체 노드는 변경하지 않음 (I-M1, round-12 spec §3.3).
-- I-R2 walk 의 각 노드에서 다음을 stamp:
-  - `parentInstancePath`: outer instance master root → 현재 노드의 부모까지의 guidStr 배열 (현재 web 의 `pathFromOuter` 와 동등)
-  - `effectiveVisibility`: §3.4 의 EffectiveVisibility 모듈이 (Direct, PropertyToggle, SymbolOverride) 합성한 boolean
-  - `resolvedFillPaints`: SymbolOverride 의 fillPaints 가 매칭되면 그 값으로 교체
-  - `resolvedText`: TEXT 노드에서 SymbolOverride 의 textData.characters 가 매칭되면 그 값
-- I-R3 Override 매칭은 **path-keyed**: outer instance master root 부터의 full guidStr chain 이 키. round-12 spec §3.1 I-C1 / §3.2 I-P3 의 규칙 그대로.
-- I-R4 Nested INSTANCE 안의 자손에 대한 outer overrides 는 자동 도달 (round-12 §3.2 I-P5). inner instance 가 자기 own overrides 를 가지면 path-prefix 후 outer 와 merge. inner 의 own `componentPropAssignments` 는 defID-keyed flat merge (round-12 §3.4 I-P9).
+- I-R1 `expandInstance(instance)` looks up `instance.symbolData.symbolID` in the Master Index → walks a per-instance clone of the master's children. The master's own nodes are not mutated (I-M1, round-12 spec §3.3).
+- I-R2 At each node visited, the walk stamps:
+  - `parentInstancePath`: guidStr array from outer instance master root → parent of current node (equivalent to today's web `pathFromOuter`)
+  - `effectiveVisibility`: boolean composed from (Direct, PropertyToggle, SymbolOverride) by the EffectiveVisibility module of §3.4
+  - `resolvedFillPaints`: replaced with the SymbolOverride's fillPaints value when it matches
+  - `resolvedText`: for TEXT nodes, the SymbolOverride's textData.characters value when it matches
+- I-R3 Override matching is **path-keyed**: the key is the full guidStr chain from the outer instance master root. Same rules as round-12 spec §3.1 I-C1 / §3.2 I-P3.
+- I-R4 Outer overrides also reach descendants inside a nested INSTANCE automatically (round-12 §3.2 I-P5). If an inner instance carries its own overrides, they are merged with the outer set after path-prefixing. An inner instance's own `componentPropAssignments` performs a defID-keyed flat merge (round-12 §3.4 I-P9).
 
 ### 3.3 Effective Visibility
 
 `src/effectiveVisibility.ts` (private to expansion):
 
-- I-V1 입력: `(node.data, propAssignments: Map<defID, boolean>, currentPath, visibilityOverrides)` 모든 메커니즘을 한 자리에서 합성.
-- I-V2 합성 규칙 — **OR-of-hidden**, 단 SymbolOverride 의 `visible: true` 가 모든 다른 메커니즘을 누른다:
-  1. SymbolOverride 가 매칭되고 `visible: true` → return `true` (강제 표시)
-  2. SymbolOverride 가 매칭되고 `visible: false` → return `false`
+- I-V1 Inputs: `(node.data, propAssignments: Map<defID, boolean>, currentPath, visibilityOverrides)` — every mechanism is composed in one place.
+- I-V2 Composition rule — **OR-of-hidden**, except that a SymbolOverride with `visible: true` overrides every other mechanism:
+  1. SymbolOverride matches with `visible: true` → return `true` (force visible)
+  2. SymbolOverride matches with `visible: false` → return `false`
   3. PropertyToggle (componentPropRefs[VISIBLE] + propAssignments[defID]=false) → return `false`
   4. Direct Visibility (`data.visible === false`) → return `false`
-  5. 그 외 → return `true` (default visible)
-- I-V3 단일 함수, 단일 테스트 surface. 새 visibility 메커니즘 (e.g. layer blend mode hiding) 은 이 함수 안에 case 추가.
+  5. Otherwise → return `true` (default visible)
+- I-V3 Single function, single test surface. New visibility mechanisms (e.g. layer blend mode hiding) add another case to this function.
 
 ### 3.4 Master Index
 
 `src/masterIndex.ts` (private to expansion):
 
-- I-MI1 `buildMasterIndex(allNodes): Map<GUID, Master>` — `node.type ∈ {SYMBOL, COMPONENT, COMPONENT_SET}` 만 인덱스. 그 외 type 은 인덱스되지 않음 (현재 `clientNode.ts:462` 의 무조건 set 버그 수정).
-- I-MI2 같은 GUID 가 여러 master type 으로 나타나면 마지막 등장 win — 현재 동작 유지 (Figma 가 같은 GUID 를 두 master 에 할당하는 케이스는 spec 위반이므로 fallback).
+- I-MI1 `buildMasterIndex(allNodes): Map<GUID, Master>` — indexes only nodes with `node.type ∈ {SYMBOL, COMPONENT, COMPONENT_SET}`. Other types are not indexed (fixes the unconditional-set bug at today's `clientNode.ts:462`).
+- I-MI2 If the same GUID appears under multiple master types, last-wins — preserves current behavior (Figma assigning the same GUID to two masters is a spec violation, so this is a fallback).
 
-## 4. 호출자 변경
+## 4. Caller changes
 
 ### 4.1 `web/core/domain/clientNode.ts`
 
-- `collect*FromInstance` 4 함수 + `mergeOverridesForNested` + `visibleFromPropRefs` + `pathKeyFromGuids` + `buildSymbolIndex` → **모두 삭제** (expansion 내부로 이동, export 안 함)
-- `toClientChildForRender` → expansion.expandInstance 호출하는 thin wrapper 로 축소. ResolvedSubtree 를 받아 `_renderChildren` / `_renderTextOverride` / `visible` / `fillPaints` 같은 web-side DocumentNode 필드를 stamp.
-- `toClientNode` → INSTANCE 분기에서 expansion.ctx 를 만들고 expandInstance 호출. ctx 는 한 toClientNode 호출 동안 cache.
-- `collectTexts` → 그대로 유지 (다른 용도 — Component Texts UI).
+- The 4 `collect*FromInstance` functions + `mergeOverridesForNested` + `visibleFromPropRefs` + `pathKeyFromGuids` + `buildSymbolIndex` → **all removed** (moved into expansion, no longer exported)
+- `toClientChildForRender` → reduced to a thin wrapper that calls `expansion.expandInstance`. Takes ResolvedSubtree and stamps web-side DocumentNode fields such as `_renderChildren` / `_renderTextOverride` / `visible` / `fillPaints`.
+- `toClientNode` → on the INSTANCE branch, builds an `expansion.ctx` and calls `expandInstance`. The ctx is cached for the duration of one `toClientNode` invocation.
+- `collectTexts` → kept as-is (different use case — Component Texts UI).
 
 ### 4.2 `src/pen-export.ts`
 
-- `applySymbolOverrides` + `buildPropAssignmentMap` + `isHiddenByPropAssignment` + `mergeOverrideMaps` 등 → **삭제**. expansion 으로 이동.
-- Master 트리 walk 위치 — Pen Node convertNode 가 INSTANCE 를 만나면 expansion.expandInstance 호출. 결과 ResolvedSubtree 를 받아 자기 Pen Node 4-type 축소 (Reduce-to-Pen) 진행.
-- `vectorPathMap` 룩업 키 — 현재의 `Expansion Path` 문자열 (`outerInstanceGuid/.../masterGuid`) 은 ResolvedSubtree 의 `parentInstancePath` 배열로부터 *호출 측에서* 조립 (§3.2 I-R2). 형식 변경 없음.
+- `applySymbolOverrides` + `buildPropAssignmentMap` + `isHiddenByPropAssignment` + `mergeOverrideMaps`, etc. → **removed**. Moved into expansion.
+- Master tree walk site — when Pen Node `convertNode` encounters an INSTANCE, it calls `expansion.expandInstance`. The resulting ResolvedSubtree is then run through its own Pen Node 4-type reduction (Reduce-to-Pen).
+- `vectorPathMap` lookup key — today's `Expansion Path` string (`outerInstanceGuid/.../masterGuid`) is assembled *at the call site* from ResolvedSubtree's `parentInstancePath` array (§3.2 I-R2). The format itself is unchanged.
 
 ## 5. Tests
 
-### 5.1 새 위치
+### 5.1 New location
 
-`src/expansion.test.ts` 가 expansion 의 primary test surface. 시험 fixtures 는 hand-built TreeNode 들 (현재 `web/core/domain/clientNode.test.ts` 의 `makeNode` 패턴 재사용).
+`src/expansion.test.ts` is the primary test surface for expansion. Test fixtures are hand-built TreeNodes (reusing the `makeNode` pattern currently in `web/core/domain/clientNode.test.ts`).
 
-기존 `web/core/domain/clientNode.test.ts` 의 31 테스트 중:
+Of the 31 tests currently in `web/core/domain/clientNode.test.ts`:
 
-- 22 테스트 (`collect*` helpers, `toClientChildForRender` 의 path 관련 케이스, prop-binding 케이스) → expansion.test.ts 로 reshape. 새 surface 는 expandInstance 의 입출력. internal helper 호출 하지 않음.
-- 9 테스트 (`toClientNode` 의 web-side wrapper, `_renderTextOverride` 같은 DocumentNode-shape 검증) → clientNode.test.ts 에 그대로 유지. expansion 호출은 mock 또는 실 호출.
+- 22 tests (`collect*` helpers, the path-related cases of `toClientChildForRender`, prop-binding cases) → reshaped into `expansion.test.ts`. The new surface is the inputs/outputs of `expandInstance`. No internal helper is called.
+- 9 tests (the web-side wrapper aspects of `toClientNode`, DocumentNode-shape validations like `_renderTextOverride`) → kept in `clientNode.test.ts`. The expansion call is mocked or invoked for real.
 
-### 5.2 회귀 가드
+### 5.2 Regression guards
 
-- 기존 e2e `web/e2e/instance-fill-override.spec.ts` 는 변경 없이 통과해야 함 — 인터페이스가 바뀌어도 외부 동작은 동일.
-- `test/e2e.test.ts` 의 pen-export 관련 fixture 도 동일.
+- The existing e2e `web/e2e/instance-fill-override.spec.ts` must pass unchanged — interfaces change but external behavior is identical.
+- Pen-export-related fixtures in `test/e2e.test.ts` likewise.
 
-## 6. 마이그레이션 순서
+## 6. Migration order
 
-1. `src/masterIndex.ts` 만 먼저 추출 + 테스트 + `pen-export.ts` 와 `clientNode.ts` 가 import 하도록 변경. 가장 작은 PR.
-2. `src/effectiveVisibility.ts` 추출 + 테스트. `pen-export.ts` 의 `isHiddenByPropAssignment` + `clientNode.ts` 의 `visibleFromPropRefs` 를 둘 다 호출하도록 변경.
-3. `src/expansion.ts` 추출 — Resolve walk + 위 두 모듈 호출 통합. 두 호출자 (pen-export, clientNode) 를 expansion.expandInstance 호출로 전환. 가장 큰 PR.
-4. 기존 `web/core/domain/clientNode.ts` 의 죽은 helper 들 삭제.
+1. Extract `src/masterIndex.ts` first + tests + update `pen-export.ts` and `clientNode.ts` to import it. The smallest PR.
+2. Extract `src/effectiveVisibility.ts` + tests. Update both `pen-export.ts`'s `isHiddenByPropAssignment` and `clientNode.ts`'s `visibleFromPropRefs` to call it.
+3. Extract `src/expansion.ts` — integrate Resolve walk + calls to the two modules above. Switch both callers (pen-export, clientNode) to use `expansion.expandInstance`. The largest PR.
+4. Delete dead helpers from today's `web/core/domain/clientNode.ts`.
 
-각 단계 후 `npm test` (vitest) + 기존 e2e 통과 확인. 시각 회귀는 round-11 audit harness 로 spot-check.
+After each step confirm `npm test` (vitest) + existing e2e pass. Spot-check visual regression with the round-11 audit harness.
 
-## 7. 비대상
+## 7. Out of scope
 
-- **Reduce-to-Pen** (Pen Node 4-type 축소, auto-layout reflow, Pen ID 발급) — Pencil 한정 책임, `pen-export.ts` 에 잔류.
-- **Variant swap** (round-12 spec §6 의 "직접 선택" 케이스) — `symbolOverrides[].symbolID` 또는 `componentPropNodeField === "INSTANCE_SWAP"` 으로 master 가 다른 것으로 교체되는 케이스. 본 spec v1 에서는 master 의 원본을 그대로 expand. 별도 라운드.
-- **componentPropNodeField !== "VISIBLE"** (TEXT / INSTANCE_SWAP 같은 다른 prop 타입) — round-12 spec §6 의 비대상 그대로.
-- **CLI 가 web 의 DocumentNode 형태를 알아야 하는 케이스** — 없음. expansion 은 ResolvedSubtree (Tree Node 확장형) 를 반환, 두 호출자가 각자 자기 형태로 어댑트.
+- **Reduce-to-Pen** (Pen Node 4-type reduction, auto-layout reflow, Pen ID issuance) — Pencil-specific responsibility, stays in `pen-export.ts`.
+- **Variant swap** (the "direct selection" case in round-12 spec §6) — the case where the master is replaced via `symbolOverrides[].symbolID` or `componentPropNodeField === "INSTANCE_SWAP"`. In v1 of this spec we still expand the original master. Separate round.
+- **componentPropNodeField !== "VISIBLE"** (other prop types like TEXT / INSTANCE_SWAP) — same out-of-scope as round-12 spec §6.
+- **Cases where the CLI must know the web's DocumentNode shape** — none. Expansion returns ResolvedSubtree (a Tree Node extension); each caller adapts to its own shape.

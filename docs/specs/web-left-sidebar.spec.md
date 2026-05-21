@@ -1,21 +1,21 @@
 # spec/web-left-sidebar
 
-| 항목 | 값 |
+| Field | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/client/src/components/sidebar/LeftSidebar.tsx`, `LayerTree.tsx`, `AssetList.tsx` |
-| 테스트 | `web/client/src/components/sidebar/*.test.tsx`, `web/e2e/left-sidebar.spec.ts` |
-| 의존 | shadcn `Tabs`, `Input`, `Button`. lucide-react 아이콘. 기존 `ChatPanel`. App 의 `selectedGuids` / `setPageIdx` / `handleSelect` props. |
+| Status | Approved |
+| Implementation | `web/client/src/components/sidebar/LeftSidebar.tsx`, `LayerTree.tsx`, `AssetList.tsx` |
+| Tests | `web/client/src/components/sidebar/*.test.tsx`, `web/e2e/left-sidebar.spec.ts` |
+| Dependencies | shadcn `Tabs`, `Input`, `Button`. lucide-react icons. Existing `ChatPanel`. App's `selectedGuids` / `setPageIdx` / `handleSelect` props. |
 
-## 1. 목적
+## 1. Goal
 
-Figma 의 좌측 패널과 동일한 UX 를 제공한다 — 기본은 **Files (레이어 트리)** + **Assets (검색 가능한 컴포넌트 목록)** 두 탭. 기존 `ChatPanel` 은 **Chat 탭** 안으로 이관되어 옵션으로 남는다.
+Provide the same UX as Figma's left panel — by default, two tabs **Files (layer tree)** + **Assets (searchable component list)**. The existing `ChatPanel` is moved into a **Chat tab** as an optional third surface.
 
-배경:
-- 현재 좌측 320px = `ChatPanel` 단독. 디자인 탐색용 UI 가 부재 (App.tsx:362).
-- 메타리치 샘플은 35,660 노드 / 6 페이지 — Figma 와 같은 트리/검색 없이는 노드 도달이 캔버스 클릭 외에는 없음.
+Background:
+- The current left 320px = `ChatPanel` only. No UI for design exploration (App.tsx:362).
+- The metarich sample is 35,660 nodes / 6 pages — without a Figma-like tree/search, the only way to reach a node is clicking on the canvas.
 
-## 2. 레이아웃
+## 2. Layout
 
 ```
 +--------------------------------------------------+
@@ -32,22 +32,22 @@ Figma 의 좌측 패널과 동일한 UX 를 제공한다 — 기본은 **Files (
 +----------+---------------------------+-----------+
 ```
 
-- 좌측 `<aside>` 너비 (`w-80` = 320px) / `border-r` / `flex flex-col` 유지. 내부만 `<LeftSidebar>` 로 교체.
-- 탭 헤더는 sidebar 상단 고정 (~36px). 본문은 `flex-1 min-h-0 overflow-auto`.
+- Keep the left `<aside>` width (`w-80` = 320px) / `border-r` / `flex flex-col`. Only the inside is replaced with `<LeftSidebar>`.
+- The tab header is pinned to the top of the sidebar (~36px). The body is `flex-1 min-h-0 overflow-auto`.
 
 ## 3. Tabs
 
-shadcn `<Tabs>` 사용 (`web/client/src/components/ui/tabs.tsx`).
+Uses shadcn `<Tabs>` (`web/client/src/components/ui/tabs.tsx`).
 
-- I-T1 탭은 정확히 3개: `files` / `assets` / `chat`.
-- I-T2 기본 탭 = `files`.
-- I-T3 활성 탭은 `localStorage["leftSidebar.tab"]` 에 저장. 페이지 새로고침 시 복원. 잘못된 값이면 `files` 로 fallback.
-- I-T4 세션이 없을 때 (`session === null`) 도 모든 탭 클릭은 가능하지만, Files/Assets 탭은 "No document open" placeholder 를 보인다 (캔버스 placeholder 와 동일 톤).
-- I-T5 탭 전환 시 본문은 unmount 되지 않는다 (Radix `<Tabs>` 기본 동작 — 채팅 입력 / 레이어 펼침 상태 / 스크롤 위치 보존).
+- I-T1 Exactly three tabs: `files` / `assets` / `chat`.
+- I-T2 Default tab = `files`.
+- I-T3 The active tab is saved in `localStorage["leftSidebar.tab"]`. Restored on reload. Invalid values fall back to `files`.
+- I-T4 When there is no session (`session === null`), every tab is still clickable, but the Files/Assets tabs show a "No document open" placeholder (same tone as the canvas placeholder).
+- I-T5 The body is not unmounted across tab switches (Radix `<Tabs>` default — chat input / layer expansion / scroll position are preserved).
 
-## 4. Files 탭 — Pages section + Layer Tree
+## 4. Files tab — Pages section + Layer Tree
 
-Files 탭은 두 섹션을 세로로 적층. 각 섹션은 자체 collapsible 헤더를 가지고, 사이에 1px separator.
+The Files tab vertically stacks two sections. Each section has its own collapsible header, with a 1px separator between them.
 
 ```
 ┌──────────────────────┐
@@ -57,7 +57,7 @@ Files 탭은 두 섹션을 세로로 적층. 각 섹션은 자체 collapsible �
 │   • ...              │
 ├──────────────────────┤
 │ ▾ Layers             │
-│   ▸ sidemenu         │  ← currentPage 의 children
+│   ▸ sidemenu         │  ← children of currentPage
 │   ▸ section 1        │
 │   ...                │
 └──────────────────────┘
@@ -65,83 +65,93 @@ Files 탭은 두 섹션을 세로로 적층. 각 섹션은 자체 collapsible �
 
 ### 4.0 Pages section
 
-- I-PG1 입력 = `pages` (App 의 `doc.children.filter(type === 'CANVAS')`). 한 행 per page.
-- I-PG2 행 내용 = page name (또는 `<unnamed>`). 추가 메타정보는 v1 비대상.
-- I-PG3 현재 페이지 (`pageIdx` 가 가리키는 행) 는 `bg-accent` + 좌측에 4px primary-color 막대로 강조. 다른 모든 행은 hover 시 `hover:bg-accent/50`.
-- I-PG4 페이지 행 클릭 → `setPageIdx(idx)` + `onSelect(null)` (선택 해제). 이는 LeftSidebar 가 받는 `setPageIdx` prop 의 시그니처에 이미 들어있다 (App.tsx 의 setPageIdx 래퍼가 selectedGuids 를 비움).
-- I-PG5 Pages 섹션 자체도 collapsible — 헤더의 chevron 으로 접고 펼침. 기본 펼침. 접힘 상태는 컴포넌트 로컬 state, localStorage 비대상.
-- I-PG6 페이지가 0개 (세션 없음) → "No document open" 한 줄 placeholder.
-- I-PG7 상단바의 페이지 Select 는 본 spec 도입과 함께 **삭제**한다 — Pages 섹션이 유일한 페이지 전환 surface (Figma 와 동일). 상단바에는 nodeCount/페이지수 요약 텍스트만 남는다.
+- I-PG1 Input = `pages` (App's `doc.children.filter(type === 'CANVAS')`). One row per page.
+- I-PG2 Row content = page name (or `<unnamed>`). Extra metadata is non-goal in v1.
+- I-PG3 The current page (the row that `pageIdx` points to) is highlighted with `bg-accent` + a 4px primary-color bar on the left. All other rows use `hover:bg-accent/50` on hover.
+- I-PG4 Clicking a page row → `setPageIdx(idx)` + `onSelect(null)` (clear selection). This is already encoded in the signature of the `setPageIdx` prop the LeftSidebar receives (App.tsx's setPageIdx wrapper clears selectedGuids).
+- I-PG5 The Pages section itself is collapsible — the chevron in the header folds/unfolds it. Default unfolded. The collapsed state is component-local; localStorage is non-goal.
+- I-PG6 Zero pages (no session) → single-line "No document open" placeholder.
+- I-PG7 The page Select in the top bar is **removed** with the introduction of this spec — the Pages section is the only page-switching surface (same as Figma). Only the nodeCount/page-count summary text remains in the top bar.
 
 ### 4.1 Data source (Layer Tree)
-- I-F1 입력 = `currentPage` (App 의 `pages[pageIdx]`). 트리는 `currentPage.children` 의 재귀 렌더.
-- I-F2 페이지 전환 시 (`pageIdx` 변경) 트리는 자동으로 새 페이지의 children 으로 다시 렌더. 이전 페이지의 expand 상태는 **버린다** (페이지별 따로 유지하지 않음 — Figma 도 동일).
+- I-F1 Input = `currentPage` (App's `pages[pageIdx]`). The tree is a recursive render of `currentPage.children`.
+- I-F2 On page switch (`pageIdx` change), the tree automatically re-renders from the new page's children. The previous page's expand state is **discarded** (not kept per page — same as Figma).
 
 ### 4.2 Row content
-각 행 (`LayerRow`):
-- 들여쓰기 = `depth * 12px` (왼쪽 padding).
-- chevron (`ChevronRight` / `ChevronDown` from lucide) — 자식이 있으면 표시, 클릭으로 expand/collapse. 자식이 없으면 자리만 차지 (정렬 유지).
-- 타입 아이콘 — 노드 type 별:
+Each row (`LayerRow`):
+- Indentation = `depth * 12px` (left padding).
+- chevron (`ChevronRight` / `ChevronDown` from lucide) — shown when there are children, click to expand/collapse. When there are no children, the slot is occupied to preserve alignment.
+- Type icon — per node type:
   - `FRAME` / `GROUP` / `CANVAS` → `Square`
   - `TEXT` → `Type`
   - `RECTANGLE` / `ELLIPSE` / `LINE` / `STAR` / `VECTOR` / `BOOLEAN_OPERATION` → `Shapes`
-  - `INSTANCE` → `Component` (아이콘은 lucide `Component` 또는 fallback `Square`)
+  - `INSTANCE` → `Component` (lucide `Component`, or fallback `Square`)
   - `SYMBOL` / `COMPONENT` / `COMPONENT_SET` → `Component`
-  - 그 외 → `Square`
-- 이름 (`node.name`). 빈 이름은 `<unnamed>` (muted-foreground 색).
-- I-F3 visibility 토글 / lock 은 v1 에서 비대상 (UI 없음). type 아이콘 + 이름만.
-- I-F3.5 **Variant 배지** — 노드가 variant container (newer `COMPONENT_SET` 또는 legacy FRAME/SYMBOL 로 ≥2개의 `key=value` 이름 SYMBOL/COMPONENT 자식을 가진 경우) 이면 이름 옆에 `(N)` 형식의 작은 muted 텍스트 배지를 표시한다. 검출 함수 = `countVariantChildren` (`web/client/src/lib/variants.ts`). 0 이면 배지 생략. `메타리치 화면 UI Design.fig` 의 "Button" 같은 legacy 컨테이너에서도 작동하도록 하기 위함.
+  - Other → `Square`
+- Name (`node.name`). An empty name renders as `<unnamed>` (muted-foreground color).
+- I-F3 Visibility toggle / lock are non-goals in v1 (no UI). Only the type icon + name.
+- I-F3.5 **Variant badge** — when a node is a variant container (newer `COMPONENT_SET`, or a legacy FRAME/SYMBOL with ≥2 SYMBOL/COMPONENT children whose names are `key=value` patterns), a small muted text badge in the form `(N)` is shown next to the name. The detector is `countVariantChildren` (`web/client/src/lib/variants.ts`). When 0, the badge is omitted. Works on legacy containers too — e.g., the "Button" container in the metarich UI design .fig fixture.
 
 ### 4.3 Expand / Collapse
-- I-F4 expand 상태는 `Set<guidStr>` 컴포넌트 로컬 state. 페이지 전환 시 비운다 (I-F2).
-- I-F5 chevron 클릭은 행 클릭과 분리 — chevron 만 expand 토글, 행 본체 클릭은 selection.
-- I-F6 자식 0개 노드는 chevron 없음 — `children.length === 0 && _renderChildren?.length` 도 안 보여줌 (instance 의 master 자손은 트리에 노출하지 않음 — Figma 동일).
-- I-F7 모든 노드는 기본 collapsed. depth 0 (페이지 직속 자식) 만 처음부터 보인다.
+- I-F4 Expand state is component-local `Set<guidStr>`. Cleared on page switch (I-F2).
+- I-F5 chevron click is separated from row click — chevron only toggles expand; the row body click triggers selection.
+- I-F6 INSTANCE master expansions are exposed in the tree. When a row has `children.length === 0` but `_renderChildren?.length > 0` (an INSTANCE whose master subtree was attached during decode), the renderer walks `_renderChildren` instead so the user can see what's inside the component — same as Figma's left-panel behavior, which shows instance children expandable.
+- I-F6.1 Rows produced from an instance master expansion (every node carrying `_isInstanceChild: true`) are rendered with muted/italic styling to mark them as informational (the master's identity, not the instance's own subtree). Their `expanded` key is composite — `<outerInstanceGuid>/<rowGuid>` — so two instances of the same master keep independent expand state.
+- I-F6.2 Click on an `_isInstanceChild` row → `onSelect(outerInstanceGuid, ...)`, not the row's own guid. The master subtree's guids live in a different page tree (the component's source page), so direct selection would produce "Selected node X not found in current page" in the Inspector. Bubble-to-outer matches the Canvas click rule (Canvas.tsx `onShapeClick` already early-returns on `_isInstanceChild`).
+- I-F6.3 Chevron click on `_isInstanceChild` rows works normally — only the row-body click bubbles. Users can drill into the visual structure without changing selection.
+- I-F14 **Double-click drill-in** (Figma-like). Double-click on a row body:
+  - Expands the row if it has any children (idempotent — already-expanded stays expanded).
+  - If the row has *direct* children (`node.children.length > 0`) AND the row itself is NOT inside an instance expansion (`outerInstanceGuid` undefined), selection moves to the first direct child via `onSelect(firstChildGuid, 'replace')`. This is the "go one level deeper" behavior.
+  - If the row only has master expansion children (`_renderChildren`, no `.children`), selection stays on the outer node — master expansion descendants can't be selected directly (I-F6.2).
+  - **If the row is itself a master-expansion descendant (`outerInstanceGuid` set)**, the drill is suppressed too — its `directChildren[0]` is also `_isInstanceChild`, so dispatching its raw guid would produce "Selected node X not found in current page" in the Inspector. Same I-F6.2 bubble rule applies to the drill: expand only.
+  - Leaf rows (no children at all) are a no-op for drill-in; the preceding single-click already selected them.
+  - Double-click does NOT fire on the chevron button (the button's own `onClick` stops propagation).
+- I-F7 All nodes are collapsed by default. Only depth 0 (direct children of the page) are visible initially.
 
 ### 4.4 Selection sync
-- I-F8 행 클릭 → `onSelect(guidStr, 'replace')`. App 의 `handleSelect` 호출 (Canvas 가 사용하는 것과 동일).
-- I-F9 Shift+클릭 → `onSelect(guidStr, 'toggle')`.
-- I-F10 `selectedGuids.has(guidStr)` 인 행은 `bg-accent` (선택 배경). hover 는 `hover:bg-accent/50`.
-- I-F11 캔버스에서 선택 변경 → `selectedGuids` prop 변경 → 트리 리렌더 → 해당 행 하이라이트.
-- I-F11.5 **Auto-reveal** (Figma "left layer" 동작): `selectedGuids` 변경 (이전 → 현재 셋이 다름) 시, 트리는 모든 selected guid 의 ancestor chain (`guidStr[]`) 을 expand 집합에 *추가* 한다. 기존 expand 상태는 보존 — collapse 가 풀리는 게 아니라 부족한 ancestor 만 채워 넣음.
-- I-F11.5b **Variant container self-expand**: 선택된 노드가 variant container (`countVariantChildren(node) > 0`) 이면 그 guid 도 expand 집합에 추가 — variants 가 즉시 펼쳐져 보이도록. Figma 가 SET 을 기본 펼쳐 두는 동작과 일치. variant container 가 *아닌* 일반 FRAME 등은 self-expand 하지 않음 (트리 폭발 방지).
-- I-F11.6 첫 selected row 의 DOM 요소를 `scrollIntoView({ block: 'nearest', behavior: 'auto' })` 로 viewport 안으로 끌어온다. expand 커밋 직후 (effect 의 다음 microtask 이후) 1회. behavior: 'auto' 는 jsdom / e2e 환경에서 결정적.
-- I-F11.7 사용자가 직접 chevron 으로 collapse 한 경우, 다음 `selectedGuids` 변경이 일어나기 전까지 그 collapse 는 유지된다 — 즉 ancestor 자동 expand 는 selectedGuids 의 *deps 변경* 에만 트리거된다 (effect dep 가 selectedGuids 한정). 같은 selection 으로 트리 자체가 리렌더되어도 자동 expand 가 다시 실행되지 않으므로 사용자 manual collapse 가 살아남는다.
-- I-F11.8 selection 이 비어있으면 (`selectedGuids.size === 0`) auto-reveal 은 no-op — expand 집합 변경 / 스크롤 없음.
+- I-F8 Row click → `onSelect(guidStr, 'replace')`. Calls App's `handleSelect` (the same one Canvas uses).
+- I-F9 Shift+click → `onSelect(guidStr, 'toggle')`.
+- I-F10 Rows where `selectedGuids.has(guidStr)` use `bg-accent` (selected background). Hover uses `hover:bg-accent/50`.
+- I-F11 When selection changes on the canvas → `selectedGuids` prop changes → tree re-renders → the matching row is highlighted.
+- I-F11.5 **Auto-reveal** (Figma "left layer" behavior): when `selectedGuids` changes (previous → current set differs), the tree *adds* the ancestor chain (`guidStr[]`) of every selected guid into the expand set. The existing expand state is preserved — collapses are not undone; only missing ancestors are filled.
+- I-F11.5b **Variant container self-expand**: when a selected node is a variant container (`countVariantChildren(node) > 0`), its own guid is also added to the expand set — so variants become visible immediately. Matches Figma's behavior of keeping SETs expanded by default. Plain FRAMEs (not variant containers) do not self-expand (to avoid tree explosion).
+- I-F11.6 Bring the first selected row's DOM element into the viewport via `scrollIntoView({ block: 'nearest', behavior: 'auto' })`. Once, immediately after the expand commit (the next microtask after the effect). `behavior: 'auto'` is deterministic in jsdom / e2e environments.
+- I-F11.7 If the user collapsed something manually via the chevron, that collapse is preserved until the next `selectedGuids` change — i.e., ancestor auto-expand is triggered only by *deps changes* of selectedGuids (the effect's dep is limited to selectedGuids). The tree itself re-rendering with the same selection does not re-run auto-expand, so the user's manual collapse survives.
+- I-F11.8 If the selection is empty (`selectedGuids.size === 0`), auto-reveal is a no-op — no expand-set change / no scroll.
 
 ### 4.5 Performance
-- I-F12 collapse-by-default 정책으로 첫 렌더는 depth 0 만 — 메타리치 샘플의 첫 페이지 직속 자식 수 (~수십) 로 시작. virtualization 없이 충분.
-- I-F13 펼친 노드의 자식 수가 1000+ 인 케이스는 측정 후 v2 에서 `react-window` 도입 결정. v1 은 가드 없음 — 사용자가 펼쳐서 멈추면 측정 트리거.
+- I-F12 With collapse-by-default, the initial render is depth 0 only — starting from the metarich sample's first-page direct-child count (~tens). No virtualization needed.
+- I-F13 Cases with 1000+ children under an expanded node will be measured and may introduce `react-window` in v2. v1 has no guard — if the user expands and stalls, that triggers the measurement.
 
-## 5. Assets 탭
+## 5. Assets tab
 
 ### 5.1 Data source
-- I-A1 입력 = 전체 `doc` (모든 페이지). `useMemo` 로 한 번만 walk.
-- I-A2 결과 = 평면 `Asset[]` 배열, 각 항목 `{guid: string, name: string, type: string, pageIdx: number, pageName: string}`.
-- I-A3 포함 type: `SYMBOL`, `COMPONENT`, `COMPONENT_SET`. 그 외 모두 무시.
-- I-A4 정렬: 이름 ascending (case-insensitive). 동일 이름 내 type 순서는 유지 (stable sort).
+- I-A1 Input = the whole `doc` (all pages). Walked once via `useMemo`.
+- I-A2 Output = flat `Asset[]` array; each item is `{guid: string, name: string, type: string, pageIdx: number, pageName: string}`.
+- I-A3 Included types: `SYMBOL`, `COMPONENT`, `COMPONENT_SET`. All others ignored.
+- I-A4 Sort: name ascending (case-insensitive). Type order within the same name is preserved (stable sort).
 
 ### 5.2 Search
-- I-S1 shadcn `<Input />` 검색바. placeholder = `"Search assets..."`.
-- I-S2 매치 = case-insensitive substring (`name.toLowerCase().includes(q.toLowerCase())`). 정규식 / 와일드카드 / 다국어 토큰화 비대상.
-- I-S3 빈 검색어 → 전체 보임. 매치 없음 → "No assets match" placeholder.
-- I-S4 디바운스 없음 — 메타리치 sample 의 `Asset[]` 길이는 ~1500 정도이며 substring 필터는 frame budget 안에서 끝남.
+- I-S1 A shadcn `<Input />` search bar. placeholder = `"Search assets..."`.
+- I-S2 Match = case-insensitive substring (`name.toLowerCase().includes(q.toLowerCase())`). Regex / wildcards / multilingual tokenization are non-goals.
+- I-S3 Empty query → show all. No match → "No assets match" placeholder.
+- I-S4 No debounce — the metarich sample's `Asset[]` length is ~1500 and substring filtering finishes within the frame budget.
 
 ### 5.3 Row content
-- 타입 아이콘 (`Component` from lucide) + 이름.
-- 보조 정보: 페이지 이름 (muted, text-xs, 오른쪽 정렬). 어느 페이지에 정의되어 있는지 단서 제공.
-- I-AS1 썸네일 미리보기는 v1 비대상. 타입 아이콘만.
+- Type icon (`Component` from lucide) + name.
+- Secondary info: page name (muted, text-xs, right-aligned). Hints which page defines it.
+- I-AS1 Thumbnail previews are non-goal in v1. Type icon only.
 
 ### 5.4 Click behavior
-- I-AC1 행 클릭 → `setPageIdx(asset.pageIdx)` + `onSelect(asset.guid, 'replace')`. 같은 페이지면 page 변경 무시.
-- I-AC2 클릭 후 검색어는 유지 (사용자가 다른 asset 도 시험할 수 있도록).
-- I-AC3 클릭 시 캔버스 자동 pan-to 는 v1 비대상.
+- I-AC1 Row click → `setPageIdx(asset.pageIdx)` + `onSelect(asset.guid, 'replace')`. If already on the same page, the page change is a no-op.
+- I-AC2 The search query is retained after clicking (so the user can try other assets too).
+- I-AC3 Auto-pan-to on canvas is non-goal in v1.
 
-## 6. Chat 탭
+## 6. Chat tab
 
-- I-C1 기존 `ChatPanel` 컴포넌트를 그대로 hosting. props (`sessionId`, `selectedGuid`, `onChange`) 는 `LeftSidebar` 가 받아 forward. 내부 동작 / API / 모델 선택 / auth 모드는 변경 없음.
-- I-C2 탭 미활성 시 unmount 되지 않으므로 (I-T5) 채팅 메시지 상태 / 입력 중 텍스트 / 모델 선택 / 인증 토큰은 보존된다.
-- I-C3 채팅 탭은 항상 보인다 — 세션 없을 때도 (`ChatPanel` 자체가 그 케이스를 자체 처리).
+- I-C1 Hosts the existing `ChatPanel` component as-is. The props (`sessionId`, `selectedGuid`, `onChange`) are received by `LeftSidebar` and forwarded. Internal behavior / API / model selection / auth mode are unchanged.
+- I-C2 Because the tab body is not unmounted when inactive (I-T5), chat message state / draft text / model selection / auth tokens are preserved.
+- I-C3 The Chat tab is always visible — even with no session (`ChatPanel` itself handles that case).
 
 ## 7. Props contract
 
@@ -165,27 +175,27 @@ interface LeftSidebarProps {
 
 ## 8. Error / Edge cases
 
-- I-E1 `doc === null` (세션 없음) → 모든 탭에서 "No document open" placeholder. localStorage 의 마지막 탭은 그대로 복원 시도하되 빈 본문이라 사용자에게 차이 없음.
-- I-E2 `currentPage === undefined` (`pageIdx` 가 `pages.length` 초과) → Files 탭만 placeholder. Assets / Chat 영향 없음.
-- I-E3 `node.name === ''` 또는 `null` → `<unnamed>` 표시 (muted).
-- I-E4 트리에서 무한 cycle (`parentIndex` 손상으로 자식이 조상을 가리킴) — 발생 시 React maxDepth 도달로 throw. v1 은 가드 없음 (실제 .fig 데이터에서 본 적 없음).
+- I-E1 `doc === null` (no session) → "No document open" placeholder in every tab. The last tab in localStorage is still restored, but with an empty body the user sees no difference.
+- I-E2 `currentPage === undefined` (`pageIdx` exceeds `pages.length`) → only the Files tab shows a placeholder. Assets / Chat unaffected.
+- I-E3 `node.name === ''` or `null` → display `<unnamed>` (muted).
+- I-E4 Infinite tree cycles (a child pointing to an ancestor through a corrupted `parentIndex`) — throws on React maxDepth. v1 has no guard (not seen in real .fig data).
 
-## 9. 비대상 (v1)
+## 9. Non-goals (v1)
 
-- 페이지 셀렉터를 사이드바로 이전 — 현재 상단바 위치 유지 (App.tsx:297). v2.
-- 레이어 visibility / lock 토글 UI.
-- 레이어 우클릭 컨텍스트 메뉴 (이름 변경 / 삭제 / 복제).
-- 트리 가상화 (react-window).
-- Asset 썸네일 미리보기.
-- Asset 클릭 시 캔버스 zoom-to-fit (선택 + 페이지 이동만 v1).
-- 사이드바 collapse / resize.
-- 다국어 검색 (한글 자모 분리, fuzzy match) — substring 만.
-- 다중 선택 시 auto-reveal 의 스크롤 대상 — *첫 번째* selected row 만 scrollIntoView (전체를 한 viewport 에 fit 하는 동작은 v2).
+- Moving the page selector into the sidebar — keep the current top-bar location (App.tsx:297). v2.
+- Layer visibility / lock toggle UI.
+- Layer right-click context menu (rename / delete / duplicate).
+- Tree virtualization (react-window).
+- Asset thumbnail previews.
+- Canvas zoom-to-fit on asset click (v1 does selection + page switch only).
+- Sidebar collapse / resize.
+- Multilingual search (Hangul jamo splitting, fuzzy match) — substring only.
+- Multi-selected auto-reveal scroll target — only the *first* selected row uses scrollIntoView (fitting all of them into a single viewport is v2).
 
 ## 10. Resolved questions
 
-- **탭 위치 (top vs side)** — top tabs (가로) — Inspector 가 같은 패턴 (`Inspector.tsx:121`). 일관성 우선.
-- **chat 을 third tab vs slide-over** — third tab. drawer 는 추가 컴포넌트 + 상태 + 키 단축키 필요. v1 단순함 우선.
-- **asset scope (current page vs all pages)** — all pages. Figma 동일 + 메타리치 사용 패턴 (페이지별로 master 분산).
-- **트리 expand 상태 페이지별 보존** — 보존 안 함. Figma 도 페이지 전환 시 트리 reset. 메모리/복잡도 감소.
-- **selection prop drilling vs 외부 store** — props drilling. 기존 App→Canvas 패턴과 동일. SelectionStore 를 sidebar 까지 확장하는 건 v2 (현재 SelectionStore 는 Canvas-internal).
+- **Tab position (top vs side)** — top tabs (horizontal) — Inspector uses the same pattern (`Inspector.tsx:121`). Consistency first.
+- **Chat as third tab vs slide-over** — third tab. A drawer would need extra components + state + keyboard shortcuts. v1 prefers simplicity.
+- **Asset scope (current page vs all pages)** — all pages. Same as Figma + the metarich usage pattern (masters scattered across pages).
+- **Per-page tree expand state retention** — not retained. Figma also resets the tree on page switch. Reduces memory/complexity.
+- **Selection prop drilling vs external store** — prop drilling. Same as the existing App→Canvas pattern. Extending SelectionStore to the sidebar is v2 (the current SelectionStore is Canvas-internal).

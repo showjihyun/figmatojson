@@ -1,7 +1,7 @@
 /**
  * strokeAlign INSIDE/OUTSIDE → Konva.Rect dim adjustment.
  *
- * Spec: docs/specs/web-render-fidelity-round2.spec.md §2
+ * Spec: docs/specs/archive/web-render-fidelity-round2.spec.md §2
  *
  * Konva strokes are always centered (half inside, half outside the rect
  * boundary). To mimic Figma's INSIDE/OUTSIDE we shrink (or expand) the
@@ -82,7 +82,7 @@ export function applyStrokeAlign(
 /**
  * Round 13 — INSIDE / OUTSIDE strokeAlign emulation for Konva.Path.
  *
- * Spec: docs/specs/web-render-fidelity-round13.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round13.spec.md
  *
  * Konva.Path has no native `stroke-alignment`. We emulate via two
  * orthogonal Konva plumbings:

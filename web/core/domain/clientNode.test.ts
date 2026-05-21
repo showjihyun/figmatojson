@@ -11,13 +11,18 @@ import {
   collectDerivedSizesFromInstance,
   collectDerivedTransformsFromInstance,
   collectFillOverridesFromInstance,
+  collectLibraryBoundFillOverridesFromInstance,
   collectPropAssignmentsAtPathFromInstance,
   collectPropAssignmentsFromInstance,
   collectStackOverridesFromInstance,
   collectSwapTargetsAtPathFromInstance,
+  collectSymbolIdPropAssignmentsFromInstance,
   collectTextOverridesFromInstance,
+  collectTextPropAssignmentsFromInstance,
   collectTextStyleOverridesFromInstance,
   collectVisualStyleOverridesFromInstance,
+  symbolIdFromPropRefs,
+  textFromPropRefs,
 } from '../../../src/instanceOverrides.js';
 import type { TreeNode } from '../../../src/types.js';
 
@@ -134,6 +139,45 @@ describe('collectFillOverridesFromInstance', () => {
     expect(m.get('0:5')).toBe(second);
   });
 
+  // Round 33 — library-bound fill overrides are skipped so the master's
+  // own state-specific paint stays authoritative. Concrete failure case
+  // (figma_reverse.fig Docked input date picker): every calendar cell
+  // INSTANCE overrides the date TEXT fill with `styleIdForFill: { assetRef }`
+  // and a #ffffff snapshot. The Default master variant already paints the
+  // text #1d1b20, the Selected variant paints #ffffff — applying the
+  // snapshot overrode every non-selected cell to white, making the day
+  // numbers invisible.
+  it('skips fill override entries whose styleIdForFill is an external library assetRef', () => {
+    const m = collectFillOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 4, localID: 18548 }] },
+        fillPaints: [{ type: 'SOLID', color: { r: 1, g: 1, b: 1, a: 1 } }],
+        styleIdForFill: { assetRef: { key: 'abc', version: '57299:22618' } },
+      },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('keeps fill override entries with a locally-resolvable styleIdForFill (guid form)', () => {
+    const fills = [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }];
+    const m = collectFillOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 4, localID: 18548 }] },
+        fillPaints: fills,
+        styleIdForFill: { guid: { sessionID: 11, localID: 434 } },
+      },
+    ]);
+    expect(m.get('4:18548')).toBe(fills);
+  });
+
+  it('keeps fill override entries that have no styleIdForFill at all', () => {
+    const fills = [{ type: 'SOLID', color: { r: 0.5, g: 0.5, b: 0.5, a: 1 } }];
+    const m = collectFillOverridesFromInstance([
+      { guidPath: { guids: [{ sessionID: 4, localID: 18548 }] }, fillPaints: fills },
+    ]);
+    expect(m.get('4:18548')).toBe(fills);
+  });
+
   it('coexists with text overrides — same array, two map outputs', () => {
     const overrides = [
       {
@@ -147,6 +191,62 @@ describe('collectFillOverridesFromInstance', () => {
     ];
     expect(collectTextOverridesFromInstance(overrides).get('0:1')).toBe('hi');
     expect(collectFillOverridesFromInstance(overrides).get('0:2')).toBeDefined();
+  });
+});
+
+// Round 33.1 — pair test for the library-bound counterpart collector.
+// `collectFillOverridesFromInstance` skips entries with an external
+// styleIdForFill; this sibling captures EXACTLY those entries so the
+// caller can use them as a fill-fallback when the master has no fillPaints.
+describe('collectLibraryBoundFillOverridesFromInstance', () => {
+  it('captures entries whose styleIdForFill is an external assetRef', () => {
+    const fills = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1, a: 1 } }];
+    const m = collectLibraryBoundFillOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 52798, localID: 24676 }] },
+        fillPaints: fills,
+        styleIdForFill: { assetRef: { key: 'abc', version: 'v1' } },
+      },
+    ]);
+    expect(m.get('52798:24676')).toBe(fills);
+  });
+
+  it('skips entries whose styleIdForFill is a local guid (collectFillOverridesFromInstance keeps those)', () => {
+    const m = collectLibraryBoundFillOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 1, localID: 1 }] },
+        fillPaints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 0, a: 1 } }],
+        styleIdForFill: { guid: { sessionID: 11, localID: 434 } },
+      },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('skips entries with no styleIdForFill at all (those are the plain overrides)', () => {
+    const m = collectLibraryBoundFillOverridesFromInstance([
+      {
+        guidPath: { guids: [{ sessionID: 1, localID: 1 }] },
+        fillPaints: [{ type: 'SOLID', color: { r: 0.5, g: 0.5, b: 0.5, a: 1 } }],
+      },
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('partitions cleanly with collectFillOverridesFromInstance — each override appears in exactly one map', () => {
+    const plainFill = [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 1 } }];
+    const libFill = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1, a: 1 } }];
+    const overrides = [
+      { guidPath: { guids: [{ sessionID: 0, localID: 1 }] }, fillPaints: plainFill },
+      {
+        guidPath: { guids: [{ sessionID: 0, localID: 2 }] },
+        fillPaints: libFill,
+        styleIdForFill: { assetRef: { key: 'k', version: 'v' } },
+      },
+    ];
+    expect(collectFillOverridesFromInstance(overrides).get('0:1')).toBe(plainFill);
+    expect(collectFillOverridesFromInstance(overrides).has('0:2')).toBe(false);
+    expect(collectLibraryBoundFillOverridesFromInstance(overrides).has('0:1')).toBe(false);
+    expect(collectLibraryBoundFillOverridesFromInstance(overrides).get('0:2')).toBe(libFill);
   });
 });
 
@@ -316,6 +416,100 @@ describe('toClientChildForRender — fillPaints override', () => {
     const renderChildren = out._renderChildren as Array<{ fillPaints?: Array<{ color: { r: number } }> }>;
     expect(renderChildren).toBeDefined();
     expect(renderChildren[0].fillPaints![0].color.r).toBe(1);
+  });
+
+  // Round 33.1 — library-bound fillPaints used as a FALLBACK only when
+  // the master has no fillPaints of its own. End-to-end: simulates the
+  // Material 3 Text-field-style input-box-bg case.
+  it('applies library-bound fillPaints when master has no fillPaints (Text-field bg case)', () => {
+    // Master FRAME with NO fillPaints — typical Material 3 input wrapper
+    // shape that uses a published surface-container-highest style for bg.
+    const bareWrapper = makeNode('FRAME', 50, {});
+    const libFills = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1, a: 1 } }];
+    const libOverrides = new Map<string, unknown[]>([['0:50', libFills]]);
+    const out = toClientChildForRender(
+      bareWrapper,
+      [],
+      new Map(),
+      new Map(),
+      new Map(),           // no plain fill overrides
+      new Map(),           // visibility overrides
+      0,
+      [],                  // pathFromOuter
+      new Map(),           // propAssignments
+      new Map(),           // propAssignmentsByPath
+      new Map(),           // swapTargetsByPath
+      new Map(),           // derivedSizesByPath
+      new Map(),           // derivedTransformsByPath
+      new Map(),           // textStyleOverridesByPath
+      new Map(),           // visualStyleOverridesByPath
+      new Map(),           // textPropAssignments
+      new Map(),           // symbolIdPropAssignments
+      libOverrides,
+    );
+    expect(out.fillPaints).toBe(libFills);
+  });
+
+  it('IGNORES library-bound fillPaints when master already has fillPaints (day-cell case)', () => {
+    // Master TEXT with its own dark fillPaints — Material 3 Default
+    // calendar day cell. Library-bound override snapshot of #ffffff
+    // would (and did, before Round 33.1) wipe the master's dark fill
+    // and make day numbers invisible.
+    const darkTextMaster = makeNode('TEXT', 50, {
+      fillPaints: [{ type: 'SOLID', color: { r: 0.114, g: 0.106, b: 0.125, a: 1 } }], // #1d1b20 ish
+    });
+    const libOverrides = new Map<string, unknown[]>([
+      ['0:50', [{ type: 'SOLID', color: { r: 1, g: 1, b: 1, a: 1 } }]],
+    ]);
+    const out = toClientChildForRender(
+      darkTextMaster,
+      [],
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      0,
+      [],
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      libOverrides,
+    );
+    const fills = out.fillPaints as Array<{ color: { r: number } }>;
+    expect(fills[0].color.r).toBeCloseTo(0.114, 2); // master's dark won
+  });
+
+  it('plain (non-library) fill override still wins over both master and library-bound fallback (precedence)', () => {
+    const masterFrame = makeNode('FRAME', 50, {});
+    const plainOv = [{ type: 'SOLID', color: { r: 0.5, g: 0.5, b: 0.5, a: 1 } }];
+    const libOv = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1, a: 1 } }];
+    const out = toClientChildForRender(
+      masterFrame,
+      [],
+      new Map(),
+      new Map(),
+      new Map([['0:50', plainOv]]),
+      new Map(),
+      0,
+      [],
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map([['0:50', libOv]]),
+    );
+    expect(out.fillPaints).toBe(plainOv);
   });
 });
 
@@ -488,6 +682,190 @@ describe('collectPropAssignmentsFromInstance (spec §3.4 I-C6/I-C7)', () => {
   });
 });
 
+describe('collectTextPropAssignmentsFromInstance (spec §3.4 I-C8)', () => {
+  // Mirror of the bool collector — but for TEXT_DATA binding (value.textValue).
+  it('returns an empty map when componentPropAssignments is undefined or non-array', () => {
+    expect(collectTextPropAssignmentsFromInstance({}).size).toBe(0);
+    expect(collectTextPropAssignmentsFromInstance({ componentPropAssignments: null }).size).toBe(0);
+    expect(collectTextPropAssignmentsFromInstance({ componentPropAssignments: [] }).size).toBe(0);
+  });
+
+  it('reads characters from value.textValue.characters (direct binding)', () => {
+    const m = collectTextPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        { defID: { sessionID: 2473, localID: 20 }, value: { textValue: { characters: '26' } } },
+      ],
+    });
+    expect(m.size).toBe(1);
+    expect(m.get('2473:20')).toBe('26');
+  });
+
+  it('reads characters from varValue.value.textValue.characters (variant default)', () => {
+    const m = collectTextPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        { defID: { sessionID: 7, localID: 36 }, varValue: { value: { textValue: { characters: 'Cancel' } } } },
+      ],
+    });
+    expect(m.get('7:36')).toBe('Cancel');
+  });
+
+  it('prefers value.textValue over varValue when both are present', () => {
+    const m = collectTextPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        {
+          defID: { sessionID: 0, localID: 1 },
+          value: { textValue: { characters: 'direct' } },
+          varValue: { value: { textValue: { characters: 'var-default' } } },
+        },
+      ],
+    });
+    expect(m.get('0:1')).toBe('direct');
+  });
+
+  it('skips entries that bind a boolean (those are the VISIBLE-field cousin)', () => {
+    const m = collectTextPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        { defID: { sessionID: 0, localID: 1 }, value: { boolValue: true } },
+      ],
+    });
+    expect(m.size).toBe(0);
+  });
+});
+
+describe('textFromPropRefs (spec §3.4 I-C8)', () => {
+  it('returns the assignment characters when a TEXT_DATA propRef matches a defID', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 2473, localID: 20 }, componentPropNodeField: 'TEXT_DATA' },
+      ],
+    };
+    const out = textFromPropRefs(data, new Map([['2473:20', '17']]));
+    expect(out).toBe('17');
+  });
+
+  it('returns undefined when propRef field is VISIBLE (not TEXT_DATA)', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 7, localID: 34 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    };
+    expect(textFromPropRefs(data, new Map([['7:34', 'foo']]))).toBeUndefined();
+  });
+
+  it('returns undefined when defID is absent from the assignments map (figma default kept)', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 99, localID: 99 }, componentPropNodeField: 'TEXT_DATA' },
+      ],
+    };
+    expect(textFromPropRefs(data, new Map([['1:1', 'x']]))).toBeUndefined();
+  });
+
+  it('returns undefined for an empty assignments map (short-circuit)', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 0, localID: 1 }, componentPropNodeField: 'TEXT_DATA' },
+      ],
+    };
+    expect(textFromPropRefs(data, new Map())).toBeUndefined();
+  });
+});
+
+// Round 33 — SYMBOL_ID prop assignments. Without this collector + resolver
+// pair, every "Icon button - standard" INSTANCE in Material 3 (calendar
+// nav, date input trailing button, etc.) renders the master's default
+// placeholder icon (a 5-point star) instead of the chevron/calendar/etc.
+// the outer instance assigned via componentProp.
+describe('collectSymbolIdPropAssignmentsFromInstance (spec §3.4 I-C9)', () => {
+  it('extracts a SYMBOL_ID prop assignment from value.guidValue (direct)', () => {
+    const data = {
+      componentPropAssignments: [
+        {
+          defID: { sessionID: 58665, localID: 2453 },
+          value: { guidValue: { sessionID: 1, localID: 9055 } },
+        },
+      ],
+    };
+    const out = collectSymbolIdPropAssignmentsFromInstance(data);
+    expect(out.get('58665:2453')).toBe('1:9055');
+  });
+
+  it('falls back to varValue.value.symbolIdValue.guid when no direct value', () => {
+    const data = {
+      componentPropAssignments: [
+        {
+          defID: { sessionID: 58665, localID: 2453 },
+          varValue: {
+            value: { symbolIdValue: { guid: { sessionID: 1, localID: 9057 } } },
+            dataType: 'SYMBOL_ID',
+          },
+        },
+      ],
+    };
+    const out = collectSymbolIdPropAssignmentsFromInstance(data);
+    expect(out.get('58665:2453')).toBe('1:9057');
+  });
+
+  it('skips entries missing defID', () => {
+    const out = collectSymbolIdPropAssignmentsFromInstance({
+      componentPropAssignments: [{ value: { guidValue: { sessionID: 1, localID: 1 } } }],
+    });
+    expect(out.size).toBe(0);
+  });
+
+  it('skips entries with neither direct guidValue nor variant symbolIdValue', () => {
+    const out = collectSymbolIdPropAssignmentsFromInstance({
+      componentPropAssignments: [
+        { defID: { sessionID: 1, localID: 1 }, value: { boolValue: true } },
+      ],
+    });
+    expect(out.size).toBe(0);
+  });
+
+  it('returns an empty map when input is undefined / non-array', () => {
+    expect(collectSymbolIdPropAssignmentsFromInstance(undefined).size).toBe(0);
+    expect(collectSymbolIdPropAssignmentsFromInstance({}).size).toBe(0);
+  });
+});
+
+describe('symbolIdFromPropRefs (spec §3.4 I-C9)', () => {
+  it('returns the assigned swap-target guid when an OVERRIDDEN_SYMBOL_ID propRef matches', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 58665, localID: 2453 }, componentPropNodeField: 'OVERRIDDEN_SYMBOL_ID' },
+      ],
+    };
+    expect(symbolIdFromPropRefs(data, new Map([['58665:2453', '1:9055']]))).toBe('1:9055');
+  });
+
+  it('returns undefined for a propRef field other than OVERRIDDEN_SYMBOL_ID', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 7, localID: 34 }, componentPropNodeField: 'VISIBLE' },
+      ],
+    };
+    expect(symbolIdFromPropRefs(data, new Map([['7:34', '1:1']]))).toBeUndefined();
+  });
+
+  it('returns undefined when defID is absent from the assignments map', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 99, localID: 99 }, componentPropNodeField: 'OVERRIDDEN_SYMBOL_ID' },
+      ],
+    };
+    expect(symbolIdFromPropRefs(data, new Map([['1:1', '2:2']]))).toBeUndefined();
+  });
+
+  it('returns undefined when the assignments map is empty (short-circuit)', () => {
+    const data = {
+      componentPropRefs: [
+        { defID: { sessionID: 0, localID: 1 }, componentPropNodeField: 'OVERRIDDEN_SYMBOL_ID' },
+      ],
+    };
+    expect(symbolIdFromPropRefs(data, new Map())).toBeUndefined();
+  });
+});
+
 describe('toClientChildForRender — component-property visibility binding (spec §3.4 I-P6/I-P7/I-P8)', () => {
   it('hides a master descendant whose componentPropRefs[VISIBLE] resolves to false', () => {
     // The alret-64_376 / input-box-9_42 case: an icon in the button master
@@ -564,6 +942,54 @@ describe('toClientChildForRender — component-property visibility binding (spec
     const child = (out.children as Array<{ visible?: boolean }>)[0];
     // Spec v3 only handles VISIBLE — other fields are punted (§3.4 비고).
     expect(child.visible).not.toBe(false);
+  });
+
+  // I-C8 (round 33): TEXT_DATA prop binding — defID-keyed text override.
+  it('TEXT_DATA prop binding: master TEXT gets _renderTextOverride from textPropAssignments', () => {
+    // The Material 3 Date Picker case: each day INSTANCE carries
+    // componentPropAssignments[].value.textValue.characters = "17" (etc.),
+    // and the master's "Date" TEXT carries componentPropRefs[TEXT_DATA]
+    // with the same defID. Without I-C8, every cell read "00" (master default).
+    const dateText = makeNode('TEXT', 9152, {
+      textData: { characters: '00' },
+      componentPropRefs: [
+        { defID: { sessionID: 2473, localID: 20 }, componentPropNodeField: 'TEXT_DATA' },
+      ],
+    });
+    const wrapper = makeNode('FRAME', 9151, {}, [dateText]);
+
+    const textPropAssignments = new Map<string, string>([['2473:20', '17']]);
+    const out = toClientChildForRender(
+      wrapper, [], new Map(), new Map(), new Map(), new Map(), 0, [], new Map(), new Map(), new Map(), new Map(), new Map(), new Map(), new Map(), textPropAssignments,
+    );
+    const child = (out.children as Array<{ _renderTextOverride?: string }>)[0];
+    expect(child._renderTextOverride).toBe('17');
+    // Master TEXT node's own data is unchanged — sibling day cells must
+    // be able to expand the same master with different characters.
+    expect((dateText.data as { textData?: { characters?: string } }).textData?.characters).toBe('00');
+  });
+
+  it('TEXT_DATA prop binding: path-keyed textOverrides win over prop-binding', () => {
+    // Designer hand-set a literal via symbolOverrides → that wins over the
+    // master-defined property hookup. Both can resolve; path-key is more
+    // specific.
+    const dateText = makeNode('TEXT', 9152, {
+      textData: { characters: '00' },
+      componentPropRefs: [
+        { defID: { sessionID: 2473, localID: 20 }, componentPropNodeField: 'TEXT_DATA' },
+      ],
+    });
+    const wrapper = makeNode('FRAME', 9151, {}, [dateText]);
+
+    const textPropAssignments = new Map<string, string>([['2473:20', 'from-prop']]);
+    // Round-25 FRAME-skip: the wrapper FRAME isn't included in the path,
+    // so the TEXT's path-key is "0:9152".
+    const textOverrides = new Map<string, string>([['0:9152', 'from-path-key']]);
+    const out = toClientChildForRender(
+      wrapper, [], new Map(), textOverrides, new Map(), new Map(), 0, [], new Map(), new Map(), new Map(), new Map(), new Map(), new Map(), new Map(), textPropAssignments,
+    );
+    const child = (out.children as Array<{ _renderTextOverride?: string }>)[0];
+    expect(child._renderTextOverride).toBe('from-path-key');
   });
 
   it('explicit symbolOverrides[].visible wins over prop-binding default', () => {

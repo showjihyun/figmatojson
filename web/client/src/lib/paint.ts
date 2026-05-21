@@ -1,7 +1,7 @@
 /**
  * Pick the visually-topmost paint from `fillPaints[]`.
  *
- * Spec: docs/specs/web-render-fidelity-round4.spec.md §3
+ * Spec: docs/specs/archive/web-render-fidelity-round4.spec.md §3
  *
  * Figma stacks paints bottom-up: `fillPaints[0]` is at the bottom of
  * the visual stack and `fillPaints[N-1]` sits on top. The earlier

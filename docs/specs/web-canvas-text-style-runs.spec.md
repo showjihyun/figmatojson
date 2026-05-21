@@ -1,31 +1,33 @@
 # spec/web-canvas-text-style-runs
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Draft (round 13) |
-| 구현 | `web/core/domain/clientNode.ts` (TEXT 노드 데이터 통과), `web/client/src/Canvas.tsx` (TEXT 분기 multi-segment rendering) |
-| 테스트 | `web/core/domain/clientNode.test.ts` (style runs propagation), Pass 3 visual gate (input-box-9_42 state-text 행) |
-| 형제 | `web-canvas-text-frame-fidelity.spec.md` (round 13 group C) |
+| Status | Draft (round 13) |
+| Implementation | `web/core/domain/clientNode.ts` (TEXT node data passthrough), `web/client/src/Canvas.tsx` (TEXT branch multi-segment rendering) |
+| Tests | `web/core/domain/clientNode.test.ts` (style runs propagation), Pass 3 visual gate (input-box-9_42 state-text row) |
+| Siblings | `web-canvas-text-frame-fidelity.spec.md` (round 13 group C) |
 
-## 1. 목적
+## 1. Goal
 
-Figma 의 한 TEXT 노드는 자기 `characters` 의 *부분 범위* 마다 다른 스타일
-(fill / fontWeight / fontFamily 등) 을 지정할 수 있다 — `styleOverrideTable`
-+ `characterStyleIDs` 메커니즘. 메타리치 input-box-9_42 의 state-text
-행이 정확히 이 케이스: 한 TEXT 안에 `설명문구` (gray) `, ` (gray)
-`오류문구` (red) `, ` (gray) `성공문구` (green) 가 들어있고, 글자 인덱스
-범위마다 다른 fill 이 적용됨. 우리 Canvas 는 노드 전체의 단일 `fillPaints`
-만 보므로 모두 gray 로 그려짐 — 이게 round-11 audit Pass 2 의
-universal-primitive 결함 #5.
+A single Figma TEXT node can apply different styles (fill / fontWeight /
+fontFamily, etc.) to *substring ranges* of its own `characters` —
+`styleOverrideTable` + `characterStyleIDs` mechanism. The state-text row of
+the meta-rich input-box-9_42 is exactly this case: a single TEXT contains
+a description label (gray) `, ` (gray), an error label (red) `, ` (gray),
+and a success label (green); different fills apply to different character
+index ranges. Our Canvas reads only the node's single `fillPaints`, so
+everything renders gray — defect #5 of the round-11 audit Pass 2
+universal-primitive list.
 
-## 2. Figma 데이터 형태
+## 2. Figma data shape
 
-TEXT 노드의 `data.textData` (메타리치 input-box-9_42 의 state-text 노드 `11:457` / `427:5498` 실측):
+`data.textData` on a TEXT node (measured on the meta-rich input-box-9_42
+state-text node `11:457` / `427:5498`):
 
 ```ts
 {
-  characters: "설명문구, 오류문구, 성공문구",  // 16 chars
-  characterStyleIDs: [0,0,0,0,0,0, 3,3,3,3, 0,0, 2,2,2,2],  // chars 와 같은 길이
+  characters: "<description>, <error>, <success>",  // 16 chars in the actual Korean source
+  characterStyleIDs: [0,0,0,0,0,0, 3,3,3,3, 0,0, 2,2,2,2],  // same length as chars
   styleOverrideTable: [
     { styleID: 2, fillPaints: [{ type: 'SOLID', color: {r:0.007,g:0.58,b:0.42,a:1}, ... }] },  // green
     { styleID: 3, fillPaints: [{ type: 'SOLID', color: {r:0.86,g:0.07,b:0.07,a:1}, ... }] },  // red
@@ -34,43 +36,43 @@ TEXT 노드의 `data.textData` (메타리치 input-box-9_42 의 state-text 노�
 }
 ```
 
-**중요한 데이터 형태 nuance:**
+**Important data-shape nuances:**
 
-- `styleOverrideTable` 은 **array of `{styleID, ...overrides}` entries**, *map* 이 아님. lookup 은 array 를 iterate 해 `entry.styleID === id` 매칭. 첫 발견 win (Figma 가 같은 styleID 를 두 번 정의하면 corrupt).
-- `characterStyleIDs[i] === 0` 이면 *베이스* 스타일 — `styleOverrideTable` 에서 styleID 0 entry 는 *없다* (베이스가 곧 styleID 0 의 의미).
-- `characterStyleIDs[i] === n (n > 0)` 이면 `styleOverrideTable` 에서 `styleID === n` 인 entry 의 fields 가 *partial override* — 베이스 노드의 fillPaints/fontWeight/등 위로 entry 에 명시된 필드만 덮어쓴다.
+- `styleOverrideTable` is an **array of `{styleID, ...overrides}` entries**, *not* a map. Lookup iterates the array matching `entry.styleID === id`. First match wins (Figma defining the same styleID twice is corrupt).
+- `characterStyleIDs[i] === 0` means *base* style — there is *no* entry for styleID 0 in `styleOverrideTable` (base implicitly *is* styleID 0).
+- `characterStyleIDs[i] === n (n > 0)` means the fields of the entry with `styleID === n` in `styleOverrideTable` are a *partial override* — they overwrite only the listed fields (fillPaints/fontWeight/etc.) over the node's base.
 
-위 데이터 → 4 runs:
-1. indices 0-5 (`"설명문구, "`): styleID 0 → 베이스 (dark gray)
-2. indices 6-9 (`"오류문구"`): styleID 3 → red
-3. indices 10-11 (`", "`): styleID 0 → 베이스 (dark gray)
-4. indices 12-15 (`"성공문구"`): styleID 2 → green
+The above data → 4 runs:
+1. indices 0-5 (description label + `, `): styleID 0 → base (dark gray)
+2. indices 6-9 (error label): styleID 3 → red
+3. indices 10-11 (`, `): styleID 0 → base (dark gray)
+4. indices 12-15 (success label): styleID 2 → green
 
 ## 3. Invariants
 
-### 3.1 데이터 통과 (clientNode)
+### 3.1 Data passthrough (clientNode)
 
-- I-C1 `clientNode.ts` 의 `toClientNode` / `toClientChildForRender` 가 TEXT 노드의 `textData.styleOverrideTable` 와 `textData.characterStyleIDs` 를 그대로 통과시킨다 (현재 spread 로직이 둘 다 자동 통과시키고 있는지 확인 — `derivedTextData` 만 명시적으로 strip 됨, line 98 / 307. style runs 데이터는 `textData` 안에 nested 되어 있어 통과될 가능성 큼).
-- I-C2 INSTANCE 의 text 오버라이드 (`_renderTextOverride`) 가 적용되면 master 의 styleRun 매핑은 *그대로 보존* — Figma 동작상 텍스트만 바뀌고 스타일 인덱스는 master 의 것을 따른다 (검증 필요. 동작이 다르면 별도 분기).
+- I-C1 `clientNode.ts`'s `toClientNode` / `toClientChildForRender` must pass through a TEXT node's `textData.styleOverrideTable` and `textData.characterStyleIDs` as-is (verify the current spread logic does pass both — only `derivedTextData` is explicitly stripped, lines 98 / 307. The style-runs data is nested inside `textData` so it is likely passed through).
+- I-C2 When INSTANCE text override (`_renderTextOverride`) is applied, the master's styleRun mapping is *preserved* — per Figma behavior only the text changes; style indices still follow the master (needs validation; if behavior differs, branch separately).
 
-### 3.2 렌더링 (Canvas)
+### 3.2 Rendering (Canvas)
 
-- I-R1 `characterStyleIDs` 가 모두 `0` 이거나 `styleOverrideTable` 이 비어있으면 → 기존 단일 KText 렌더 그대로. 회귀 없음.
-- I-R2 `characterStyleIDs` 의 unique 값이 2 이상이면 → 텍스트를 *연속 같은 styleID 의 글자 묶음 (run)* 으로 split. 각 run 은 별도 KText 로 렌더, x 좌표는 이전 run 들의 누적 너비.
-- I-R3 각 run 의 effective 스타일 = `nodeBaseStyle (fillPaints, fontSize, fontFamily, ...) ⊕ styleOverrideEntry (있는 필드만 덮어씀)`, 단 styleOverrideEntry 는 `styleOverrideTable.find(e => e.styleID === characterStyleIDs[i])`. fillPaints 가 override 에 있으면 그 색을 쓴다 (state-text 의 빨강/녹색). styleID 0 또는 매칭 entry 없음 → 베이스만.
-- I-R4 run split 시 measurement: 같은 fontFamily/fontSize/letterSpacing 으로 KText 의 `getTextWidth` 사용. 다국어 (한/영 mix) 에서도 작동하는지 확인.
-- I-R5 textAlign / lineHeight / wrap 정책은 노드 레벨 그대로 — split 은 fill/fontWeight 같은 inline 스타일 범위만, 레이아웃 prop 은 노드 전체에 한 번 적용.
-- I-R6 multi-line 텍스트 (newline 포함) 에서 run 이 줄을 가로지르면: 줄바꿈 시점 마다 run 도 다시 시작. (Konva 가 자동 wrap 하지 않으므로 우리가 manually 줄 분할 해야 할 가능성. 메타리치 케이스는 single-line 이라 v1 에선 single-line 만 다루고 multi-line 은 비대상.)
+- I-R1 If `characterStyleIDs` is all `0` or `styleOverrideTable` is empty → fall back to the existing single-KText render. No regression.
+- I-R2 If `characterStyleIDs` has 2+ unique values → split the text into *runs of consecutive same-styleID characters*. Each run renders as its own KText with x equal to the cumulative width of prior runs.
+- I-R3 Effective style per run = `nodeBaseStyle (fillPaints, fontSize, fontFamily, ...) ⊕ styleOverrideEntry (only the listed fields)`, where styleOverrideEntry = `styleOverrideTable.find(e => e.styleID === characterStyleIDs[i])`. If override contains fillPaints, use that color (state-text's red/green). styleID 0 or no matching entry → base only.
+- I-R4 Run-split measurement: same fontFamily/fontSize/letterSpacing, use KText's `getTextWidth`. Validate that it works with multilingual (Korean / English mixed) text.
+- I-R5 textAlign / lineHeight / wrap policy stay at the node level — the split applies only to inline-style ranges like fill/fontWeight; layout props apply once across the entire node.
+- I-R6 Multi-line text (newlines): if a run crosses a line break, restart the run at each newline. (Konva does not auto-wrap, so we may have to split lines manually. Meta-rich cases are single-line, so v1 handles single-line only; multi-line is out of scope.)
 
 ## 4. Error cases
 
-- `characterStyleIDs.length !== characters.length` (corrupt 데이터) — fallback 으로 단일 노드 렌더 (I-R1 와 동일).
-- `styleOverrideTable[id]` 가 없는데 `characterStyleIDs` 가 그 id 를 참조 — 베이스 스타일로 fallback.
-- `_renderTextOverride` 와 `characterStyleIDs` 가 충돌 (override 텍스트 길이가 다름) — 검증 필요. v1 에선 override 가 있으면 단일 KText 로 fallback (style runs 무시) — 데이터 손실보다 시각적 충격이 큼.
+- `characterStyleIDs.length !== characters.length` (corrupt data) → fall back to single-node render (same as I-R1).
+- `styleOverrideTable[id]` missing while `characterStyleIDs` references that id → fall back to base style.
+- `_renderTextOverride` clashes with `characterStyleIDs` (override text length differs) → needs validation. In v1, if an override is present, fall back to single KText (drop style runs) — the visual shock outweighs the data loss.
 
-## 5. 비대상
+## 5. Out of scope
 
-- multi-line 텍스트 의 run split — 메타리치에 케이스 없으므로 v1 비대상. 케이스 발견시 별도 라운드.
-- styleOverrideTable 의 `fontFamily` / `fontWeight` 같은 *폰트 자체* override — fillPaints 만 v1 에서 처리 (메타리치 state-text 가 fill 만 바꿈). 다른 필드는 베이스 따름.
-- 텍스트 selection / cursor 가 multi-segment 에서 하나의 노드처럼 동작하도록 보장 — 본 spec 은 *시각* fidelity 만, interactive editing 는 별도.
-- `_renderTextOverride` 가 적용되면서 character-range 도 함께 바뀌어야 하는 경우 — 본 spec v1 미지원 (fallback to single KText).
+- Multi-line run splitting — no case in meta-rich, so out of scope in v1. Open a separate round when one appears.
+- *Font itself* overrides such as `fontFamily` / `fontWeight` in styleOverrideTable — v1 handles only fillPaints (meta-rich state-text changes only fill). Other fields follow the base.
+- Ensuring text selection / cursor behaves as one node across multiple segments — this spec covers *visual* fidelity only; interactive editing is separate.
+- The case where `_renderTextOverride` is applied and the character range must change accordingly — not supported in v1 (fall back to single KText).

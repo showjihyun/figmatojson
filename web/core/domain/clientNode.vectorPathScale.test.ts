@@ -4,7 +4,7 @@ import { toClientNode } from './clientNode.js';
 import type { TreeNode } from '../../../src/types.js';
 
 /**
- * Spec: docs/specs/web-render-fidelity-round12.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round12.spec.md
  *
  * For ELLIPSE / parametric shapes whose path bbox (normalizedSize) is
  * larger than the node's `size` (1440:621: size 80×80, normalizedSize

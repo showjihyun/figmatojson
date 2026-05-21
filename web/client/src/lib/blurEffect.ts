@@ -1,7 +1,7 @@
 /**
  * Figma LAYER_BLUR effect → Konva Group cache + Filters.Blur radius.
  *
- * Spec: docs/specs/web-render-fidelity-round9.spec.md §2
+ * Spec: docs/specs/archive/web-render-fidelity-round9.spec.md §2
  *
  * Returns the blur radius (px) to apply via Konva.Filters.Blur, or
  * null when no LAYER_BLUR effect is active. BACKGROUND_BLUR is

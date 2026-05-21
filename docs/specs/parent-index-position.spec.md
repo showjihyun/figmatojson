@@ -1,72 +1,72 @@
 # spec/parent-index-position
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved (Iteration 10) |
-| 책임 모듈 | `src/fractional-index.ts` (신규) |
-| 의존 | (순수 함수, 의존 없음) |
-| 테스트 | `test/fractional-index.test.ts` |
-| 부모 SPEC | [SPEC-roundtrip §4.3](../SPEC-roundtrip.md) |
+| Status | Approved (Iteration 10) |
+| Responsible module | `src/fractional-index.ts` (new) |
+| Dependencies | (pure function, no dependencies) |
+| Tests | `test/fractional-index.test.ts` |
+| Parent SPEC | [SPEC-roundtrip §4.3](../SPEC-roundtrip.md) |
 
-## 1. 목적
+## 1. Purpose
 
-Figma의 `parentIndex.position`은 **fractional indexing** 문자열이다. 형제 정렬 안정성을 위해 lexicographic 순서로 정렬되며, 두 형제 사이에 새 형제를 끼워넣을 때 둘 사이에 lexicographic으로 들어가는 새 문자열을 생성해야 한다.
+Figma's `parentIndex.position` is a **fractional indexing** string. Siblings are sorted in lexicographic order for stable ordering, and when inserting a new sibling between two existing siblings, a new string that fits lexicographically between them must be generated.
 
-본 spec은 그 알고리즘을 정의한다. (v2 노드 추가는 비목표지만 형제 순서 변경 / 삭제 후 잔여 형제 재정렬 시 필요)
+This spec defines that algorithm. (Adding v2 nodes is a non-goal, but the algorithm is required when reordering siblings or rebalancing remaining siblings after deletion.)
 
-## 2. 입력 / 출력
+## 2. Inputs / Outputs
 
-### 2.1 `between(a, b)` — 두 위치 사이의 새 위치
+### 2.1 `between(a, b)` — a new position between two positions
 
 ```ts
 function between(a: string | null, b: string | null): string;
 ```
 
-- `a`: 왼쪽 형제 position (없으면 null = 맨 앞)
-- `b`: 오른쪽 형제 position (없으면 null = 맨 뒤)
+- `a`: left sibling position (null = at the front)
+- `b`: right sibling position (null = at the back)
 
-반환: `a < result < b` (lexicographic) 인 새 문자열.
+Returns: a new string such that `a < result < b` (lexicographic).
 
-### 2.2 `regenerate(siblings)` — 형제 전체 position 재발급
+### 2.2 `regenerate(siblings)` — reissue positions for all siblings
 
 ```ts
 function regenerate(siblingCount: number): string[];
 ```
 
-- 입력: 형제 개수 N
-- 반환: lexicographically increasing 길이 N의 배열 (균등 간격)
+- Input: sibling count N
+- Returns: a lexicographically increasing array of length N (evenly spaced)
 
-### 2.3 `compare(a, b)` — 정렬 비교
+### 2.3 `compare(a, b)` — sort comparison
 
 ```ts
 function compare(a: string, b: string): -1 | 0 | 1;
 ```
 
-표준 string lex compare로 reduce.
+Reduces to standard string lex compare.
 
 ## 3. Invariants
 
-### I-1 between 단조성
+### I-1 between monotonicity
 
 ```
 ∀ a, b (a < b):
    a < between(a, b) < b
 ```
 
-null 처리:
-- `between(null, b)`: result < b (맨 앞)
-- `between(a, null)`: a < result (맨 뒤)
-- `between(null, null)`: 임의 합리적 값 (e.g. "n")
+null handling:
+- `between(null, b)`: result < b (front)
+- `between(a, null)`: a < result (back)
+- `between(null, null)`: any reasonable value (e.g. "n")
 
-### I-2 between 결정성
+### I-2 between determinism
 
-같은 입력 → 같은 출력.
+Same input → same output.
 
-### I-3 between 종결성 (성능)
+### I-3 between termination (performance)
 
-string 길이가 한없이 늘어나지 않도록. `between("a", "b")` 같은 매우 가까운 위치도 합리적 길이의 새 문자열 (e.g. "an" 또는 "a~"). 최대 길이 제한 (~32 chars) 후엔 `regenerate` 권장.
+String length must not grow unbounded. Even for very close positions like `between("a", "b")`, the result should be a reasonable length (e.g. "an" or "a~"). After hitting the maximum length cap (~32 chars), `regenerate` is recommended.
 
-### I-4 regenerate 균등
+### I-4 regenerate uniformity
 
 ```
 result = regenerate(n)
@@ -74,35 +74,35 @@ result = regenerate(n)
    i < j ⇒ result[i] < result[j]
 ```
 
-균등 간격이라 향후 `between` 호출 시 길이 증가 안 정함.
+Even spacing keeps future `between` calls from inflating length.
 
-### I-5 compare 일관성
+### I-5 compare consistency
 
 ```
 ∀ a, b: compare(a, b) === Math.sign(a < b ? -1 : a > b ? 1 : 0)
 ```
 
-### I-6 ASCII 안전 알파벳
+### I-6 ASCII-safe alphabet
 
-본 spec은 ASCII printable 범위 [0x20, 0x7E] 또는 그 부분 집합으로 동작. Figma 실제 데이터에서 관찰되는 문자 (`!`, `~`, 알파넣자, 숫자) 모두 처리 가능.
+This spec operates on ASCII printable range [0x20, 0x7E] or a subset. All characters observed in actual Figma data (`!`, `~`, letters, digits) are handled.
 
-## 4. 알고리즘
+## 4. Algorithm
 
-### 4.1 Mid-point 방식 (추천)
+### 4.1 Mid-point approach (recommended)
 
-`between(a, b)` 알고리즘 (Figma 관행 따름):
+`between(a, b)` algorithm (follows Figma's convention):
 
 ```
 const ALPHABET = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
 //                ^ U+0020 ~ U+007E (95 chars)
 
 function between(a, b):
-  // Step 1: 길이 정렬 (짧은 쪽 패딩 — a는 minimum char, b는 maximum char로 패딩)
+  // Step 1: align lengths (pad shorter side — a with minimum char, b with maximum char)
   const minLen = max(a?.length ?? 1, b?.length ?? 1);
   const aPadded = (a ?? "").padEnd(minLen, ALPHABET[0]);
   const bPadded = (b ?? "").padEnd(minLen, ALPHABET[ALPHABET.length - 1]);
   
-  // Step 2: char 단위로 mid 찾기
+  // Step 2: find mid char-by-char
   let result = "";
   for (let i = 0; i < minLen; i++):
     const aChar = aPadded.charCodeAt(i);
@@ -114,22 +114,22 @@ function between(a, b):
       return result;
     else:
       result += String.fromCharCode(aChar);
-      // 다음 char로 — 더 정밀하게
+      // continue to the next char — go deeper
   
-  // Step 3: 모든 prefix가 동일하면 더 깊이 → append minimum char + 1
+  // Step 3: if all prefixes are equal, go deeper → append minimum char + 1
   result += String.fromCharCode(ALPHABET.charCodeAt(0) + 1);  // !
   return result;
 ```
 
 ### 4.2 regenerate(n)
 
-균등 간격으로 n개 위치 생성:
+Produce n evenly spaced positions:
 
 ```
 function regenerate(n):
   if n === 0: return []
   
-  // 1글자로 충분하면 ASCII range를 균등 분할
+  // If 1 character is enough, divide the ASCII range evenly
   const aStart = ALPHABET.charCodeAt(0);   // 0x20 (space)
   const aEnd = ALPHABET.charCodeAt(ALPHABET.length - 1); // 0x7E (~)
   const range = aEnd - aStart;
@@ -149,22 +149,22 @@ function compare(a, b):
 
 ## 5. Error Cases
 
-- E-1: `between(a, b)`에서 `a >= b` (lex order 어긋남) → throw `Error("between: a must be < b")`
-- E-2: `between` 결과 길이가 64 chars 초과 → throw `"between: position length exceeded; consider regenerate"`
-- E-3: 알파벳 외 문자 사용 시 (NULL, control char) → throw
+- E-1: `between(a, b)` where `a >= b` (lex order violated) → throw `Error("between: a must be < b")`
+- E-2: `between` result length exceeds 64 chars → throw `"between: position length exceeded; consider regenerate"`
+- E-3: characters outside the alphabet (NULL, control char) → throw
 
 ## 6. Out of Scope
 
-- O-1: 노드 추가 (D-4) — 본 함수는 v3에서 사용. v2에서는 형제 삭제 후 잔여 형제의 position 재정렬에만 사용 가능 (단, 보통 그대로 둬도 OK)
-- O-2: 다국어 / non-ASCII alphabet — 본 spec은 ASCII만
-- O-3: 분산 환경 (여러 client가 동시에 between 호출) — 본 도구는 단일 client
+- O-1: Node addition (D-4) — these functions are used in v3. In v2, they can only be used for rebalancing remaining siblings after deletion (although leaving them as-is is usually fine).
+- O-2: Multilingual / non-ASCII alphabet — this spec is ASCII only
+- O-3: Distributed environments (multiple clients calling between concurrently) — this tool is single-client
 
-## 7. 참조 자료
+## 7. References
 
-- Figma engineering blog: "Realtime Editing of Ordered Sequences" (fractional indexing 도입 배경)
-- 알고리즘은 본 spec 안에 self-contained — 외부 라이브러리 의존 없음
+- Figma engineering blog: "Realtime Editing of Ordered Sequences" (background on fractional indexing adoption)
+- The algorithm is self-contained within this spec — no external library dependency
 
-## 8. 단위 테스트 예시 (참조용)
+## 8. Unit test examples (for reference)
 
 ```ts
 describe('between', () => {

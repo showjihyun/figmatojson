@@ -1,6 +1,6 @@
 # figma-reverse
 
-.fig (Figma) 파일 역공학 → 구조화된 JSON + 에셋 export 파이프라인.
+.fig (Figma) file reverse-engineering pipeline → structured JSON + asset export.
 TypeScript / Node.js 20+ / vitest.
 
 ## Architecture (web subtree)

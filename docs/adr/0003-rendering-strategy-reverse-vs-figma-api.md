@@ -63,8 +63,8 @@ should look like this." Round 11 stage 2 caught:
 - `u:arrow-right` icon visible in `Input Box` confirm buttons (Figma
   hides it; gap had been latent for weeks until we fetched the real
   render).
-- "오류문구" red / "성공문구" green text styling (we render all gray).
-- Calendar dropdown text override duplication (`최근 / 최근 / 쥼월`).
+- "error message" red / "success message" green text styling (we render all gray).
+- Calendar dropdown text override duplication (`Recent / Recent / This month`).
 
 Each was found in seconds once we had the matching `figma.png`. Without
 it, weeks of guess-and-check.
@@ -107,5 +107,5 @@ So: keep both, but ringfence them.
   unblocks.
 - `web/scripts/build-audit-inventory.mjs` + `audit-round11-screenshots.mjs`
   + `figma-fetch.mjs` — the three scripts that materialize the harness.
-- `docs/specs/web-render-fidelity-round*.spec.md` — the per-round
-  fixes built on top.
+- `docs/specs/archive/web-render-fidelity-round*.spec.md` — the per-round
+  fixes built on top (closed rounds; see `archive/INDEX.md`).

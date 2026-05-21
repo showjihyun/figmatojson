@@ -1,75 +1,56 @@
 # spec/audit-harness
 
-| 항목 | 값 |
+| Field | Value |
 |---|---|
-| 상태 | Approved (Phase 1 — round 30 transition) |
-| 구현 | `web/scripts/audit-roundtrip.mjs`, `audit-roundtrip-canvas-diff.mjs`, `audit-rest-as-plugin.mjs` |
-| 출력 | `docs/audit-roundtrip/<fixture-name>/report.json` + `canvas-diff.json` |
-| 형제 | `audit-oracle.spec.md` (plugin oracle), `round-trip-invariants.spec.md` (parser self-roundtrip), `SPEC-repack.md` (3-mode contract), `docs/HARNESS.md` (CLI 측 harness) |
+| Status | Approved (Phase 1 — round 30 transition) |
+| Implementation | `web/scripts/audit-roundtrip.mjs`, `audit-roundtrip-canvas-diff.mjs`, `audit-rest-as-plugin.mjs` |
+| Output | `docs/audit-roundtrip/<fixture-name>/report.json` + `canvas-diff.json` |
+| Siblings | `audit-oracle.spec.md` (plugin oracle), `round-trip-invariants.spec.md` (parser self-roundtrip), `SPEC-repack.md` (3-mode contract), `docs/HARNESS.md` (CLI-side harness) |
 
-## 1. 목적
+## 1. Goal
 
-**Phase 1 baseline**: 우리 web 파이프라인 (`POST /api/upload` → `POST /api/save`)
-이 *no-op load→save* 사이클에서 .fig 의 어느 부분을 보존하고 어느 부분을
-잃는지를 자동 측정한다. 결과는 "Figma 가 다시 열어도 정상 표시" 의 *하한*
-— 여기서 떨어지는 데이터는 Figma 에 다시 로드해도 살아남지 못한다.
+**Phase 1 baseline**: automatically measure which parts of a .fig our web pipeline (`POST /api/upload` → `POST /api/save`) preserves and which parts it loses across a *no-op load→save* cycle. The result is the *lower bound* of "Figma can re-open it correctly" — data that fails here will not survive a reload into Figma.
 
-3 스크립트가 *서로 다른 정밀도* 로 같은 round-trip 을 본다:
+Three scripts watch the same round-trip at *different fidelities*:
 
-| 스크립트 | 정밀도 | 대상 |
+| Script | Fidelity | Target |
 |---|---|---|
-| `audit-roundtrip.mjs` | ZIP entry byte-compare | container 레이어 (canvas.fig / images / meta.json) |
-| `audit-roundtrip-canvas-diff.mjs` | Kiwi message field walk | canvas.fig 의 의미 변화 |
-| `audit-rest-as-plugin.mjs` | `audit-oracle` 프로토콜 | Figma REST → 우리 parser 의 차이 |
-| `audit-raw-coverage.mjs` (round 17) | raw vs documentJson field walk | wire-format 필드 중 client 에 안 도달 / 직렬화 손실 측정 |
-| `audit-properties-coverage.mjs` (round 17) | componentPropDefs / Assignments / VARIABLE 정합성 | broken / orphan property metadata 측정 |
+| `audit-roundtrip.mjs` | ZIP entry byte-compare | Container layer (canvas.fig / images / meta.json) |
+| `audit-roundtrip-canvas-diff.mjs` | Kiwi message field walk | Semantic changes in canvas.fig |
+| `audit-rest-as-plugin.mjs` | `audit-oracle` protocol | Differences between Figma REST and our parser |
+| `audit-raw-coverage.mjs` (round 17) | Raw vs documentJson field walk | Measure wire-format fields that do not reach the client or are lost on serialization |
+| `audit-properties-coverage.mjs` (round 17) | componentPropDefs / Assignments / VARIABLE coherence | Measure broken / orphan property metadata |
 
-본 spec 은 3 스크립트의 *공통 calling convention, 입출력, 분류 룰* 을
-source of truth 로 둔다.
+This spec holds the *shared calling convention, I/O, and classification rules* of the three scripts as the source of truth.
 
-## 2. 공통 환경
+## 2. Shared environment
 
-- I-E1 모든 스크립트는 web backend 가 `:5274` 에 떠있어야 한다 (`cd web &&
-  npm run dev:server`). port override 는 `AUDIT_BACKEND` 환경변수.
-- I-E2 출력 루트 = `docs/audit-roundtrip/<basename(fixture, '.fig')>/`.
-  스크립트마다 다른 파일 (`report.json`, `canvas-diff.json` 등) 을 같은
-  fixture 디렉토리에 적재한다.
-- I-E3 default fixtures = `['docs/bvp.fig', 'docs/메타리치 화면 UI Design.fig']`.
-  CLI 인자로 절대 경로 또는 repo-relative 경로 N 개를 override 가능.
-- I-E4 NaN 등치 룰: 두 값이 모두 number 이고 둘 다 `NaN` 이면 동일로 처리
-  (`audit-oracle.spec.md §I-A14` 와 동일 정책 — kiwi schema 가 unset float
-  default 로 NaN bit-pattern 을 emit).
-- I-E5 byte 비교는 `bytesEqual(a, b)` 단일 helper — 각 스크립트가 같은
-  구현을 carry. 차이 발견 시 첫 분기 offset 까지 기록 (triage 용).
-- I-E6 스크립트는 fixture 마다 try/catch — 한 파일이 실패해도 나머지는
-  진행. 종료 코드는 main 자체의 unhandled exception 만 1.
+- I-E1 Every script requires the web backend running on `:5274` (`cd web && npm run dev:server`). Port override via the `AUDIT_BACKEND` environment variable.
+- I-E2 Output root = `docs/audit-roundtrip/<basename(fixture, '.fig')>/`. Each script writes its own file (`report.json`, `canvas-diff.json`, etc.) into the same fixture directory.
+- I-E3 Default fixtures = `['docs/bvp.fig', 'docs/<metarich-ui-design>.fig']` (the second path is the metarich UI design fixture; its on-disk filename is in Korean). CLI args can override with N absolute or repo-relative paths.
+- I-E4 NaN equality rule: when both values are numbers and both `NaN`, treat as equal (same as `audit-oracle.spec.md §I-A14` — kiwi schema emits the NaN bit-pattern as the default for unset floats).
+- I-E5 Byte comparison uses a single helper `bytesEqual(a, b)` — every script carries the same implementation. On difference, the first divergence offset is also recorded (for triage).
+- I-E6 Each script has a per-fixture try/catch — failure on one file does not stop the rest. The process exit code is 1 only on an unhandled exception in `main` itself.
 
-## 3. `audit-roundtrip.mjs` — Container 레이어 byte-compare
+## 3. `audit-roundtrip.mjs` — Container-layer byte-compare
 
-### 3.1 흐름
+### 3.1 Flow
 
-- I-R1 fixture bytes 를 `multipart/form-data` 로 `POST /api/upload` →
-  `{ sessionId, pageCount, nodeCount, ...UploadFigOutput }` 응답.
-- I-R2 동일 sessionId 로 `POST /api/save/:id` (no-op edit) →
-  `application/octet-stream` 응답을 `Uint8Array` 로 수신.
-- I-R3 원본 + round-trip 양쪽을 `unzipFig` 으로 푼다 — ZIP magic
-  (`0x50 0x4b`) 검사 후 entry map. 비-ZIP raw fig-kiwi 는 single-entry map
-  (`<raw>canvas.fig` 키) 으로 wrap — 전체 흐름이 ZIP 가정으로 통일.
-- I-R4 entry 별 byte-compare → `entries[]` 와 `summary` 생성 (§3.2).
+- I-R1 Send fixture bytes as `multipart/form-data` to `POST /api/upload` → response `{ sessionId, pageCount, nodeCount, ...UploadFigOutput }`.
+- I-R2 Call `POST /api/save/:id` (no-op edit) under the same sessionId → receive the `application/octet-stream` response as `Uint8Array`.
+- I-R3 Unzip both original and round-trip via `unzipFig` — verify ZIP magic (`0x50 0x4b`), then build an entry map. A non-ZIP raw fig-kiwi is wrapped into a single-entry map (key `<raw>canvas.fig`) — keeping the whole flow ZIP-assumed.
+- I-R4 Per-entry byte compare → emit `entries[]` and `summary` (§3.2).
 
-### 3.2 분류
+### 3.2 Classification
 
-각 entry 는 다음 4 종 status 중 하나로 분류:
+Each entry is classified into one of four statuses:
 
-- I-R5 `identical`: byte-equal. `origBytes`, `rtBytes` 동일 값 기록.
-- I-R6 `differs`: 양쪽 모두 존재하지만 bytes 다름. 추가 필드 `deltaBytes`
-  (rt - orig), `firstDiffOffset` (양쪽 byte 가 처음 갈리는 offset, 길이가
-  더 짧은 쪽 미만으로 한정) 기록.
-- I-R7 `missing-in-roundtrip`: orig 에만 존재. (반드시 우리 측 손실)
-- I-R8 `extra-in-roundtrip`: rt 에만 존재. (우리 측 추가 — 정상 케이스
-  거의 없음, 발견 시 회귀 의심.)
+- I-R5 `identical`: byte-equal. `origBytes`, `rtBytes` are recorded as identical values.
+- I-R6 `differs`: present on both sides but bytes differ. Additional fields `deltaBytes` (rt - orig), `firstDiffOffset` (the offset where the two byte arrays first diverge, capped at the shorter length).
+- I-R7 `missing-in-roundtrip`: present only in orig. (Definitively a loss on our side.)
+- I-R8 `extra-in-roundtrip`: present only in rt. (Added on our side — almost never legitimate; suspect a regression when seen.)
 
-### 3.3 `summary` 출력
+### 3.3 `summary` output
 
 ```ts
 interface RoundtripSummary {
@@ -84,17 +65,16 @@ interface RoundtripSummary {
 }
 ```
 
-- I-R9 `report.json` 의 entries 는 entry name `sort()` 순. 결정성 보장.
-- I-R10 `identicalRatio` 는 entry *byte 합* 기준 — entry 개수 기준 아님
-  (canvas.fig 가 보통 가장 큰 단일 entry 라 의미 있는 가중).
+- I-R9 The entries in `report.json` are in entry-name `sort()` order. Guarantees determinism.
+- I-R10 `identicalRatio` is computed against the *sum of entry bytes* — not entry counts (canvas.fig is usually the largest single entry, providing a meaningful weighting).
 
-### 3.4 출력 schema (`report.json`)
+### 3.4 Output schema (`report.json`)
 
 ```ts
 {
-  fixture:    string;        // CLI 입력 그대로 (rel/abs 보존)
-  origBytes:  number;        // 원본 .fig 전체 바이트
-  rtBytes:    number;        // round-trip .fig 전체 바이트
+  fixture:    string;        // CLI input verbatim (rel/abs preserved)
+  origBytes:  number;        // total bytes of the original .fig
+  rtBytes:    number;        // total bytes of the round-trip .fig
   upload:     UploadFigOutput;
   summary:    RoundtripSummary;
   entries:    Array<RoundtripEntry>;
@@ -103,159 +83,94 @@ interface RoundtripSummary {
 
 ## 4. `audit-roundtrip-canvas-diff.mjs` — Kiwi message field walk
 
-`audit-roundtrip.mjs` 가 *canvas.fig 가 다르다* 만 알려줄 때, 본 스크립트가
-*어느 필드가, 어떻게 다른지* 를 알려준다.
+When `audit-roundtrip.mjs` only reports *canvas.fig differs*, this script tells you *which field differs and how*.
 
-### 4.1 흐름
+### 4.1 Flow
 
-- I-C1 §3.1 의 upload→save 와 동일 — 그러나 `report.json` 을 읽지 않고
-  자체적으로 round-trip 다시 수행 (스크립트 독립성).
-- I-C2 양쪽 .fig 에서 `canvas.fig` entry 만 추출 (`extractCanvasFig`).
-  비-ZIP raw 도 그대로 통과.
-- I-C3 양쪽 canvas.fig 를 `decodeFigCanvas` (dist/decoder.js) 로 디코드 —
-  archive version + schema definition 수 + message tree 산출.
-- I-C4 `walkDiff(orig.message, rt.message)` 로 generator-based 재귀 walk.
+- I-C1 Identical upload→save to §3.1 — but does not read `report.json`; performs the round-trip itself (script independence).
+- I-C2 Extracts the `canvas.fig` entry from both .fig files (`extractCanvasFig`). Non-ZIP raw passes through.
+- I-C3 Decodes both canvas.fig sides via `decodeFigCanvas` (dist/decoder.js) — yielding archive version + schema definition count + message tree.
+- I-C4 `walkDiff(orig.message, rt.message)` runs a generator-based recursive walk.
 
-### 4.2 Diff 분류
+### 4.2 Diff classification
 
-`walkDiff` 가 emit 하는 record 의 `kind`:
+The `kind` of records emitted by `walkDiff`:
 
-- I-C5 `type-mismatch`: `typeOf(orig) !== typeOf(rt)`. type set =
-  `{ object, array, bytes, number, string, boolean, nullish }`.
-- I-C6 `added`: rt object 에 있고 orig 에 없는 key.
-- I-C7 `removed`: orig object 에 있고 rt 에 없는 key.
-- I-C8 `array-len`: 같은 path 의 array 길이가 다름. 길이 차이만 emit
-  하고 이어서 `min(orig.length, rt.length)` 까지 element 별 walkDiff
-  재귀 (앞부분 element 의 diff 도 모두 collect).
-- I-C9 `changed`: scalar 또는 bytes 가 다름. NaN==NaN 은 동일로 처리
-  (§I-E4).
+- I-C5 `type-mismatch`: `typeOf(orig) !== typeOf(rt)`. Type set = `{ object, array, bytes, number, string, boolean, nullish }`.
+- I-C6 `added`: a key present in the rt object but not in orig.
+- I-C7 `removed`: a key present in orig but not in rt.
+- I-C8 `array-len`: arrays at the same path have different lengths. Emit only the length diff and continue per-element walkDiff recursion up to `min(orig.length, rt.length)` (still collecting element-level diffs in the head).
+- I-C9 `changed`: scalar or bytes differ. NaN==NaN is treated as equal (§I-E4).
 
-### 4.3 집계
+### 4.3 Aggregation
 
-- I-C10 `aggregateDiffs(diffs)` 가 `byKind` (kind→count), `byField`
-  (path 의 array 인덱스를 `[]` 로 normalize 한 키 → count + per-kind
-  breakdown) 를 계산. `topFields` = byField top-30 desc.
-- I-C11 `fieldKey(path)` = `path.replace(/\[\d+\]/g, '[]')` — `nodeChanges[42].size.x`
-  와 `nodeChanges[1280].size.x` 는 같은 field 로 집계.
+- I-C10 `aggregateDiffs(diffs)` computes `byKind` (kind→count) and `byField` (key = path with array indices normalized to `[]` → count + per-kind breakdown). `topFields` = top-30 of byField, descending.
+- I-C11 `fieldKey(path)` = `path.replace(/\[\d+\]/g, '[]')` — `nodeChanges[42].size.x` and `nodeChanges[1280].size.x` aggregate to the same field.
 
-### 4.4 출력 schema (`canvas-diff.json`)
+### 4.4 Output schema (`canvas-diff.json`)
 
 ```ts
 {
   fixture:           string;
   canvasOrigBytes:   number;
   canvasRtBytes:     number;
-  schemaDefsOrig:    number;     // schema definition 개수 (의미적 동등 검증용)
+  schemaDefsOrig:    number;     // schema definition count (for semantic-equivalence checks)
   schemaDefsRt:      number;
   aggregate: {
     total:           number;
     byKind:          Record<DiffKind, number>;
     topFields:       Array<[fieldPath, { count, kinds: Record<DiffKind, number> }]>;
   };
-  sample:            DiffRecord[];   // 최대 200 entries (truncation)
+  sample:            DiffRecord[];   // up to 200 entries (truncation)
 }
 ```
 
-- I-C12 `sample` 은 발견된 순서 첫 200개. truncation 시 빈도 분포 보존
-  안 함 — sampling 은 triage 용이고 빈도 신호는 `aggregate` 가 carry.
+- I-C12 `sample` is the first 200 entries in discovery order. Truncation does not preserve frequency distribution — sampling is for triage, the frequency signal is carried by `aggregate`.
 
-## 5. `audit-rest-as-plugin.mjs` — Plugin oracle 의 REST simulation
+## 5. `audit-rest-as-plugin.mjs` — REST simulation of the plugin oracle
 
-`audit-oracle.spec.md` 가 정의한 plugin sandbox 출력을 **Figma 데스크탑
-plugin 없이** 재현 — REST API (`/v1/files/:key`) 응답을 adapter 로 변환.
-human-in-the-loop 없이 oracle 프로토콜 검증 가능.
+Reproduces the plugin-sandbox output defined by `audit-oracle.spec.md` **without the Figma Desktop plugin** — adapts the REST API (`/v1/files/:key`) response. Allows verifying the oracle protocol without a human in the loop.
 
-### 5.1 환경 + 코퍼스
+### 5.1 Environment + corpora
 
-- I-X1 `.env.local` 에서 `FIGMA_TOKEN` (필수) + per-corpus key
-  (`FIGMA_FILE_KEY` for metarich / `FIGMA_FILE_KEY_BVP` for bvp).
-- I-X2 코퍼스 map = `{ bvp: { figPath, keyEnv }, metarich: { figPath, keyEnv } }`.
-  CLI 인자로 코퍼스 이름 N 개 (default `['bvp']`).
-- I-X3 `.env.local` 부재 / 토큰 부재 / key 부재는 *fixture-level* 에러
-  (catch + 계속) — main 종료 안 함.
+- I-X1 From `.env.local`: `FIGMA_TOKEN` (required) + per-corpus keys (`FIGMA_FILE_KEY` for metarich / `FIGMA_FILE_KEY_BVP` for bvp).
+- I-X2 Corpus map = `{ bvp: { figPath, keyEnv }, metarich: { figPath, keyEnv } }`. CLI accepts N corpus names (default `['bvp']`).
+- I-X3 Missing `.env.local` / missing token / missing key are *fixture-level* errors (caught + continue) — main does not exit.
 
-### 5.2 흐름
+### 5.2 Flow
 
-- I-X4 REST `GET https://api.figma.com/v1/files/<KEY>` (header
-  `X-Figma-Token`) → `restJson.document` 가 root.
-- I-X5 `adaptNode(restJson.document)` 가 `audit-oracle.spec.md §3` 의
-  plugin sandbox 출력 shape 을 emit (§5.3).
-- I-X6 같은 fixture 의 local `.fig` 를 `POST /api/upload` 으로 우리 backend
-  에 적재 → `sessionId`.
-- I-X7 `POST /api/audit/compare { sessionId, figmaTree: adaptedTree }` →
-  `AuditCompareOutput` 응답.
-- I-X8 console 에 `summary` + `topFields` top-15 + sample diffs top-5 를
-  출력. **JSON 파일 미저장** — diff 분포가 발견 즉시 사람이 읽는 게 목적.
+- I-X4 REST `GET https://api.figma.com/v1/files/<KEY>` (header `X-Figma-Token`) → `restJson.document` is the root.
+- I-X5 `adaptNode(restJson.document)` emits the plugin-sandbox output shape of `audit-oracle.spec.md §3` (§5.3).
+- I-X6 Upload the local `.fig` of the same fixture to our backend via `POST /api/upload` → `sessionId`.
+- I-X7 `POST /api/audit/compare { sessionId, figmaTree: adaptedTree }` → `AuditCompareOutput` response.
+- I-X8 Prints `summary` + top-15 `topFields` + top-5 sample diffs to the console. **Does not write JSON files** — the diff distribution is meant for immediate human reading.
 
 ### 5.3 REST → plugin shape adaptation
 
-`audit-oracle.spec.md §3 (I-S1~10)` 의 직렬화 계약을 REST 응답으로 재현.
-주요 변환 포인트:
+Reproduces the serialization contract of `audit-oracle.spec.md §3 (I-S1..10)` from a REST response. Key transformation points:
 
-- I-X9 좌표계: REST 의 `absoluteBoundingBox` 를 *parent 기준 상대 좌표* 로
-  역변환. `parentAbs = { x, y }` 를 자식 walk 시 누적, `transform.m02 = bbox.x
-  - parentAbs.x`, `m12 = bbox.y - parentAbs.y`. 우리 parser 의 `transform`
-  이 parent-relative 라 직접 비교 가능해진다.
-- I-X10 fontName: REST 가 `style.fontFamily` (display) + `style.fontPostScriptName`
-  (실제 PS 이름) 을 carry. plugin 측이 emit 하는 `fontName.style` 은 PS
-  이름 끝의 `-<style>` 토큰. adapter 는 `ps.lastIndexOf('-')` 로 split —
-  display `family` 와 PS `family` 가 다른 경우 (예: `Pretendard` vs
-  `PretendardVariable`) 도 처리.
-- I-X11 fills/strokes/strokeWeight: 항상 emit (배열이 빈 경우에도) — plugin
-  sandbox 와 동일 정책. `fills.length` / `strokes.length` 비교가 adapter
-  생략으로 흐려지는 것 방지.
-- I-X12 default omission: `opacity !== 1`, `rotation !== 0`, `cornerRadius !== 0`
-  일 때만 emit (plugin sandbox 와 동일 — `audit-oracle §I-S4`).
-- I-X12a **rotation 단위 + 부호 정규화**: REST 는 `node.rotation` 을
-  *radian, math convention (CCW positive)* 으로 carry. plugin sandbox 는
-  *degrees, plugin convention (CW positive)* 으로 emit (`audit-oracle §I-A4a`).
-  adapter 는 `out.rotation = -node.rotation * 180 / Math.PI` 로 두 차원을
-  맞추고, 변환 후 값이 0 (또는 가까우면 §I-A15 의 0.5 tolerance 가 흡수)
-  이면 omit. 이 변환 누락은 회전된 모든 노드에서 audit false-positive 2K+
-  를 만들기 때문에 별도 invariant 로 못 박는다 (HPAI corpus baseline 측정
-  근거: 2026-05-06 hpai run, 2060 rotation diffs → 0 예상).
+- I-X9 Coordinate system: convert REST's `absoluteBoundingBox` back to *parent-relative coordinates*. Accumulate `parentAbs = { x, y }` during child walk, `transform.m02 = bbox.x - parentAbs.x`, `m12 = bbox.y - parentAbs.y`. This makes our parser's parent-relative `transform` directly comparable.
+- I-X10 fontName: REST carries `style.fontFamily` (display) + `style.fontPostScriptName` (the actual PS name). The plugin side emits `fontName.style` as the `-<style>` tail of the PS name. The adapter splits via `ps.lastIndexOf('-')` — also handles cases where display `family` differs from PS `family` (e.g., `Pretendard` vs `PretendardVariable`).
+- I-X11 fills/strokes/strokeWeight: always emit (even when arrays are empty) — same policy as the plugin sandbox. Prevents `fills.length` / `strokes.length` comparisons from being blurred by adapter omission.
+- I-X12 Default omission: emit only when `opacity !== 1`, `rotation !== 0`, `cornerRadius !== 0` (same as the plugin sandbox — `audit-oracle §I-S4`).
+- I-X12a **Rotation unit + sign normalization**: REST carries `node.rotation` in *radians, math convention (CCW positive)*. The plugin sandbox emits *degrees, plugin convention (CW positive)* (`audit-oracle §I-A4a`). The adapter aligns the two with `out.rotation = -node.rotation * 180 / Math.PI`, and omits when the converted value is 0 (or close enough that the 0.5 tolerance of §I-A15 absorbs it). Missing this conversion produces 2K+ audit false-positives on every rotated node, so it is enshrined as a separate invariant (rationale: HPAI corpus baseline measurement, 2026-05-06 hpai run, 2060 rotation diffs → expected 0).
 
-### 5.4 Caveats vs. real plugin trial
+### 5.4 Caveats vs. a real plugin trial
 
-- I-X13 REST 는 Figma 클라우드의 *현재* 파일 상태 — desktop plugin 은 desktop
-  app 이 *로드한* 상태. 같은 `.fig` 로 둘 다 시작하면 실용상 동일.
-- I-X14 REST 는 일부 plugin 전용 필드를 노출하지 않는다 — 그러나 oracle 의
-  COMPARABLE_FIELDS (§audit-oracle §5.2) 안 모든 필드는 REST 에 존재.
+- I-X13 REST shows the *current* file state on Figma's cloud — desktop plugin shows the state *loaded* by the desktop app. Starting both from the same `.fig` is practically identical.
+- I-X14 REST does not expose some plugin-only fields — but every field in the oracle's COMPARABLE_FIELDS (§audit-oracle §5.2) exists in REST.
 
-## 6. 비대상
+## 6. Non-goals
 
-- ❌ **출력 파일 schema 의 backward-compatibility 보장**. round 30+ 에서
-  `report.json` / `canvas-diff.json` 의 형태가 변경될 수 있음 — diff 자료는
-  *다음 라운드의 입력* 이지 production artifact 아님. 변경 시 본 spec
-  업데이트 필요.
-- ❌ **CI 통합**. 본 harness 는 dev local 에서 수동 실행 — backend 가 떠있어야
-  하고 fixture 가 git LFS 가 아니라 docs/ 에 raw 로 들어있다. CI 전환은
-  별도 라운드.
-- ❌ **자동 회귀 alert**. report.json 이 baseline 보다 떨어지는지 자동
-  비교 안 함. 사람이 git diff 로 본다.
-- ❌ **canvas-diff.mjs 의 round-trip 검증**. orig=rt 가 의미상 동등이면
-  diff `total = 0` 이 정답이지만, 현재 baseline 은 *0 이 아닌 값* 이고
-  본 harness 는 그 값을 *측정* 만 한다. "0 으로 만들기" 는 후속 라운드.
-- ❌ **multi-page 별도 audit**. REST as plugin 은 root document 부터 walk —
-  `audit-oracle §I-X4` 는 `figma.currentPage` 만 다룸. REST 는 모든 페이지
-  를 한 번에 받으므로 본 스크립트는 root 부터 비교 (sandbox 와 다른 점).
-  결과: REST 측 노드 수가 plugin 측보다 항상 큼 — `summary.onlyInFigma` 가
-  플러그인 trial 보다 더 노이즈 한 신호.
+- ❌ **Output file schema backward compatibility**. The shape of `report.json` / `canvas-diff.json` can change in round 30+ — these are *inputs to the next round*, not production artifacts. Update this spec when the shape changes.
+- ❌ **CI integration**. This harness runs manually on local dev — it requires the backend running and the fixtures live raw in `docs/` (not git LFS). CI integration is a separate round.
+- ❌ **Automated regression alerts**. We do not automatically compare report.json against a baseline. Humans read the git diff.
+- ❌ **Round-trip verification for canvas-diff.mjs**. Semantically equivalent orig=rt should yield `total = 0`, but the current baseline is *non-zero* and this harness merely *measures* the value. Driving it to 0 is a follow-up round.
+- ❌ **Per-page multi-page audit**. REST-as-plugin walks from the root document — `audit-oracle §I-X4` covers only `figma.currentPage`. REST gets every page at once, so this script compares from the root (different from the sandbox). Consequence: REST always has more nodes than the plugin side — `summary.onlyInFigma` is a noisier signal than in a plugin trial.
 
 ## 7. Resolved questions
 
-- **`audit-roundtrip.mjs` 가 entry name 을 sort 한 결과 순서로 emit 하는
-  이유?** report.json 이 git 에 들어가는 *artifact* — diff noise 를 줄이려면
-  결정적 순서 필요. ZIP entry 의 자연 순서는 OS / adm-zip 버전에 따라 변동.
-- **`canvas-diff.mjs` 가 sample 200 으로 자르는 이유?** 메타리치 35K 노드
-  decode → walkDiff 로 발생할 수 있는 record 가 수만 단위. JSON 파일 10MB+
-  를 git 에 두는 건 비용 대비 가치 낮음. aggregate 가 분포 신호의 진짜
-  source.
-- **REST adapter 가 plugin sandbox 와 *완벽히* 일치해야 하나?** 아니. oracle
-  의 비교 룰 (`audit-oracle §5`) 이 default omission / type alias / NaN
-  등치 / 0.5px tolerance 로 representational 차이 대부분 흡수. adapter 는
-  *의미적 등가* 만 책임 — wire 형태는 살짝 달라도 oracle 결과는 같다.
-- **왜 3 스크립트가 같은 unzipFig / bytesEqual / loadEnv 를 carry 하나
-  (DRY 위반)?** 각 스크립트가 *독립 실행 가능* 해야 한다 — backend down
-  추적, individual fixture audit 등. 공유 helper 화는 round 30+ 에서
-  스크립트 수가 5개 넘으면 재고려.
+- **Why does `audit-roundtrip.mjs` emit entries sorted by name?** report.json is an *artifact committed to git* — deterministic order is required to reduce diff noise. Natural ZIP-entry order varies by OS / adm-zip version.
+- **Why does `canvas-diff.mjs` truncate samples to 200?** Decoding 35K nodes of metarich → walkDiff can emit tens of thousands of records. Putting a 10MB+ JSON in git is low value-vs-cost. The frequency distribution signal's true source is `aggregate`.
+- **Does the REST adapter have to *perfectly* match the plugin sandbox?** No. The oracle's comparison rules (`audit-oracle §5`) absorb most representational differences with default omission / type alias / NaN equality / 0.5px tolerance. The adapter is responsible only for *semantic equivalence* — the wire shape can differ slightly while oracle output stays the same.
+- **Why do all 3 scripts carry their own unzipFig / bytesEqual / loadEnv (DRY violation)?** Each script must be *independently runnable* — for tracing backend-down, individual-fixture audit, etc. Lifting them into a shared helper is reconsidered in round 30+ once the script count exceeds 5.

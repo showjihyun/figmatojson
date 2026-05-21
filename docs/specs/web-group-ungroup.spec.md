@@ -1,17 +1,17 @@
 # spec/web-group-ungroup
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `web/server/adapters/driven/applyTool.ts` 의 `'group'` / `'ungroup'` 케이스 |
-| 테스트 | `web/server/adapters/driven/applyTool.test.ts` |
-| 의존 | `__msg__` sentinel patch + `rebuildDocumentFromMessage` (이미 `duplicate` 로 검증됨) |
+| Status | Approved |
+| Implementation | `'group'` / `'ungroup'` cases in `web/server/adapters/driven/applyTool.ts` |
+| Tests | `web/server/adapters/driven/applyTool.test.ts` |
+| Dependencies | `__msg__` sentinel patch + `rebuildDocumentFromMessage` (already validated through `duplicate`) |
 
-## 1. 목적
+## 1. Goal
 
-AI 채팅 (`Apply edits via the figma_editor tools.`) 도구로 GROUP 노드를 만들고 해체할 수 있게 한다. 사용자 수동 group/ungroup 도 동일 use case에 위임하면 코드 일원화.
+Allow the AI chat (`Apply edits via the figma_editor tools.`) tools to create and dissolve GROUP nodes. User-initiated group/ungroup actions delegate to the same use case to unify the code path.
 
-기존 leaf-only 채팅 도구들과 달리 트리 구조를 바꾸는 작업 — `duplicate` 가 도입한 `__msg__` sentinel + `nodeChanges` 전체 스냅샷 patch 패턴 위에 올린다.
+Unlike existing leaf-only chat tools, this operation modifies tree structure — it is built on top of the `__msg__` sentinel + full `nodeChanges` snapshot patch pattern introduced by `duplicate`.
 
 ## 2. Input / Output
 
@@ -20,75 +20,75 @@ group   = { name: 'group',   input: { guids: string[], parentGuid?: string, name
 ungroup = { name: 'ungroup', input: { guid: string } }
 ```
 
-- `group`: 2개 이상의 형제(sibling) 노드를 새 GROUP 으로 감싼다.
-- `ungroup`: 정확히 한 GROUP 의 내용을 부모로 끌어올리고 GROUP 자체를 삭제.
-- 출력은 다른 채팅 도구와 동일하게 void — `applyTool` 의 try/catch 밖에서 ToolDispatcher 가 `{ok}` 결과로 wrap.
+- `group`: wraps 2 or more sibling nodes into a new GROUP.
+- `ungroup`: lifts the contents of exactly one GROUP into the parent and removes the GROUP itself.
+- Like other chat tools, the return is void — `applyTool` wraps the result outside the try/catch and ToolDispatcher returns `{ok}`.
 
 ## 3. Group invariants
 
-- I-G1 `guids` 가 모두 같은 부모를 공유해야 함. 다른 부모면 `Error("group: guids must share a parent")`.
-- I-G2 새 GROUP 의 `guid` 는 `nodeChanges` 의 max localID + 1 (sessionID 0). `duplicate` 와 동일 규칙.
-- I-G3 새 GROUP 의 `parentIndex.guid` = 멤버들의 공통 부모. `parentIndex.position` = lex 가장 앞선 멤버의 position 그대로 — 그 멤버는 GROUP 안으로 이동하므로 부모 슬롯이 비어 그 위치를 GROUP 이 자연스럽게 차지한다 (충돌 없음).
-- I-G4 새 GROUP 의 `transform.m02 = min(member.transform.m02)`, `transform.m12 = min(member.transform.m12)` — 즉 멤버 bbox 의 좌상단.
-- I-G5 새 GROUP 의 `size` = bbox of members (`{x: maxX - minX, y: maxY - minY}`).
-- I-G6 각 멤버 노드:
-  - `parentIndex.guid` ← 새 GROUP 의 guid
-  - `parentIndex.position` ← 멤버들 사이 상대 순서 보존 (원래 position 그대로 — 새 부모 안에서도 lex 순서가 같으므로)
-  - `transform.m02 -= GROUP.transform.m02` (부모-로컬 좌표로 변환)
+- I-G1 All `guids` must share the same parent. Different parents → `Error("group: guids must share a parent")`.
+- I-G2 The new GROUP `guid` = max localID in `nodeChanges` + 1 (sessionID 0). Same rule as `duplicate`.
+- I-G3 The new GROUP `parentIndex.guid` = the members' common parent. `parentIndex.position` = the position of the lex-first member, unchanged — that member moves into the GROUP so its slot in the parent becomes free, and the GROUP naturally takes that position (no collision).
+- I-G4 New GROUP `transform.m02 = min(member.transform.m02)`, `transform.m12 = min(member.transform.m12)` — the top-left of the member bbox.
+- I-G5 New GROUP `size` = bbox of members (`{x: maxX - minX, y: maxY - minY}`).
+- I-G6 For each member node:
+  - `parentIndex.guid` ← new GROUP's guid
+  - `parentIndex.position` ← retained as-is (relative ordering among members is preserved — lex order is the same inside the new parent)
+  - `transform.m02 -= GROUP.transform.m02` (convert to parent-local coordinates)
   - `transform.m12 -= GROUP.transform.m12`
-- I-G7 멤버의 `size`, 회전 채널 (`transform.m00/m01/m10/m11`), fillPaints, children 등은 변경되지 않음.
-- I-G8 멤버 자식들은 변경되지 않음 — 자식들의 `parentIndex.guid` 는 여전히 멤버를 가리킨다 (간접 자손은 group 영향권 밖).
-- I-G9 `journal.record` 는 `{guid: '__msg__', field: 'nodeChanges', before, after}` 한 건. label = `AI: group`.
+- I-G7 Member `size`, rotation channels (`transform.m00/m01/m10/m11`), fillPaints, children, etc. are unchanged.
+- I-G8 Member children are unchanged — children's `parentIndex.guid` still points to the member (indirect descendants are unaffected by the group operation).
+- I-G9 `journal.record` writes one entry `{guid: '__msg__', field: 'nodeChanges', before, after}`. label = `AI: group`.
 
 ## 4. Ungroup invariants
 
-- I-U1 대상 노드의 `type === 'GROUP'` 이어야 함. 아니면 `Error("ungroup: target is not a GROUP")`.
-- I-U2 GROUP 의 직속 자식 N개 각각 (자식들의 GROUP-내부 lex 순서대로):
-  - `parentIndex.guid` ← GROUP 의 `parentIndex.guid` (할아버지)
-  - `parentIndex.position` ← `between(prev, nextSiblingPos)` 누적 — `prev` 는 첫 자식의 경우 `GROUP.position`, 이후엔 직전 자식이 받은 새 position. 즉 (GROUP.pos, nextSiblingPos) 구간 안에 사다리 모양으로 N개를 끼워 넣음. 자식들의 상대 lex 순서 보존.
-  - `transform.m02 += GROUP.transform.m02` (할아버지-로컬 좌표로 환원)
+- I-U1 Target node must satisfy `type === 'GROUP'`. Otherwise → `Error("ungroup: target is not a GROUP")`.
+- I-U2 For each of the GROUP's N direct children (in lex order inside the GROUP):
+  - `parentIndex.guid` ← GROUP's `parentIndex.guid` (the grandparent)
+  - `parentIndex.position` ← cumulative `between(prev, nextSiblingPos)` — `prev` is `GROUP.position` for the first child, and the previously-assigned position for subsequent children. This inserts N children ladder-style into the (GROUP.pos, nextSiblingPos) interval. Relative lex ordering among children is preserved.
+  - `transform.m02 += GROUP.transform.m02` (convert back to grandparent-local coordinates)
   - `transform.m12 += GROUP.transform.m12`
-- I-U3 GROUP 노드 자체는 `nodeChanges` 에서 제거.
-- I-U4 GROUP 의 직계 외 후손은 변경 없음 (자식의 자식 등은 자식 기준 로컬 좌표를 유지).
-- I-U5 GROUP 이 비어있는 경우 (children 0개) → 단순 GROUP 삭제. 새로운 자식이 할아버지에 추가되지 않음.
+- I-U3 The GROUP node itself is removed from `nodeChanges`.
+- I-U4 Indirect descendants (children of children, etc.) are unchanged (they keep their member-local coordinates).
+- I-U5 If the GROUP is empty (0 children) → just remove the GROUP. No new child is appended to the grandparent.
 - I-U6 `journal.record` label = `AI: ungroup`.
 
 ## 5. Round-trip property
 
-`group([a, b]) → ungroup(g)` 이후 `nodeChanges` 는 a, b 의 transform/size/parentIndex 가 group 호출 직전과 동일해야 한다 (위치 부동소수 잡음 제외).
-- 단 `parentIndex.position` 은 동일하지 않을 수 있다 — ungroup 의 N등분 결과 새 position 문자열이 들어간다. 형제 lex 순서는 보존.
-- 즉 "wire-level identical" 이 아니라 "semantically identical" — 시각/구조는 동일.
+After `group([a, b]) → ungroup(g)`, `nodeChanges` must be such that a, b's transform/size/parentIndex match their state just before the group call (modulo floating-point noise).
+- However `parentIndex.position` may differ — ungroup's N-way subdivision produces fresh position strings. Sibling lex ordering is preserved.
+- In other words: not "wire-level identical" but "semantically identical" — visuals/structure are identical.
 
 ## 6. Error cases
 
-- 세션 미존재 → 기존 `applyTool` 의 처리 — `findNode` 가 throw.
-- group 의 `guids.length < 2` → `Error("group needs >= 2 guids")`.
-- group 의 멤버가 다른 부모 → I-G1.
-- ungroup 의 대상이 GROUP 이 아님 → I-U1.
-- group / ungroup 모두: 디스크 / journal 미변경 보장 (try 밖에서 throw, write 전에 검증).
+- Missing session → handled by existing `applyTool` — `findNode` throws.
+- `group`'s `guids.length < 2` → `Error("group needs >= 2 guids")`.
+- `group` members with different parents → I-G1.
+- `ungroup` target that is not a GROUP → I-U1.
+- Both group and ungroup: disk / journal are guaranteed unchanged (throw outside try, validate before write).
 
-## 7. Undo 모델
+## 7. Undo model
 
-`duplicate` 와 동일 패턴 — `Undo.applyPatches` 의 `MSG_SENTINEL_GUID` 분기가 그대로 처리한다. 추가 코드 없음.
+Same pattern as `duplicate` — the `MSG_SENTINEL_GUID` branch in `Undo.applyPatches` handles it as-is. No additional code.
 
-`group` 의 inverse 는 `before === pre-group nodeChanges`, `after === post-group nodeChanges`. Undo → before 복원 → `rebuildDocumentFromMessage` 로 documentJson 재생성. 같은 메커니즘.
+`group`'s inverse is `before === pre-group nodeChanges`, `after === post-group nodeChanges`. Undo → restore before → regenerate documentJson via `rebuildDocumentFromMessage`. Same mechanism.
 
-## 8. 비대상
+## 8. Out of scope
 
-- **다중 부모 group**: 다른 부모를 가진 노드들을 한 group 에 모으기. 멤버를 공통 조상까지 끌어올려야 하는데 부모 컨테이너의 의미(`FRAME` vs `INSTANCE` 등)를 추론하기 어려움. v1 은 같은 부모만.
-- **회전된 멤버**: 멤버가 0이 아닌 m00/m01/m10/m11 을 가지면 bbox 계산이 정확하지 않다 (회전 사각형의 AABB 가 아니라 OBB 가 필요). v1: 회전 멤버는 group 가능하지만 GROUP 의 size 가 OBB 가 아닌 AABB 로 계산되어 시각적으로 약간 어긋날 수 있음. 회전 노드 group 은 별도 spec 후보.
-- **GROUP 안에 GROUP**: 중첩 자체는 허용 (제약 없음). 하지만 ungroup 은 한 단계만 — 재귀 ungroup 은 사용자가 반복 호출.
-- **vector boolean group** (`BOOLEAN_OPERATION` 타입): 별도 도구. v1 은 `type: 'GROUP'` 만 생성.
+- **Multi-parent group**: combining nodes that live under different parents into one group. Lifting members to a common ancestor would require inferring parent container semantics (`FRAME` vs `INSTANCE`, etc.), which is hard. v1 supports same-parent only.
+- **Rotated members**: if a member has non-zero m00/m01/m10/m11, the bbox computation is not exact (we need the OBB of the rotated rectangle, not the AABB). v1: rotated members can be grouped, but the GROUP's size is computed as an AABB rather than an OBB, which may visually drift slightly. Rotated-node grouping is a candidate for a separate spec.
+- **GROUP inside GROUP**: nesting is permitted (no restriction). However ungroup operates on only one level — recursive ungroup is achieved by repeated calls.
+- **Vector boolean group** (`BOOLEAN_OPERATION` type): separate tool. v1 creates only `type: 'GROUP'`.
 
-## 9. 라우팅 결합
+## 9. Routing coupling
 
-채팅 전용 — HTTP 직접 노출 없음. 사용자 수동 group/ungroup UI 가 추후 추가되면:
+Chat-only — no direct HTTP exposure. If a user-driven group/ungroup UI is added later:
 - `POST /api/group/:sid` — body `{guids, name?}`
 - `POST /api/ungroup/:sid` — body `{guid}`
-같은 use case (`applyTool`) 호출.
+Both call the same use case (`applyTool`).
 
 ## 10. Resolved questions
 
-- **`name` 자동생성**: 사용자가 `name` 을 안 주면 단순히 `"Group"` 사용. counter (`"Group 1/2/..."`) 는 추후. Figma UI 자체가 "Group" 고정값으로 시작해 사용자가 즉시 rename 하므로 재현 충실도 손실 없음.
-- **GROUP 의 fillPaints**: 빈 배열 `[]` 로 둠. kiwi schema 에서 fillPaints 는 항상 array 로 직렬화되며 빈 배열이 정상 — 누락 시 일부 codepath 가 `Array.isArray()` 검사로 fall-through 한다.
-- **`guidPath` 갱신**: 변경하지 않음. `symbolData.symbolOverrides[].guidPath` 는 노드 guid 를 직접 참조하지 parentage 를 거치지 않는다 (kiwi schema 의 `GUIDPath` = `{guids: GUID[]}` 한 레벨 절대 경로). 따라서 group/ungroup 으로 인한 parentIndex 변경은 override 의 타깃 노드 식별에 영향 없음. 회귀 발생 시 e2e 가 잡는다.
+- **Auto-generated `name`**: if the user does not supply `name`, simply use `"Group"`. A counter (`"Group 1/2/..."`) comes later. The Figma UI itself starts with the constant "Group" and users rename immediately, so reproduction fidelity is unaffected.
+- **GROUP `fillPaints`**: leave as empty array `[]`. In the kiwi schema fillPaints is always serialized as an array and an empty array is normal — omitting it causes some codepaths to fall through via `Array.isArray()` checks.
+- **`guidPath` updates**: not modified. `symbolData.symbolOverrides[].guidPath` references node guids directly without traversing parentage (the kiwi schema's `GUIDPath` = `{guids: GUID[]}` is a one-level absolute path). Therefore parentIndex changes from group/ungroup do not affect override target identification. Regressions, if any, are caught by e2e.

@@ -1,7 +1,7 @@
 /**
  * Figma effects[] → Konva shadow props.
  *
- * Spec: docs/specs/web-render-fidelity-round2.spec.md §4
+ * Spec: docs/specs/archive/web-render-fidelity-round2.spec.md §4
  *
  * Picks the first DROP_SHADOW with `visible !== false` from the effects
  * array (Konva supports a single shadow per shape — multiple drop
@@ -79,7 +79,7 @@ export interface InnerShadow {
  * null when none qualify (Konva can't render multiple inner shadows
  * per shape, and non-NORMAL blend would render incorrectly).
  *
- * Spec: docs/specs/web-render-fidelity-round6.spec.md §3
+ * Spec: docs/specs/archive/web-render-fidelity-round6.spec.md §3
  */
 export function innerShadowFromEffects(
   effects: FigmaEffect[] | undefined,

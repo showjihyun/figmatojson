@@ -56,7 +56,7 @@ Built for designers exporting backups, engineers migrating off Figma, RAG pipeli
 | 🧪 784 tests | 162 main (unit + integration) + 622 web (component + helpers) + Playwright e2e |
 | 🖥 Web editor | React 19 + Konva canvas + Inspector panel + chat agent (Anthropic Messages API tool loop) |
 | 📐 Spec-driven | 60+ `docs/specs/*.spec.md` with invariants; every round of work documented |
-| 🌍 Bilingual docs | Single-file `docs/dev-guide.html` (한국어 / English toggle, 8 mermaid diagrams) |
+| 🌍 Bilingual docs | Single-file `docs/dev-guide.html` (Korean / English toggle, 8 mermaid diagrams) |
 
 ---
 
@@ -67,19 +67,19 @@ git clone https://github.com/showjihyun/figmatojson.git
 cd figmatojson
 npm install
 
-# 1️⃣ Decode any .fig
-npx tsx src/cli.ts extract docs/bvp.fig
+# 1️⃣ Decode any .fig — export your file from Figma first (File → Save local copy → .fig)
+npx tsx src/cli.ts extract path/to/your.fig
 
-# 2️⃣ See the verification report (per-stage byte counts, schema sanity, asset cross-check)
-cat output/bvp/verification_report.md
+# 2️⃣ Read the verification report (per-stage byte counts, schema sanity, asset cross-check)
+cat output/your/verification_report.md
 
-# 3️⃣ (Optional) browse it in your editor of choice
+# 3️⃣ (Optional) open it in the web editor
 cd web && npm install && npm run dev      # → http://localhost:5273
 ```
 
 That's it. No API keys, no auth, no `.env`.
 
-> **Try the bundled fixture** — `docs/bvp.fig` is a small public design (3,155 nodes, 3 pages) that ships with the repo.
+> **No `.fig` ships with the repo.** Bring your own — the pipeline handles files from a single page up to 35K+ nodes.
 
 ---
 
@@ -166,7 +166,7 @@ Need a different output? Plug into any stage:
 
 For the data-shape glossary (Kiwi Record / Tree Node / Pen Node / Master / Instance / Override / Expansion / GUID / Pen ID / Direct vs Effective Visibility / …), see [`CONTEXT.md`](./CONTEXT.md).
 
-For diagrams of all of the above plus the Web editor, the SDD methodology, and the Round 11~18-B history, see **[`docs/dev-guide.html`](./docs/dev-guide.html)** (한국어 / English toggle, 8 mermaid diagrams).
+For diagrams of all of the above plus the Web editor, the SDD methodology, and the full round history, see **[`docs/dev-guide.html`](./docs/dev-guide.html)** (Korean / English toggle, 8 mermaid diagrams).
 
 ---
 
@@ -226,7 +226,7 @@ npx tsx src/cli.ts tokens <input.fig>
 
 ---
 
-## 📊 Real numbers (sample 6 MB `.fig`, 35,660 nodes)
+## 📊 Real numbers (measured on a 6 MB / 35,660-node production fig)
 
 | Operation | Time | Size out |
 |---|---|---|
@@ -238,9 +238,9 @@ npx tsx src/cli.ts tokens <input.fig>
 
 **Decoded message**: 35,660 nodes · 568 schema types · archive version 106 · 6,094 binary blobs · 1,599 vector paths extracted as SVG.
 
-**Pen-export accuracy** vs pencil.dev reference: **99.6%** node match (1,392 / 1,397) and **98.98%** CSS coverage across 1,865 property comparisons — see [`docs/SPEC.md`](./docs/SPEC.md) for the few known edge cases.
+**Pen-export accuracy** vs the pencil.dev reference: **99.6%** node match (1,392 / 1,397) and **98.98%** CSS coverage across 1,865 property comparisons — see [`docs/SPEC.md`](./docs/SPEC.md) for the few known edge cases.
 
-**Audit harness** (round 17, see `docs/specs/audit-oracle.spec.md`): 17,283 / 18,301 Figma nodes matched on a real fixture (HPAI), **204 field-level diffs** (97.3% reduction from a pre-fix 7,562 baseline). 0 silent field drops, 0 JSON serialization failures, 0 broken `componentPropAssignments`.
+**Audit harness** (round 17, see [`docs/specs/audit-oracle.spec.md`](./docs/specs/audit-oracle.spec.md)): 17,283 / 18,301 Figma nodes matched on a real-world fixture, **204 field-level diffs** (97.3% reduction from a pre-fix 7,562 baseline). 0 silent field drops, 0 JSON serialization failures, 0 broken `componentPropAssignments`.
 
 ---
 
@@ -357,7 +357,11 @@ Coverage of note:
 
 | Round | Theme |
 |---|---|
-| **18-B** | Inspector alias trail "A → B → C" with cycle / dead-end / depth-cap markers |
+| **25** | Path-key FRAME-skip rule (alert-modal fix; intermediate container FRAMEs omitted from override paths) |
+| 24 | `derivedSymbolData` transform baking (descendant position / rotation applied; mobile-list clip fix) |
+| 22 | `derivedSymbolData` size baking (1,570+ INSTANCEs carry at least one entry) |
+| 19–21 | Auto-layout reflow patterns (CENTER+CENTER, MIN-pack, overlap-group distribute, AUTO-grow) |
+| 18-B | Inspector alias trail "A → B → C" with cycle / dead-end / depth-cap markers |
 | 18-A | `resolveVariableChain` domain helper + 11 unit tests |
 | 17 | Audit raw-field + properties coverage harness (97% noise reduction) |
 | 16 + 16.1 | `styleIdForText` effective typography (+ scope-leak hotfix) |
@@ -365,7 +369,7 @@ Coverage of note:
 | 14 | Strip variant `prop=` prefixes ("size=XL" → "XL") |
 | 11–13 | Vector render fidelity (path inset / scale / INSIDE strokeAlign) |
 
-Full PR history: see GitHub releases or `git log --oneline main`.
+Full PR history: see GitHub releases or `git log --oneline main`. World-first analysis: [`docs/WHATS-NOVEL.md`](./docs/WHATS-NOVEL.md).
 
 ---
 
@@ -377,7 +381,7 @@ Bug reports, edge-case `.fig` files, and PRs welcome. Before opening a PR:
 2. Run `npm run typecheck` — both projects must stay at baseline 0 new errors
 3. If you're touching the pipeline, read [`CONTEXT.md`](./CONTEXT.md) for the domain language
 4. If you're proposing a new output format / repack mode / Inspector field, sketch a spec in `docs/specs/<feature>.spec.md` first (SDD iron rule)
-5. Sample fixtures live in `docs/` (`bvp.fig` 6 MB, `메타리치 화면 UI Design.fig` 35 K nodes). For other reproductions please attach the `.fig` to the issue.
+5. No `.fig` ships with the repo — export any Figma file locally to reproduce. For bug reports please attach the (anonymized if needed) `.fig` to the issue.
 
 For Claude Code users: this repo ships with three project skills in `.claude/skills/` (`figma-cli`, `figma-pen-export`, `figma-internals`) that auto-load when you work in the relevant area.
 

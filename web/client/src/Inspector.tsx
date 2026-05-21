@@ -13,11 +13,11 @@
  * the backend, but every keystroke still ends up in message.json before save.
  */
 import { useMemo, useState, useEffect, useRef, type ReactNode } from 'react';
-import { Eye, EyeOff } from 'lucide-react';
+import { ChevronDown, ChevronRight, Eye, EyeOff } from 'lucide-react';
 import { documentService } from '@/services';
 import { usePatch } from './hooks/usePatch';
 import { rgbaToHex, hexToRgb01 } from '@core/domain/color';
-import { findById } from '@core/domain/tree';
+import { findByIdDeep } from '@core/domain/tree';
 import { colorVarName, textStyleName, effectiveTextStyle, colorVarTrail, type ColorVarTrailResult } from '@core/domain/colorStyleRef';
 import { variantLabelText } from './lib/variantLabel';
 import { Button } from '@/components/ui/button';
@@ -49,17 +49,21 @@ interface InspectorProps {
 }
 
 // `findByGuid` here used to traverse via the raw `guid` object; the core
-// `findById` traverses by the precomputed `id` string. The page tree this
-// Inspector reads always has `id = guidStr(guid)` set during decode, so the
-// two are equivalent in practice — alias kept for callers below.
-const findByGuid = findById;
+// `findByIdDeep` traverses by the precomputed `id` string. The page tree
+// this Inspector reads always has `id = guidStr(guid)` set during decode,
+// so the two are equivalent for page-resident nodes — and the deep variant
+// also reaches into INSTANCE `_renderChildren` so a drilled-in master
+// child (selected by canvas double-click, spec web-canvas-drill-selection
+// v2 §5) resolves to its instance-specific copy instead of erroring out
+// with "Selected node X not found in current page".
+const findByGuid = findByIdDeep;
 
 /**
  * Round 18-B — render a colorVar alias trail as "A → B → C" with a small
  * end-state marker (cycle ⟲ / dead-end ⚠ / depth-cap …). Returns null
  * when the trail is empty (caller skips rendering the row entirely).
  *
- * Spec: docs/specs/web-render-fidelity-round18-B.spec.md §I-8.
+ * Spec: docs/specs/archive/web-render-fidelity-round18-B.spec.md §I-8.
  */
 function formatAliasTrail(trail: ColorVarTrailResult | null): string | null {
   if (!trail || trail.entries.length === 0) return null;
@@ -774,67 +778,94 @@ export function ComponentTextRow({
   // any sibling row Apply (or mode toggle) re-renders this row with a fresh
   // `displayed` value, and the effect would clobber the user's unsaved edit.
   const userTouched = useRef(false);
+  const [expanded, setExpanded] = useState(false);
   useEffect(() => {
     if (!userTouched.current) setVal(displayed);
   }, [displayed]);
   const dirty = val !== displayed;
   const overridden = typeof override === 'string';
+  // Dirty rows stay open so unsaved edits never disappear behind a chevron click.
+  const isOpen = expanded || dirty;
+  const firstLine = displayed.split('\n')[0] ?? '';
+  const preview =
+    firstLine.length > 48 ? firstLine.slice(0, 48) + '…' : firstLine || '(empty)';
   return (
-    <div className="flex flex-col gap-1.5 border-t border-border px-1 py-2 first:border-t-0">
-      <div className="flex items-center gap-1.5 text-xs">
-        <span className="font-semibold text-foreground">{item.name ?? 'Text'}</span>
-        {item.path && <span className="text-muted-foreground/70">· {item.path}</span>}
+    <div className="flex flex-col border-t border-border first:border-t-0">
+      <button
+        type="button"
+        onClick={() => setExpanded((e) => !e)}
+        title={item.path ? `${item.path} · ${item.guid}` : item.guid}
+        className="flex w-full items-center gap-1.5 px-1 py-1.5 text-left text-xs hover:bg-accent/40"
+      >
+        {isOpen ? (
+          <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/70" />
+        ) : (
+          <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/70" />
+        )}
+        <span className="shrink-0 font-semibold text-foreground">{item.name ?? 'Text'}</span>
+        {!isOpen && (
+          <span className="truncate text-muted-foreground/80">
+            {preview}
+          </span>
+        )}
         {overridden && (
-          <span className="rounded bg-emerald-950 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-300">
+          <span className="ml-auto shrink-0 rounded bg-emerald-950 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-300">
             override
           </span>
         )}
-        <span className="ml-auto font-mono text-[10px] text-muted-foreground/60">{item.guid}</span>
-      </div>
-      <Textarea
-        value={val}
-        rows={Math.min(4, Math.max(1, val.split('\n').length))}
-        onChange={(e) => {
-          userTouched.current = true;
-          setVal(e.target.value);
-        }}
-        className="min-h-[36px] resize-y text-sm"
-      />
-      <div className="flex justify-end gap-1.5">
-        {dirty && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              userTouched.current = false;
-              setVal(displayed);
+      </button>
+      {isOpen && (
+        <div className="flex flex-col gap-1.5 px-1 pb-2 pl-[18px]">
+          <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/60">
+            {item.path && <span className="truncate" title={item.path}>{item.path}</span>}
+            <span className="ml-auto shrink-0 font-mono">{item.guid}</span>
+          </div>
+          <Textarea
+            value={val}
+            rows={Math.min(4, Math.max(1, val.split('\n').length))}
+            onChange={(e) => {
+              userTouched.current = true;
+              setVal(e.target.value);
             }}
-          >
-            Cancel
-          </Button>
-        )}
-        <Button
-          variant={mode === 'master' ? 'destructive' : 'default'}
-          size="sm"
-          disabled={!dirty}
-          onClick={async () => {
-            if (!dirty) return;
-            try {
-              if (mode === 'instance') {
-                await documentService.setInstanceTextOverride(sessionId, instanceGuid, item.guid, val);
-              } else {
-                await documentService.patch(sessionId, item.guid, 'textData.characters', val);
-              }
-              userTouched.current = false;
-              onChange();
-            } catch (err) {
-              alert(`Failed: ${(err as Error).message}`);
-            }
-          }}
-        >
-          Apply{mode === 'master' ? ' to Master' : ''}
-        </Button>
-      </div>
+            className="min-h-[36px] resize-y text-sm"
+          />
+          <div className="flex justify-end gap-1.5">
+            {dirty && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  userTouched.current = false;
+                  setVal(displayed);
+                }}
+              >
+                Cancel
+              </Button>
+            )}
+            <Button
+              variant={mode === 'master' ? 'destructive' : 'default'}
+              size="sm"
+              disabled={!dirty}
+              onClick={async () => {
+                if (!dirty) return;
+                try {
+                  if (mode === 'instance') {
+                    await documentService.setInstanceTextOverride(sessionId, instanceGuid, item.guid, val);
+                  } else {
+                    await documentService.patch(sessionId, item.guid, 'textData.characters', val);
+                  }
+                  userTouched.current = false;
+                  onChange();
+                } catch (err) {
+                  alert(`Failed: ${(err as Error).message}`);
+                }
+              }}
+            >
+              Apply{mode === 'master' ? ' to Master' : ''}
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

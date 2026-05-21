@@ -247,7 +247,7 @@ describe('nodeRender', () => {
         emptyCtx(),
       );
       if (plan.kind !== 'text-simple') throw new Error('expected text-simple');
-      expect(plan.fill).toBe('rgba(51,102,153,0.8)');
+      expect(plan.fill).toBe('rgba(51,102,153,0.800)');
     });
 
     it('passes typography fields through their helpers', () => {
@@ -488,9 +488,9 @@ describe('nodeRender', () => {
         emptyCtx(),
       );
       if (plan.kind !== 'text-styled') throw new Error('expected text-styled');
-      expect(plan.runs[0].fill).toBe('rgba(128,128,128,1)');     // base
-      expect(plan.runs[1].fill).toBe('rgba(255,0,0,1)');          // override
-      expect(plan.runs[2].fill).toBe('rgba(128,128,128,1)');     // missing → base
+      expect(plan.runs[0].fill).toBe('rgba(128,128,128,1.000)');     // base
+      expect(plan.runs[1].fill).toBe('rgba(255,0,0,1.000)');          // override
+      expect(plan.runs[2].fill).toBe('rgba(128,128,128,1.000)');     // missing → base
     });
 
     it('cumulative offsetX is computed via ctx.measureText on each non-final run', () => {
@@ -811,6 +811,72 @@ describe('nodeRender', () => {
       const empty = nodeRender({ ...baseFrame, dashPattern: [] }, emptyCtx());
       if (empty.kind !== 'paint-stack') throw new Error('expected paint-stack');
       expect(empty.dashPattern).toBeUndefined();
+    });
+  });
+
+  // Round 34 regression — the Material 3 hour-line LINE primitive stores
+  // its rotation as `R(120°) ∘ scale(1, -1)` (det = -1, mirror over X).
+  // Before the round-34 fix, `rotationDegrees` rejected mirror matrices
+  // as non-pure-rotation and returned undefined, leaving the time-picker
+  // hour line pointing east (3 o'clock) instead of at the selected hour.
+  // This is the closest in-CI test we can get since Konva doesn't render
+  // in jsdom — guards the data path that feeds the Konva Group's
+  // rotation + scaleX/scaleY props.
+  describe('LINE rotation + mirror (round 34 regression)', () => {
+    const HOUR_7_LINE = {
+      id: '1:216',
+      type: 'LINE',
+      size: { x: 104, y: 0 },
+      strokeWeight: 2,
+      strokePaints: [{ type: 'SOLID', color: { r: 0.4, g: 0.3, b: 0.8, a: 1 } }],
+      transform: {
+        m00: -0.5,                            // cos(120°)
+        m01: Math.sin(2 * Math.PI / 3),       // +sin(120°) — note positive (mirror)
+        m02: 74.5,
+        m10: Math.sin(2 * Math.PI / 3),       // +sin(120°)
+        m11: 0.5,                             // +cos(120°)·-1 (flipped)
+        m12: -63.5,
+      },
+    };
+
+    it('plan.outer carries the decomposed rotation AND scaleY=-1', () => {
+      const plan = nodeRender(HOUR_7_LINE, emptyCtx());
+      if (plan.kind !== 'paint-stack' && plan.kind !== 'vector') {
+        throw new Error(`expected paint-stack or vector, got ${plan.kind}`);
+      }
+      expect(plan.outer.rotation).toBeCloseTo(120, 1);
+      // scaleY === -1 means the mirror got surfaced — without it the Konva
+      // Group would render the line at 120° around a non-mirrored anchor,
+      // which is what produced the "line points to 3 o'clock" bug.
+      expect(plan.outer.scaleY).toBeCloseTo(-1, 2);
+      // scaleX is identity → undefined (no need to set it on the Group)
+      expect(plan.outer.scaleX).toBeUndefined();
+    });
+
+    it('plan.outer.bbox carries the translation unchanged (anchor = master spoke origin)', () => {
+      const plan = nodeRender(HOUR_7_LINE, emptyCtx());
+      if (plan.kind !== 'paint-stack' && plan.kind !== 'vector') {
+        throw new Error(`expected paint-stack or vector, got ${plan.kind}`);
+      }
+      // Translation is independent of the rotation+mirror decomposition.
+      expect(plan.outer.bbox.x).toBe(74.5);
+      expect(plan.outer.bbox.y).toBe(-63.5);
+    });
+
+    it("pure rotation (no mirror) still produces scaleY=undefined — round-34 doesn't over-surface", () => {
+      const plan = nodeRender({
+        ...HOUR_7_LINE,
+        transform: {
+          m00: 0, m01: -1, m02: 74.5,
+          m10: 1, m11: 0, m12: -63.5,
+        },
+      }, emptyCtx());
+      if (plan.kind !== 'paint-stack' && plan.kind !== 'vector') {
+        throw new Error(`expected paint-stack or vector, got ${plan.kind}`);
+      }
+      expect(plan.outer.rotation).toBeCloseTo(90, 1);
+      expect(plan.outer.scaleY).toBeUndefined();
+      expect(plan.outer.scaleX).toBeUndefined();
     });
   });
 });

@@ -1,26 +1,26 @@
 # spec/tokens
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | Approved (Phase 1 — round 33) |
-| 구현 | `src/tokens.ts` + `src/cli.ts` (`tokens` subcommand) + `src/index.ts` (re-export) |
-| 테스트 | (TODO) `src/tokens.test.ts` — 본 spec 의 Invariants 단위 |
-| 형제 | `audit-oracle.spec.md` (parser correctness), Phase 0d packaging (`docs/PHASE-0-FOUNDATION.md`) |
+| Status | Approved (Phase 1 — round 33) |
+| Implementation | `src/tokens.ts` + `src/cli.ts` (`tokens` subcommand) + `src/index.ts` (re-export) |
+| Tests | (TODO) `src/tokens.test.ts` — one per Invariant in this spec |
+| Siblings | `audit-oracle.spec.md` (parser correctness), Phase 0d packaging (`docs/PHASE-0-FOUNDATION.md`) |
 
-## 1. 목적
+## 1. Purpose
 
-Figma published styles 을 *언어-중립* 디자인 토큰으로 추출. 1차 사용자
-는 (나) 개발자 도구 — CI 에서 `.fig` 변경 시 토큰 export 자동 갱신,
-디자인-코드 sync 의 source-of-truth.
+Extract Figma published styles as *language-neutral* design tokens. The primary
+user is (me) a developer tool — on `.fig` changes in CI, the token export is
+automatically refreshed, serving as the source-of-truth for design-code sync.
 
-스타일 → 토큰 변환은 *데이터 보존* 이지 *해석* 이 아님. Figma 의
-authored value 그대로 (예: `lineHeight: 1.33` RAW 는 그대로 multiplier
-로 emit). consumer (CSS / JS) 가 자기 단위로 변환.
+The style → token conversion is *data preservation*, not *interpretation*.
+Figma's authored value is emitted as-is (e.g. `lineHeight: 1.33` RAW is emitted
+as a multiplier as-is). The consumer (CSS / JS) converts to their own units.
 
-## 2. 입력 / 출력
+## 2. Inputs / Outputs
 
-- 입력: `.fig` 파일 (CLI) 또는 `DecodedFig` (library API).
-- 출력: `Tokens` JSON (default), 또는 CSS variables / JS / TS export.
+- Input: `.fig` file (CLI) or `DecodedFig` (library API).
+- Output: `Tokens` JSON (default), or CSS variables / JS / TS export.
 
 ```
 $ figma-reverse tokens design.fig                          # JSON to stdout
@@ -36,7 +36,7 @@ const tokens = extractTokens(decoded, 'design.fig');
 // tokens.colors["Blue-100"] === { value: "#e5f0ff" }
 ```
 
-## 3. 출력 schema (v1)
+## 3. Output schema (v1)
 
 ```ts
 interface Tokens {
@@ -50,95 +50,97 @@ interface Tokens {
 
 ### 3.1 ColorToken
 
-- I-T1 `value` 필수. CSS-호환 hex: alpha=1 일 때 `#RRGGBB`, 그 외
-  `#RRGGBBAA`. 모두 lowercase.
-- I-T2 `description` (optional) — Figma 의 style description 전달.
-- I-T3 v1 은 SOLID FILL 만 추출. gradient / image fill style 은
-  *키 자체를 emit 안 함* (tokens.colors 에 entry 없음). 향후
-  v2 에서 `gradient` 필드 추가.
-- I-T4 다중 fillPaints 인 경우 첫 visible SOLID 만. 다른 paint 는
-  무시.
+- I-T1 `value` required. CSS-compatible hex: `#RRGGBB` when alpha=1, otherwise
+  `#RRGGBBAA`. All lowercase.
+- I-T2 `description` (optional) — passes through Figma's style description.
+- I-T3 v1 extracts SOLID FILL only. Gradient / image fill styles are
+  *not emitted as keys at all* (no entry in tokens.colors). A future
+  v2 will add a `gradient` field.
+- I-T4 For multiple fillPaints, only the first visible SOLID is used. Other
+  paints are ignored.
 
 ### 3.2 TypographyToken
 
-- I-T5 `fontFamily`, `fontStyle`, `fontSize` 필수. fontStyle 은
-  Figma 가 가진 라벨 그대로 ("Regular", "Bold", "SemiBold" — weight
-  numeric 변환은 consumer 책임).
+- I-T5 `fontFamily`, `fontStyle`, `fontSize` are required. fontStyle is
+  the label Figma already carries ("Regular", "Bold", "SemiBold" — converting
+  weight to numeric is the consumer's responsibility).
 - I-T6 `lineHeight: { unit, value }` —
   `PX` (PIXELS), `PERCENT` (PERCENT), `AUTO` (RAW unitless multiplier).
-  AUTO 의 value 는 해당 multiplier (예: 1.33).
-- I-T7 `letterSpacing: { unit, value }` — `PX` (default) 또는
-  `PERCENT`. PERCENT 는 100 = 1em.
+  The value for AUTO is the multiplier (e.g. 1.33).
+- I-T7 `letterSpacing: { unit, value }` — `PX` (default) or
+  `PERCENT`. PERCENT 100 = 1em.
 - I-T8 `description` (optional).
 
 ### 3.3 EffectToken
 
-- I-T9 `type` 필수: `DROP_SHADOW` / `INNER_SHADOW` / `LAYER_BLUR` /
+- I-T9 `type` required: `DROP_SHADOW` / `INNER_SHADOW` / `LAYER_BLUR` /
   `BACKGROUND_BLUR`.
 - I-T10 DROP_SHADOW / INNER_SHADOW: `color` (hex), `offset {x,y}`,
   `radius` (blur), `spread`.
-- I-T11 LAYER_BLUR / BACKGROUND_BLUR: `blur` 만.
-- I-T12 다중 effects 인 경우 첫 visible 만. 다른 effects 는 무시.
+- I-T11 LAYER_BLUR / BACKGROUND_BLUR: `blur` only.
+- I-T12 For multiple effects, only the first visible one is used. Other effects
+  are ignored.
 
-## 4. 추출 룰
+## 4. Extraction rules
 
-- I-T13 입력 노드 중 `styleType ∈ {FILL, TEXT, EFFECT}` 인 노드만
-  대상. `name` 없는 노드 skip.
-- I-T14 `name` 키 그대로 유지 (Figma 의 namespace `/` 포함). 예:
-  `colors["Heading/XL"]`. consumer 가 변환 책임.
-- I-T15 같은 `name` 의 중복 entry 는 *마지막 emit 우선*. 정상적으로
-  Figma file 안에서 중복 style 은 없지만 deterministic 동작 보장.
-- I-T16 spacing token 은 v1 *비대상* (§7).
-- I-T17 variables (multi-mode) 은 v1 *default mode resolved value*
-  로만. variable reference 는 1 단계 dereference. v2 에서 mode 별
-  분리.
+- I-T13 Only nodes where `styleType ∈ {FILL, TEXT, EFFECT}` are
+  considered. Nodes without `name` are skipped.
+- I-T14 The `name` key is preserved as-is (including Figma's `/` namespace). E.g.
+  `colors["Heading/XL"]`. The consumer is responsible for any transformation.
+- I-T15 Duplicate entries with the same `name` follow *last-emit wins*.
+  Duplicate styles are not expected within a normal Figma file, but
+  deterministic behavior is guaranteed.
+- I-T16 Spacing tokens are *out of scope* in v1 (§7).
+- I-T17 Variables (multi-mode) are only emitted with their *default mode
+  resolved value* in v1. Variable references are dereferenced one level. v2
+  will separate per-mode.
 
 ## 5. CLI
 
 `figma-reverse tokens <input.fig> [options]`
 
 - I-C1 `--format json|css|js|ts` (default `json`).
-- I-C2 `--out <path>` 미지정 시 stdout 으로.
-- I-C3 input `.fig` 가 없으면 비-zero exit + stderr 에러.
-- I-C4 출력 끝에 newline 1개 (POSIX 컨벤션).
+- I-C2 When `--out <path>` is not specified, output goes to stdout.
+- I-C3 If the input `.fig` does not exist, exits non-zero with a stderr error.
+- I-C4 Output ends with 1 trailing newline (POSIX convention).
 
-### 5.1 Format 별 출력 규칙
+### 5.1 Per-format output rules
 
 - I-C5 JSON: `JSON.stringify(tokens, null, 2)` — 2-space indent.
-- I-C6 CSS: `:root { ... }` 안에 `--<category>-<slug>-<field>: value;`.
-  slug 는 `name.toLowerCase().replace(/[^a-z0-9가-힣]+/g, '-')`. 한글은 보존.
+- I-C6 CSS: `--<category>-<slug>-<field>: value;` inside `:root { ... }`.
+  The slug is `name.toLowerCase().replace(/[^a-z0-9\u{AC00}-\u{D7A3}]+/gu, '-')`. Hangul is preserved.
 - I-C7 JS: `export default { ... }` (ESM).
 - I-C8 TS: `export const tokens: Tokens = { ... }; export default tokens;`.
 
 ## 6. Library API
 
-`src/index.ts` 에서 re-export (semver 1.0+ 안정):
+Re-exported from `src/index.ts` (stable from semver 1.0+):
 
 - `extractTokens(decoded: DecodedFig, figName: string): Tokens`
 - `formatTokens(tokens: Tokens, format: TokenFormat): string`
 - types: `Tokens`, `ColorToken`, `TypographyToken`, `EffectToken`, `TokenFormat`
 
-## 7. 비대상 (v1)
+## 7. Out of scope (v1)
 
-- ❌ Spacing tokens — Figma 가 first-class 로 노출 안 함 (§ 0c 이슈).
-  v2 후보: 컴포넌트 이름 패턴 (`Spacing/4`) 으로 추론하는 config 옵션.
-- ❌ Grid styles — 빈도 낮음. v2.
-- ❌ Variables modes (multi-mode) — v1 은 default mode 만. v2 에서
-  `Tokens.modes: Record<modeName, ResolvedTokens>` 추가.
-- ❌ Gradient / image fills — color token 에 미반영. v2 후보.
-- ❌ Multi-effect token — 첫 effect 만. 디자인 시스템 에서 1 effect
-  =1 style 이 정상 패턴.
-- ❌ 외부 library 참조 (sourceLibraryKey) 의 fully-resolved values —
-  로컬 .fig 에 없는 값은 없는 채로 둠.
+- ❌ Spacing tokens — Figma does not expose these as first-class (§ 0c issue).
+  v2 candidate: a config option to infer them from component name patterns (`Spacing/4`).
+- ❌ Grid styles — low frequency. v2.
+- ❌ Variables modes (multi-mode) — v1 covers only the default mode. v2 will add
+  `Tokens.modes: Record<modeName, ResolvedTokens>`.
+- ❌ Gradient / image fills — not reflected in color tokens. v2 candidate.
+- ❌ Multi-effect tokens — first effect only. In a design system, 1 effect = 1
+  style is the normal pattern.
+- ❌ Fully-resolved values from external library references (sourceLibraryKey) —
+  values not in the local .fig are left missing.
 
-## 8. Test fixture 결과 (round 33)
+## 8. Test fixture results (round 33)
 
 | Fixture | colors | typography | effects |
 |---|---|---|---|
 | `bvp.fig` | 1 | 40 | 2 |
-| `메타리치 화면 UI Design.fig` | 22 | 22 | 1 |
+| `MetaRich Screen UI Design.fig` | 22 | 22 | 1 |
 
-샘플 JSON 출력 (bvp):
+Sample JSON output (bvp):
 
 ```json
 {
@@ -168,12 +170,12 @@ interface Tokens {
 
 ## 9. Resolved questions
 
-- **slug 에서 한글 보존하는가?** 보존. Figma 디자이너가 한글 style
-  이름 자주 사용 (예: "버튼/기본"). CSS 도 한글 변수 식별자 허용.
-  consumer 가 ASCII-only 강제 필요시 후처리.
-- **lineHeight RAW 단위는 어떻게 emit?** `{ unit: 'AUTO', value: <multiplier> }`.
-  CSS 에서 unitless line-height 으로 그대로 사용 가능.
-- **letterSpacing PERCENT 는?** `{ unit: 'PERCENT', value }`. CSS 변환 시
-  `value/100 + 'em'`. 100 = 1em 의 Figma 컨벤션.
-- **`--format css` 변수 prefix 는?** `--color-`, `--typography-`,
-  `--shadow-`, `--blur-`. 카테고리별 prefix 일관.
+- **Is Hangul preserved in slugs?** Yes. Figma designers frequently use Hangul
+  style names (e.g. "Button/Default"). CSS also allows Hangul variable
+  identifiers. Consumers needing ASCII-only must post-process.
+- **How is lineHeight RAW unit emitted?** `{ unit: 'AUTO', value: <multiplier> }`.
+  Can be used directly as a unitless line-height in CSS.
+- **What about letterSpacing PERCENT?** `{ unit: 'PERCENT', value }`. When
+  converting to CSS, `value/100 + 'em'`. Follows Figma's 100 = 1em convention.
+- **What is the `--format css` variable prefix?** `--color-`, `--typography-`,
+  `--shadow-`, `--blur-`. Consistent per-category prefixes.

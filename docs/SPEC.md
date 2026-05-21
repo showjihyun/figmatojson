@@ -1,245 +1,285 @@
-# SPEC — figma-reverse: `.fig` ⇄ 구조화 데이터 파이프라인
+# SPEC — figma-reverse: `.fig` extract pipeline deep-dive
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 문서 버전 | v1.1 (성능 개선 반영) |
-| 작성일 | 2026-04-29 |
-| 대상 PRD | [PRD.md](./PRD.md) |
-| 언어/런타임 | TypeScript / Node.js v20+ |
-| 상태 | v1 구현 완료 (PRD §6.3 Iteration 0~9 + Repack v2 scope) |
+| Document version | v2.0 (2026-05-08 full rewrite) |
+| Package version | `figma-reverse@0.1.11` |
+| Scope | **9-stage pipeline of the extract subcommand + automated verification** |
+| Language/runtime | TypeScript 5.7 / Node.js ≥ 20 / ESM |
+| Sibling docs | [`SPEC-architecture.md`](./SPEC-architecture.md) · [`SPEC-roundtrip.md`](./SPEC-roundtrip.md) · [`SPEC-repack.md`](./SPEC-repack.md) · [`SPEC-figma-to-pencil.md`](./SPEC-figma-to-pencil.md) |
+| Target PRD | [`PRD.md`](./PRD.md) |
 
 ---
 
-## 0. 한눈에 보기
+## 0. Scope
+
+**IN scope (this document)**
+
+- 9-stage pipeline of the `extract` subcommand (`.fig` → `output/` + `extracted/`)
+- Per-stage input / processing / memory · disk output
+- Automated verification V-01 ~ V-08
+- `src/` module ↔ stage mapping
+
+**OUT of scope — see sibling docs**
+
+| Topic | Document |
+|---|---|
+| Repack 3-mode (byte / kiwi / json) | [`SPEC-repack.md`](./SPEC-repack.md) |
+| Round-trip equality tiers, lossless JSON tagging | [`SPEC-roundtrip.md`](./SPEC-roundtrip.md) · [ADR-0002](./adr/0002-roundtrip-equality-tiers.md) |
+| pencil.dev `.pen` exporter (coordinates · ID · variant) | [`SPEC-figma-to-pencil.md`](./SPEC-figma-to-pencil.md) |
+| Web editor (Clean+Hexagonal, Konva canvas) | [`SPEC-architecture.md`](./SPEC-architecture.md) |
+| Domain terminology (Kiwi Record / Tree Node / Master / Instance / Pen ID / Effective Visibility …) | [`CONTEXT.md`](../CONTEXT.md) |
+| `.fig` wire format byte-level visual reference | [`fig-format/figma-fig-format.md`](./fig-format/figma-fig-format.md) |
+| External audit harness (5 scripts; determinism · byte-compare · oracle) | [`specs/audit-harness.spec.md`](./specs/audit-harness.spec.md) · [`HARNESS.md`](./HARNESS.md) |
+| Per-round work history (round 2 ~ 18-B) | [`specs/archive/`](./specs/archive/) |
+
+The other 6 CLI subcommands (`repack`, `pen-export`, `editable-html`, `html-report`, `round-trip-html`, `tokens`) are indexed in one line each under §7; details are delegated to the sibling docs above.
+
+---
+
+## 1. Pipeline overview
 
 ```
 ┌────────────────┐       ┌─────────────┐       ┌──────────────────┐
-│  design.fig    │ ───►  │  파이프라인   │ ───►  │  output/ + extracted/  │
-│  (5.77 MB ZIP) │       │  9단계       │       │  (사람이 읽는 JSON +   │
-└────────────────┘       └─────────────┘       │   디버그 산출물)       │
-                                ▲              └──────────────────┘
-                                │
-                          ┌─────┴────┐
-                          │  repack  │  (역방향: extracted/ → .fig)
-                          └──────────┘
+│  design.fig    │ ───►  │  extract    │ ───►  │  output/  +  extracted/    │
+│  (ZIP wrapper) │       │  9 stages   │       │  (human-readable JSON +  │
+└────────────────┘       └─────────────┘       │   stage-by-stage outputs)│
+                                                └──────────────────┘
 ```
 
-**한 줄 요약**: Figma의 `.fig` 바이너리를 9단계 파이프라인으로 풀어 무손실 JSON·이미지·SVG로 export하고, 단계별 산출물을 폴더로 남겨 추적·검증·재패키징을 가능하게 한다.
+**One-line summary** — Unpack the Figma `.fig` binary (ZIP → fig-kiwi archive → schema+data chunks → kiwi message → tree) in 9 stages, export lossless JSON / images / SVG, and persist per-stage outputs to disk to enable tracing, verification, and repackaging.
+
+> 📘 **Wire-format visual reference**: [`fig-format/figma-fig-format.md`](./fig-format/figma-fig-format.md) — Stage 1~4 byte-level layout, fig-kiwi container, 568-type schema, ENUM/STRUCT/MESSAGE wire patterns, tag-matching decode.
 
 ---
 
-## 1. 처리 프로세스 (9 단계)
+## 2. 9-Stage Pipeline
 
-> **읽는 법**: 각 단계는 `[입력] → 처리 → [출력]` 형식으로 구성. 출력 중 **굵게** 표시된 것이 디스크에 남는 산출물.
+> **How to read**: each stage = `[input] → processing → [output (memory) + output (disk)]`. Paths in **bold** are persisted to disk.
 
-### Stage 1️⃣ 컨테이너 분해
+### 2.0 Stage IO at a glance
 
-> Figma Cloud export `.fig`는 사실 **ZIP 파일**이다. 안의 `canvas.fig`만 진짜 바이너리.
+| # | Stage | Module | Input type | Output type | Key point |
+|--:|---|---|---|---|---|
+| 1 | Container unwrap | `container.ts` | `<input>.fig` path | `ContainerResult` (canvasFig + meta + thumbnail + images) | ZIP / raw auto-branch |
+| 2 | fig-kiwi chunk split | `archive.ts` | `canvas.fig` bytes | `FigArchive { prelude, version, chunks[] }` | 8B magic + 4B version + length-prefixed chunks |
+| 3 | Decompression | `decompress.ts` | Two compressed chunks | `Uint8Array × 2` | **schema=deflate-raw, data=zstd** auto-detect |
+| 4 | Kiwi decode | `decoder.ts` | Uncompressed schema + data | `DecodedFig { schema, message }` | rootType `NODE_CHANGES`, 568 type defs |
+| 5 | Tree reconstruction | `tree.ts` | `message.nodeChanges[]` | `BuildTreeResult { document, allNodes, orphans }` | parent GUID + fractional-index sorting |
+| 6 | Image ref mapping | `assets.ts` | tree + `images` Map | `Map<hash, Set<ownerGuid>>` | magic byte → extension inference |
+| 7 | Vector extraction | `vector.ts` | tree + `message.blobs[]` | SVG path × N | best-effort (sample 95%) |
+| 8 | Normalize + Export | `normalize.ts`, `export.ts` | tree + refs + decoded | `output/<figName>/**` | REST API-compatible aliases + per-page split |
+| 9 | Verification report | `verify.ts` | All prior results | `verification_report.md` | 7 active checks (V-01·02·03·04·06·07·08); V-05 reserved |
 
-| | |
-|---|---|
-| **모듈** | `src/container.ts` |
-| **입력** | `<input>.fig` 파일 경로 |
-| **처리** | 1. 파일 첫 4 byte로 ZIP/raw 자동 분기 (ZIP magic `50 4B 03 04` 또는 fig-kiwi magic `66 69 67 2D 6B 69 77 69`)<br>2. ZIP이면 `adm-zip`으로 entries 순회 → `canvas.fig`, `meta.json`, `thumbnail.png`, `images/<hash>` 분리<br>3. raw fig-kiwi이면 그대로 사용 |
-| **출력 (memory)** | `ContainerResult { isZipWrapped, canvasFig, metaJson, thumbnail, images }` |
-| **출력 (disk)** | **`extracted/01_container/`** ← (자세한 구조는 §3 참고) |
+> Stage 6 is memory-only. Stage 8 persists the ref mapping to disk in a single batch.
 
-### Stage 2️⃣ fig-kiwi 아카이브 청크 분해
+### Stage 1️⃣ Container unwrap
 
-> `canvas.fig`는 Evan Wallace의 **Kiwi 직렬화 포맷** + 청크 컨테이너. 두 청크(스키마 + 데이터)로 나뉜다.
-
-| | |
-|---|---|
-| **모듈** | `src/archive.ts` |
-| **입력** | `canvas.fig` byte (Stage 1) |
-| **처리** | 1. 8 byte `fig-kiwi` magic 검증<br>2. 4 byte LE uint32 → archive version (예: 106)<br>3. 루프: `[4 byte LE size][size bytes data]` → chunks[] 추출 |
-| **출력 (memory)** | `FigArchive { prelude, version, chunks[] }` |
-| **출력 (disk)** | **`extracted/02_archive/chunks/00_schema.bin`** (압축, 26 KB)<br>**`extracted/02_archive/chunks/01_data.bin`** (압축, 3.81 MB) |
-
-### Stage 3️⃣ 압축 해제 (deflate-raw / zstd 자동 분기)
-
-> 첫 청크는 **deflate-raw**, 두 번째 청크는 **zstd** — 한 파일 안에 다른 알고리즘. 본 프로젝트의 핵심 발견.
+> A Figma Cloud-exported `.fig` is actually a **ZIP file**. Only the inner `canvas.fig` is the real binary.
 
 | | |
 |---|---|
-| **모듈** | `src/decompress.ts` |
-| **입력** | 두 압축 chunk |
-| **처리** | 1. Magic byte 검사로 알고리즘 자동 감지<br>&nbsp;&nbsp;&nbsp;• `28 B5 2F FD` → zstd<br>&nbsp;&nbsp;&nbsp;• `78 xx` → deflate-zlib<br>&nbsp;&nbsp;&nbsp;• 그 외 → deflate-raw<br>2. 감지된 알고리즘으로 시도, 실패 시 다른 알고리즘 fallback |
-| **출력 (memory)** | `Uint8Array` × 2 (uncompressed schema + data) |
-| **출력 (disk)** | **`extracted/03_decompressed/schema.kiwi.bin`** (64 KB, deflate-raw)<br>**`extracted/03_decompressed/data.kiwi.bin`** (20 MB, **zstd**) |
+| **Module** | `src/container.ts` (107 LOC) — the sole entry point that uses `readFileSync` (§8 exception) |
+| **Input** | `<input>.fig` file path |
+| **Processing** | 1. Branch on the first N bytes:<br>&nbsp;&nbsp;• 4 bytes = `50 4B 03 04` (ZIP magic) → `loadZipContainer`<br>&nbsp;&nbsp;• 8 bytes = `66 69 67 2D 6B 69 77 69` (`fig-kiwi`) → handle as a raw single binary<br>&nbsp;&nbsp;• otherwise → explicit error containing the first 16-byte hex<br>2. For ZIP, iterate entries via `adm-zip`. Recognized entries: `canvas.fig`, `meta.json`, `thumbnail.png`, `images/<hash>`. **Anything else is silently skipped** (forward-compat).<br>3. If `canvas.fig` is missing, FAIL with the list of found entries. Also error explicitly on `meta.json` parse failure. |
+| **Output (memory)** | `ContainerResult { isZipWrapped: boolean, canvasFig: Uint8Array, metaJson?: FigMetaJson, thumbnail?: Uint8Array, images: Map<hash, Uint8Array> }` |
+| **Output (disk)** | **`extracted/<figName>/01_container/`** (details in §3.2) |
+| **Invariant** | For raw fig-kiwi input, `images.size === 0` |
 
-### Stage 4️⃣ Kiwi 디코드 (스키마 → 메시지)
+### Stage 2️⃣ fig-kiwi archive chunk split
 
-> 첫 청크는 **스키마 정의 자체**(568개 타입), 두 번째 청크는 그 스키마로 인코딩된 **NodeChanges 메시지**.
-
-| | |
-|---|---|
-| **모듈** | `src/decoder.ts` |
-| **입력** | uncompressed schema + data byte |
-| **처리** | 1. `kiwi.decodeBinarySchema(schemaBytes)` → Schema 객체<br>2. `kiwi.compileSchema(schema)` → CompiledSchema (decoder 클래스)<br>3. `compiled.decodeMessage(dataBytes)` → 메시지 객체 (root: `NODE_CHANGES`) |
-| **출력 (memory)** | `DecodedFig { schema, message, ... }` |
-| **출력 (disk)** | **`extracted/04_decoded/schema.json`** (812 KB, 사람이 읽는 스키마 정의)<br>**`extracted/04_decoded/message.json`** (~150 MB, `--include-raw-message` 시) |
-
-### Stage 5️⃣ 노드 트리 재구성
-
-> 메시지의 `nodeChanges[]`는 평탄한 배열. parent GUID로 **트리 복원** + position 문자열로 **형제 정렬**.
+> `canvas.fig` is Evan Wallace's **Kiwi serialization format** + a chunk container. Two chunks (schema + data). Additional chunks are preserved for forward-compat.
 
 | | |
 |---|---|
-| **모듈** | `src/tree.ts` |
-| **입력** | `message.nodeChanges[]` (35660개) |
-| **처리** | 1. 각 노드를 `(sessionID:localID)` 키로 Map에 저장<br>2. 각 노드의 `parentIndex.guid`로 부모 찾고 children에 추가<br>3. `parentIndex.position` 문자열로 형제 정렬 (Figma의 fractional indexing)<br>4. `DOCUMENT` 타입 = root, parent 못 찾은 노드 = orphans |
-| **출력 (memory)** | `BuildTreeResult { document, allNodes, orphans }` |
-| **출력 (disk)** | **`extracted/05_tree/nodes-flat.json`** (3.6 MB, 평탄 테이블 — grep 가능)<br>**`extracted/05_tree/orphans.json`** (있을 때만) |
+| **Module** | `src/archive.ts` (62 LOC) |
+| **Input** | `canvas.fig` bytes (Stage 1) |
+| **Processing** | 1. `data.length < 12` → fail immediately<br>2. UTF-8 decode the first 8 bytes and compare to `"fig-kiwi"`<br>3. Bytes 8~11: LE uint32 → `archive.version` (sample: 106)<br>4. Loop from `offset` 12: `[4 byte LE size][size bytes payload]` → append to `chunks[]`<br>&nbsp;&nbsp;• if `size === 0`, preserve as `Uint8Array(0)` (not skipped)<br>&nbsp;&nbsp;• if `offset + size > data.length`, fail (message includes chunk index/offset)<br>5. Trailing bytes after the last chunk emit a stderr warning only and processing continues (forward-compat) |
+| **Output (memory)** | `FigArchive { prelude: "fig-kiwi", version: number, chunks: Uint8Array[] }` |
+| **Output (disk)** | **`extracted/.../02_archive/chunks/00_schema.bin`** (compressed, sample: 26 KB)<br>**`extracted/.../02_archive/chunks/01_data.bin`** (compressed, sample: 3.72 MB) |
+| **Invariant** | For a normal sample, `chunks.length === 2`. `chunks[0]` = schema, `chunks[1]` = data — a precondition of Stage 4. |
 
-### Stage 6️⃣ 이미지 참조 매핑
+### Stage 3️⃣ Decompression (deflate-raw / zstd auto-branch)
 
-> 트리 walk → image hash 수집 → ZIP에서 추출한 `images/`와 cross-check.
-
-| | |
-|---|---|
-| **모듈** | `src/assets.ts` |
-| **입력** | 트리 root + Stage 1의 `images` Map |
-| **처리** | 1. 모든 노드 데이터 재귀 walk<br>2. `image.hash`, `imageRef`, `hash` 필드에서 SHA-1 해시 수집<br>3. `hash → Set<owner-guid>` 매핑 생성<br>4. magic byte로 이미지 확장자 추론 (PNG/JPG/WebP/GIF/SVG/PDF) |
-| **출력 (memory)** | `Map<hash, Set<guid>>` |
-| **출력 (disk)** | (이 단계 자체는 디스크 출력 없음, Stage 8에서 `output/assets/images/<hash>.<ext>`로 저장) |
-
-### Stage 7️⃣ 벡터 추출 (best-effort)
-
-> VECTOR 노드의 `fillGeometry[*].commandsBlob` → `message.blobs[]` 인덱스 → byte 디코드 → SVG path.
+> The first chunk is **deflate-raw**, the second is **zstd** — two different algorithms in one file. The project's key finding (validating the hypothesis in PRD §1.2.3).
 
 | | |
 |---|---|
-| **모듈** | `src/vector.ts` |
-| **입력** | 트리 + `message.blobs[]` |
-| **처리** | 1. VECTOR/STAR/LINE/ELLIPSE/REGULAR_POLYGON 노드 순회<br>2. fillGeometry/strokeGeometry의 `commandsBlob` → blobs[] 인덱스<br>3. blob byte → path command 디코드:<br>&nbsp;&nbsp;&nbsp;• `0x01` MOVE_TO + 2×float32<br>&nbsp;&nbsp;&nbsp;• `0x02` LINE_TO + 2×float32<br>&nbsp;&nbsp;&nbsp;• `0x03` CUBIC + 6×float32<br>&nbsp;&nbsp;&nbsp;• `0x04` QUAD + 4×float32<br>&nbsp;&nbsp;&nbsp;• `0x05` CLOSE<br>4. 두 시작 offset(0, 1) 시도하고 더 많은 명령을 디코드한 쪽 채택<br>5. fill/stroke 색상까지 SVG에 반영 |
-| **출력 (disk)** | **`output/assets/vectors/<node-id>.svg`** × 1599 (95% 성공률) |
+| **Module** | `src/decompress.ts` (67 LOC) |
+| **Input** | Compressed chunk bytes (Stage 2's `chunks[i]`, called twice) |
+| **Processing** | 1. `detectCompression(buf)` — exact branch rules:<br>&nbsp;&nbsp;• first 4 bytes = `28 B5 2F FD` → `zstd`<br>&nbsp;&nbsp;• `buf[0] === 0x78` *and* `((buf[0] << 8) \| buf[1]) % 31 === 0` (zlib FCHECK validation) → `deflate-zlib`<br>&nbsp;&nbsp;• otherwise → `deflate-raw`<br>2. Fallback order is determined by the detection result:<br>&nbsp;&nbsp;• zstd → `[zstd, deflate-raw, deflate-zlib]`<br>&nbsp;&nbsp;• deflate-zlib → `[deflate-zlib, deflate-raw, zstd]`<br>&nbsp;&nbsp;• deflate-raw → `[deflate-raw, deflate-zlib, zstd]`<br>3. If all algorithms fail, throw explicitly with the last error. Empty buffers are returned as-is. |
+| **Output (memory)** | `Uint8Array` × 2 (uncompressed schema + data). The detection label is preserved on `DecodedFig.schemaCompression` and `dataCompression` |
+| **Output (disk)** | **`extracted/.../03_decompressed/schema.kiwi.bin`** (sample: 64 KB, `deflate-raw` decompressed)<br>**`extracted/.../03_decompressed/data.kiwi.bin`** (sample: 20 MB, **`zstd`** decompressed) |
+| **Invariant** | For the sample (v106) schema=`deflate-raw`, data=`zstd` — V-07 verifies the labels |
 
-### Stage 8️⃣ 정규화 + Export
+### Stage 4️⃣ Kiwi decode (schema → message)
 
-> Kiwi 원본 키 보존 + REST API 호환 별칭 추가, 페이지별로 분리.
-
-| | |
-|---|---|
-| **모듈** | `src/normalize.ts`, `src/export.ts` |
-| **입력** | 트리 + 이미지 refs + 디코드 결과 |
-| **처리** | 1. 트리 노드를 `NormalizedNode`로 변환:<br>&nbsp;&nbsp;&nbsp;• `id` (S:L 문자열), `parentId` 추가<br>&nbsp;&nbsp;&nbsp;• `fillPaints` → `fills` 별칭<br>&nbsp;&nbsp;&nbsp;• `strokePaints` → `strokes` 별칭<br>&nbsp;&nbsp;&nbsp;• `size + transform` → `absoluteBoundingBox`<br>&nbsp;&nbsp;&nbsp;• `Uint8Array` → hex 문자열, `BigInt` → 문자열<br>2. CANVAS 노드별로 페이지 분리<br>3. 이미지 magic 추론 후 disk 저장<br>4. SHA-256 manifest 생성 |
-| **출력 (disk)** | `output/document.json` (전체 트리, `--no-document` 시 생략)<br>**`output/pages/<idx>_<name>.json`** × 6<br>**`output/assets/images/<hash>.<ext>`** × 12<br>**`output/assets/vectors/<id>.svg`** × 1599<br>**`output/assets/thumbnail.png`**<br>**`output/schema.json`** (812 KB)<br>**`output/metadata.json`**<br>**`output/manifest.json`** (모든 산출물 인덱스 + sha256) |
-
-### Stage 9️⃣ 검증 보고서
-
-> 자동 V-01~V-08 체크 + 통계 + Markdown 보고서.
+> The first chunk is the **schema definition itself** (568 types in the sample); the second is the **NodeChanges message** encoded with that schema. v106 fig only requires 2 chunks, but any additional chunks are preserved in `extraChunks`.
 
 | | |
 |---|---|
-| **모듈** | `src/verify.ts` |
-| **입력** | 모든 단계 결과 |
-| **처리** | V-01 입력 무결성 (canvas.fig magic 재확인)<br>V-02 디코딩 round-trip (schema re-encode byte 비교)<br>V-03 트리 일관성 (parent 존재, 사이클 없음)<br>V-04 에셋 일관성 (imageRef ↔ images/ cross-check)<br>V-06 meta.json 일치<br>V-07 Kiwi 스키마 sanity (정의 수 + 압축 알고리즘)<br>V-08 Export 산출물 검증 |
-| **출력 (disk)** | **`output/verification_report.md`** |
+| **Module** | `src/decoder.ts` (85 LOC) |
+| **Input** | `archive.chunks` (Stage 2). Precondition: `chunks.length >= 2` — throws on violation |
+| **Processing** | 1. Decompress `chunks[0]` → `rawSchemaBytes`<br>2. `kiwi.decodeBinarySchema(rawSchemaBytes)` → `Schema` object<br>3. `kiwi.compileSchema(schema)` → `compiled` (carries encode/decode methods, reused by V-02)<br>4. Decompress `chunks[1]` → `rawDataBytes`<br>5. `compiled.decodeMessage(rawDataBytes)` → message<br>6. **rootType is extracted heuristically** — use `schema.rootType` if present, else the `name` of the first `MESSAGE` kind in `definitions[]` (the sample result: `NODE_CHANGES`) |
+| **Output (memory)** | `DecodedFig { archiveVersion, archive, schema, compiled, message, rawSchemaBytes, rawDataBytes, schemaCompression, dataCompression, extraChunks, schemaStats: { definitionCount, rootType? } }` |
+| **Output (disk)** | **`extracted/.../04_decoded/schema.json`** (sample 812 KB, `definitions[]`)<br>`extracted/.../04_decoded/message.json` (sample ~150 MB, **only with `--include-raw-message`**) |
+| **Invariant** | `rawSchemaBytes` and `compiled` are reused for the V-02 schema round-trip + message re-encode |
+
+### Stage 5️⃣ Node tree reconstruction
+
+> The message's `nodeChanges[]` is a flat array. **Tree reconstruction** uses parent GUID + position strings for **sibling ordering**.
+
+| | |
+|---|---|
+| **Module** | `src/tree.ts` (90 LOC) |
+| **Input** | `message.nodeChanges[]` (sample: 35,660 nodes) |
+| **Processing** | Exactly 3 passes:<br>**Pass 1** — store each nodeChange in a Map keyed by `guidKey(sessionID:localID)`. Skip if `guid` is missing or the key is empty.<br>**Pass 2** — look up parents via `parentIndex.guid`. Branches:<br>&nbsp;&nbsp;• no parent guid / empty key + `type === 'DOCUMENT'` → the first such node becomes `document`; subsequent DOCUMENTs go to `orphans`<br>&nbsp;&nbsp;• no parent guid / empty key + other type → `orphans`<br>&nbsp;&nbsp;• parent guid present and lookup succeeds → append to the parent's `children` array<br>&nbsp;&nbsp;• parent guid present but lookup fails → `orphans`<br>**Pass 3** — sort siblings by lexicographic comparison of the `position` string (Figma's fractional indexing). Sort both the document tree and orphans recursively. Detailed spec: [`specs/parent-index-position.spec.md`](./specs/parent-index-position.spec.md). |
+| **Output (memory)** | `BuildTreeResult { document: TreeNode \| null, allNodes: Map<string, TreeNode>, orphans: TreeNode[] }`. Each `TreeNode` carries `{ guid, guidStr, type, name?, parentGuid?, position?, children, data }`, where `data` is the original nodeChange (raw preserved). |
+| **Output (disk)** | **`extracted/.../05_tree/nodes-flat.json`** (sample 3.6 MB, flat table for grepping)<br>`extracted/.../05_tree/orphans.json` (only when orphans.length > 0) |
+| **Invariant** | If `document` is null, V-03 FAILs. Dangling parent / cycle is a V-03 FAIL. Orphans do not trigger WARN/FAIL. |
+
+### Stage 6️⃣ Image reference mapping
+
+> Walk the tree → collect image hashes → cross-check against `images/` extracted from the ZIP.
+
+| | |
+|---|---|
+| **Module** | `src/assets.ts` (131 LOC) |
+| **Input** | Tree root + the `images` Map from Stage 1 |
+| **Processing** | 1. `collectImageRefs(root)` — recursive walk of the node tree. From each object collect **3 patterns** (spec: [`specs/asset-walk.spec.md`](./specs/asset-walk.spec.md)):<br>&nbsp;&nbsp;• `obj.image.hash` (Uint8Array \| string)<br>&nbsp;&nbsp;• its own `obj.hash` (when an Image message appears directly)<br>&nbsp;&nbsp;• `obj.imageRef` (REST API-compatible field)<br>2. If the hash is `Uint8Array`, convert to hex via `Buffer.from(...).toString('hex')`. If a string, `toLowerCase()`.<br>3. Build a `Map<hash, Set<owner-guid>>`. Identical hashes accumulate in the set.<br>4. `detectImageExt(buf)` — called by Stage 8. Magic patterns: |
+
+**`detectImageExt` magic table:**
+
+| Extension | Byte pattern |
+|---|---|
+| `png` | `89 50 4E 47 0D 0A 1A 0A` (8 bytes) |
+| `jpg` | `FF D8 FF` (3 bytes) |
+| `gif` | `47 49 46 38` (`GIF8`, 4 bytes) |
+| `pdf` | `25 50 44 46` (`%PDF`, 4 bytes) |
+| `webp` | `RIFF` (0~3) + `WEBP` (8~11) |
+| `svg` | ASCII-decode the first 16 bytes and match `^\s*<\?xml` or `^\s*<svg` (case-insensitive) |
+| `bin` | None of the above match, or `length < 4` |
+
+| | |
+|---|---|
+| **Output (memory)** | `Map<hash, Set<owner-guid>>` |
+| **Output (disk)** | This stage has none — Stage 8 writes `output/<figName>/assets/images/<hash>.<ext>` in a single batch |
+
+### Stage 7️⃣ Vector extraction (best-effort)
+
+> A VECTOR node's `fillGeometry[*].commandsBlob` → `message.blobs[]` index → byte decode → SVG path. Detailed spec: [`specs/vector-decode.spec.md`](./specs/vector-decode.spec.md).
+
+| | |
+|---|---|
+| **Module** | `src/vector.ts` (480 LOC) |
+| **Input** | Tree + `message.blobs[]` (each blob: `{ bytes: Uint8Array }`) |
+| **Processing** | 1. Iterate 7 vector types: `VECTOR`, `STAR`, `LINE`, `ELLIPSE`, `REGULAR_POLYGON`, `BOOLEAN_OPERATION`, `ROUNDED_RECTANGLE`<br>2. Collect blob index candidates from the node data:<br>&nbsp;&nbsp;• `vectorData.vectorNetworkBlob` (entire path)<br>&nbsp;&nbsp;• `fillGeometry[*].commandsBlob` (fill regions)<br>&nbsp;&nbsp;• `strokeGeometry[*].commandsBlob` (stroke regions)<br>3. Decode blob bytes → path commands (LE float32):<br>&nbsp;&nbsp;• `0x01` MOVE_TO + 2 × f32 (x, y)<br>&nbsp;&nbsp;• `0x02` LINE_TO + 2 × f32<br>&nbsp;&nbsp;• `0x03` CUBIC + 6 × f32 (c1x, c1y, c2x, c2y, x, y)<br>&nbsp;&nbsp;• `0x04` QUAD + 4 × f32 (cx, cy, x, y)<br>&nbsp;&nbsp;• `0x05` CLOSE (no args)<br>4. **Try both starting offsets 0 and 1**, picking the side that successfully decodes more commands. When byte 0 is a winding flag (0x00), offset 1 wins — this heuristic decodes 95% of the sample.<br>5. The `windingRule` + `styleID` from fillGeometry / strokeGeometry are also reflected into the SVG fill/stroke colors |
+| **Output (memory)** | `VectorExtractionResult[] { nodeId, nodeName?, svg?, error?, blobIndices }` |
+| **Output (disk)** | **`output/<figName>/assets/vectors/<node-id>.svg`** (sample: 1,599 / 1,681 ≈ 95% success). Nodes that fail to decode produce no SVG file and retain only the `error` field |
+| **Invariant** | On encountering an unknown cmd byte, decode halts and the raw bytes are preserved as metadata (in the sample 95% of all cmds are 0x01~0x05) |
+
+### Stage 8️⃣ Normalize + Export
+
+> Preserves the original Kiwi keys + adds REST API-compatible aliases (the "pragmatic (b)" policy — both grep-able). Splits per page. REST normalization spec: [`specs/rest-api-normalize.spec.md`](./specs/rest-api-normalize.spec.md).
+
+| | |
+|---|---|
+| **Module** | `src/normalize.ts` (134 LOC), `src/export.ts` (352 LOC) |
+| **Input** | Tree + image refs + `DecodedFig` |
+| **Processing** | 1. Recursive `normalizeNode()` — `TreeNode` → `NormalizedNode`:<br>&nbsp;&nbsp;• `id` = `guidStr` (the `S:L` string); `guid` is also preserved<br>&nbsp;&nbsp;• `parentId` = the parent's `guidKey`<br>&nbsp;&nbsp;• Copy `data.visible` directly if it is a boolean<br>&nbsp;&nbsp;• Add aliases (only when present): `fillPaints` → `fills`, `strokePaints` → `strokes`, `effects` → `effects` (as-is)<br>&nbsp;&nbsp;• `absoluteBoundingBox` (best-effort): if `size` is present, `{ x: transform.m02 ?? 0, y: transform.m12 ?? 0, width: size.x, height: size.y }`. **The rotation/scale components of transform are ignored** — only the translation components (m02/m12) are used.<br>&nbsp;&nbsp;• Preserve original data in `raw` — `Uint8Array` → hex string (via `hashToHex`), `BigInt` → `.toString()`. Everything else is deep-copied.<br>2. Split pages by CANVAS node (sample: 6 CANVAS)<br>3. For each hash in the Stage 6 ref Map, call `detectImageExt(buf)` and persist to disk<br>4. Generate a SHA-256 manifest of all outputs |
+| **Output (disk)** | `output/<figName>/document.json` (entire tree; omitted with `--no-document`)<br>**`output/<figName>/pages/<idx>_<name>.json`** (one per CANVAS)<br>**`output/<figName>/assets/images/<hash>.<ext>`**<br>**`output/<figName>/assets/vectors/<id>.svg`**<br>**`output/<figName>/assets/thumbnail.png`**<br>**`output/<figName>/schema.json`** (sample 812 KB)<br>**`output/<figName>/metadata.json`**<br>**`output/<figName>/manifest.json`** (output index + sha256) |
+| **Invariant** | bbox does not exactly represent the visual bounding box of a rotated node — consumers must inspect `raw.transform` directly |
+
+### Stage 9️⃣ Verification report
+
+> Automated V-01 ~ V-08 checks + statistics + Markdown report. Detailed contract: [`specs/verification-report.spec.md`](./specs/verification-report.spec.md).
+
+| | |
+|---|---|
+| **Module** | `src/verify.ts` |
+| **Input** | All prior stage results |
+| **Processing** | Run the 7 active checks from §4 (V-01·02·03·04·06·07·08) sequentially, then write the markdown report. V-05 (determinism) is excluded from `runChecks()` — see the §4 footnote |
+| **Output (disk)** | **`output/<figName>/verification_report.md`** |
 
 ---
 
-## 2. 역방향 파이프라인: Repack
+## 3. Output directory structure (measured)
 
-> `extracted/` → `.fig` 재생성. PRD §2.2의 v1 비목표였으나 v2 scope 확장.
+`<figName>` = the input `.fig` basename with the `.fig` extension stripped (any characters allowed, including spaces).
 
-```
-                    ┌──────────────┐
-extracted/01_container/  ───►  │  byte mode   │  ─── 1:1 ZIP STORE  ───►  out.fig
-                    └──────────────┘
-                           OR
-extracted/03_decompressed/  ───►  ┌──────────────┐
-                            │  kiwi mode   │  ─── re-encode + deflate-raw + ZIP ──►  out.fig
-                            └──────────────┘
-```
+### 3.1 `output/<figName>/` — for user consumption
 
-| 모드 | 모듈 | 처리 | 결과 사이즈 | canvas.fig 동등성 |
-|---|---|---|---|---|
-| **byte** | `src/repack.ts::repackByteLevel` | extracted/01_container/의 raw 파일을 ZIP STORE로 묶기 | 5.77 MB (원본 ≈) | 🟢 byte-identical |
-| **kiwi** | `src/repack.ts::repackKiwi` | 03_decompressed/의 schema+data를 kiwi 재인코드 → deflate-raw 압축 → fig-kiwi archive 작성 → ZIP | 6.82 MB (+18%) | 🔴 (의미는 동등) |
-
-**자동 round-trip 검증**: 두 모드 모두 결과 .fig를 즉시 우리 자신의 파서로 다시 추출하여 nodes/schema/version 일치 확인.
-
----
-
-## 3. 출력 디렉토리 구조 (실측 결과)
-
-### 3.1 `output/` — 사용자 소비용 (87 MB)
-
-> 사람이 읽고 검색하기 좋은 형태. REST API와 호환되는 별칭 포함.
+> Shaped for human reading and grep. Includes REST API-compatible aliases.
+> The sizes below are based on a sample (a 6-page · 35,660-node fig, `--no-document --minify`) ≈ 87 MB.
 
 ```
-output/
-├── pages/                                      # 페이지별 트리 (CANVAS 단위 분리)
-│   ├── 00_design setting.json       2.5 MB
-│   ├── 01_Internal Only Canvas.json   258 KB
-│   ├── 02_WEB.json                   67.5 MB
-│   ├── 03_MOBILE.json                3.6 MB
-│   ├── 04_dash board.json            2.4 MB
-│   └── 05_icons.json                 1.4 MB
+output/<figName>/
+├── pages/                                   # per-page tree (split by CANVAS)
+│   ├── 00_design setting.json     2.5 MB    # ← sample page sizes. Real figures vary by input.
+│   ├── 01_Internal Only Canvas.json 258 KB
+│   ├── 02_WEB.json                67.5 MB
+│   ├── 03_MOBILE.json              3.6 MB
+│   ├── 04_dash board.json          2.4 MB
+│   └── 05_icons.json               1.4 MB
 ├── assets/
-│   ├── images/                                 # SHA-1 해시 파일명 + magic 기반 확장자
-│   │   ├── 01953550...256875bb6b.png   8.7 KB
-│   │   ├── 0f14a2f9...3977d529.png    20.2 KB
-│   │   ├── 37999f9a...eb35c569.png    35.7 KB
-│   │   ├── ... (총 12개 PNG)
-│   │   └── ce4146cf...62e7736dd.png    1.5 MB
-│   ├── vectors/                                # commandsBlob → SVG path
+│   ├── images/                              # SHA-1 hash + magic-based extension
+│   │   ├── 01953550...256875bb6b.png
+│   │   ├── ... (sample: 12 PNGs)
+│   │   └── ce4146cf...62e7736dd.png
+│   ├── vectors/                             # commandsBlob → SVG path
 │   │   └── <node-id>.svg × 1,599
-│   └── thumbnail.png                           17.7 KB
-├── schema.json                                 # Kiwi 스키마 정의 568개  (812 KB)
-├── metadata.json                               # meta.json + 추출 통계 (1 KB)
-├── manifest.json                               # 모든 산출물 인덱스 + SHA-256 (204 KB)
-└── verification_report.md                      # V-01~V-08 검증 보고서 (120 KB)
+│   └── thumbnail.png
+├── schema.json                              # Kiwi schema 568 defs (~812 KB)
+├── metadata.json                            # meta.json + extraction stats
+├── manifest.json                            # output index + SHA-256 (~204 KB)
+└── verification_report.md                   # V-01 ~ V-08 results (~120 KB)
 ```
 
-> `document.json` (전체 트리 단일 파일)은 `--no-document` 시 생략. 위 결과는 `--no-document --minify`로 생성.
+> `document.json` (the whole tree in one file) can be omitted via `--no-document` (since it duplicates the page files).
 
-### 3.2 `extracted/<figName>/` — 디버그·재패키징용 (34 MB)
+### 3.2 `extracted/<figName>/` — for debug/repack
 
-> 파이프라인 각 단계의 breadcrumb. 각 `.fig` 파일은 자기 이름의 디렉토리를 가진다 (충돌 회피). 각 폴더에 `_info.json` 메타파일.
+> Stage-by-stage pipeline breadcrumbs. Each folder has an `_info.json` metadata file.
+> The sizes below are based on the same sample ≈ 34 MB.
 
 ```
-extracted/
-└── <figName>/                                  # 예: "메타리치 화면 UI Design"
-    ├── 01_container/                           # Stage 1 결과
-    │   ├── canvas.fig                  3.74 MB # ZIP 내부의 fig-kiwi 바이너리
-    │   ├── meta.json                   341 B   # file_name, background_color 등
-    │   ├── thumbnail.png               17.7 KB
-    │   ├── images/                             # 해시 파일명, 확장자 없음 (raw)
-    │   └── _info.json                          # sha256, byteLength, magic byte 등
-    │
-    ├── 02_archive/                             # Stage 2 결과 (압축 상태)
-    │   ├── chunks/
-    │   │   ├── 00_schema.bin           26 KB   # firstBytes: b5 bd 09 98...
-    │   │   └── 01_data.bin             3.72 MB # firstBytes: 28 b5 2f fd... (zstd)
-    │   └── _info.json                          # version=106, chunkCount=2
-    │
-    ├── 03_decompressed/                        # Stage 3 결과 (압축 해제)
-    │   ├── schema.kiwi.bin             64 KB   # Kiwi schema 바이너리
-    │   ├── data.kiwi.bin               20 MB   # NodeChanges 메시지 바이너리
-    │   └── _info.json                          # 압축 알고리즘 (deflate-raw / zstd)
-    │
-    ├── 04_decoded/                             # Stage 4 결과 (JSON)
-    │   ├── schema.json                 812 KB  # 568개 type 정의를 JSON으로
-    │   └── _info.json                          # rootMessageType, nodeChangesCount=35660
-    │   # message.json (~150 MB)은 --include-raw-message 시에만 생성
-    │
-    └── 05_tree/                                # Stage 5 결과
-        ├── nodes-flat.json             3.6 MB  # 평탄 테이블 (id, type, name, parentId, childCount)
-        └── _info.json                          # totalNodes=35660, pageCount=6, typeDistribution
+extracted/<figName>/
+├── 01_container/                            # Stage 1
+│   ├── canvas.fig                3.74 MB    # fig-kiwi binary inside the ZIP
+│   ├── meta.json                 341 B      # file_name, background_color, etc.
+│   ├── thumbnail.png             17.7 KB
+│   ├── images/                              # hash filename, raw bytes
+│   └── _info.json                           # sha256, byteLength, magic bytes
+│
+├── 02_archive/                              # Stage 2 (compressed state)
+│   ├── chunks/
+│   │   ├── 00_schema.bin         26 KB      # firstBytes: b5 bd 09 98...
+│   │   └── 01_data.bin           3.72 MB    # firstBytes: 28 b5 2f fd... (zstd)
+│   └── _info.json                           # version=106, chunkCount=2
+│
+├── 03_decompressed/                         # Stage 3 (decompressed)
+│   ├── schema.kiwi.bin           64 KB      # Kiwi schema binary
+│   ├── data.kiwi.bin             20 MB      # NodeChanges message binary
+│   └── _info.json                           # algorithm (deflate-raw / zstd)
+│
+├── 04_decoded/                              # Stage 4 (JSON)
+│   ├── schema.json               812 KB     # 568 type definitions
+│   └── _info.json                           # rootMessageType, nodeChangesCount
+│   # message.json (~150 MB) — generated only with `--include-raw-message`
+│
+└── 05_tree/                                 # Stage 5
+    ├── nodes-flat.json           3.6 MB     # (id, type, name, parentId, childCount)
+    └── _info.json                           # totalNodes, pageCount, typeDistribution
 ```
 
-`<figName>`은 입력 `.fig`의 basename에서 `.fig` 확장자 제거한 문자열 (한글·공백 OK).
+> Folders added by other subcommands — `06_report/` (round-trip viewer), `07_editable/` (single-file HTML), `08_pen/` (pencil.dev .pen) — are covered in §7 and the sibling docs.
 
-### 3.3 `extracted/*/_info.json` 예시
-
-각 단계의 `_info.json`은 그 단계에서 무슨 일이 일어났는지 기록. 예 (`02_archive/_info.json`):
+### 3.3 `_info.json` example (`02_archive/_info.json`)
 
 ```json
 {
   "stage": "02_archive",
-  "description": "fig-kiwi 청크 분해 (압축 상태). 첫 청크 = Kiwi 스키마, 두 번째 = 데이터 메시지.",
+  "description": "fig-kiwi chunk split (compressed state). First chunk = Kiwi schema, second = data message.",
   "prelude": "fig-kiwi",
   "version": 106,
   "chunkCount": 2,
@@ -260,207 +300,187 @@ extracted/
 
 ---
 
-## 4. 모듈 구조 (`src/`)
+## 4. Automated verification — 7 active checks (V-05 reserved)
 
-```
-src/
-├── cli.ts              CLI 진입점 + 서브커맨드 디스패처 (extract / repack)
-├── container.ts        Stage 1: ZIP / raw 자동 분기
-├── archive.ts          Stage 2: fig-kiwi 청크 분해
-├── decompress.ts       Stage 3: deflate-raw / deflate-zlib / zstd 자동 감지
-├── decoder.ts          Stage 4: Kiwi 스키마 + 메시지 디코드
-├── tree.ts             Stage 5: parent-child 트리 재구성
-├── assets.ts           Stage 6: 이미지 참조 매핑 + magic-based 확장자
-├── normalize.ts        Stage 8: REST API 호환 별칭
-├── vector.ts           Stage 7: commandsBlob → SVG path 디코더
-├── export.ts           Stage 8: 산출물 export (output/)
-├── intermediate.ts     중간 산출물 dumper (extracted/*/_info.json 포함)
-├── verify.ts           Stage 9: V-01~V-08 검증 + report
-├── repack.ts           역방향 파이프라인 (byte / kiwi 모드)
-└── types.ts            공통 타입 정의
-```
+> Implementation: `src/verify.ts`. Executed in a batch at Stage 9; produces `output/<figName>/verification_report.md`.
+> V-01·02·03·04·06·07·08 run on every extract. V-05 (determinism) is defined in the spec but excluded from `runChecks()`'s call list — determinism is the responsibility of the external audit harness.
 
-### 4.1 의존성
+| ID | Item | What it checks | Status rule | Sample result |
+|---|---|---|---|---|
+| **V-01** | Input integrity | Re-check that `canvasFig`'s first 8 bytes = the `fig-kiwi` magic | match → PASS, else FAIL | 🟢 `fig-kiwi` (✓), `isZipWrapped=true`, 3,924,602 bytes |
+| **V-02** | Decode round-trip | (a) schema: `decoded.schema` → `kiwi.encodeBinarySchema()` → byte-level diff with `rawSchemaBytes`. (b) message: attempt `compiled.encodeMessage(decoded.message)` (report success + size) | (a)+(b) both OK → PASS; only one fails → WARN; both fail → WARN | 🟢 schema bytes match (sample: 64,341 bytes). Reports message re-encode size |
+| **V-03** | Tree consistency | (a) `document` exists, (b) dangling parent count (a child's parent guid is not present in the Map), (c) cycle count via DFS | dangling=0 ∧ cycles=0 ∧ document present → PASS. dangling=0 ∧ cycles=0 but no document → WARN. Otherwise → FAIL. **The orphan count does not affect status** (informational) | 🟢 nodes=35,660, document=✓, dangling=0, cycles=0, orphans=0 |
+| **V-04** | Asset consistency | Hash compare (after lowercase normalization): missing = imageRefs ∖ images, unused = images ∖ imageRefs | Both 0 → PASS; missing>0 OR unused>0 → WARN. If both sides are empty → SKIP | 🟢 12/12 matched, missing=0, unused=0 |
+| **V-05** | Determinism (reserved) | Spec: same input processed twice → output SHA-256 identical | Not invoked by `runChecks()` — handled by the external audit harness | — |
+| **V-06** | meta.json agreement | meta.json's `file_name` / `background_color` ↔ document root metadata comparison | Match → PASS, mismatch → WARN | 🟢 match |
+| **V-07** | Kiwi schema sanity | (a) `schema.definitions.length`, (b) `Compression` labels of both chunks | definitions ≥ 100 → PASS, else WARN | 🟢 568 defs, schema=`deflate-raw`, data=**`zstd`** |
+| **V-08** | Export outputs | Each manifest entry → file exists on disk + recomputed sha256 matches | All match → PASS, 1+ missing/mismatch → FAIL | 🟢 1,621 files, 83 MB |
 
-| 패키지 | 용도 | 버전 |
-|---|---|---|
-| `adm-zip` | ZIP 컨테이너 read/write | 0.5.17 |
-| `pako` | deflate / inflate | 2.1.0 |
-| `fzstd` | zstd decompression (decode-only) | 0.1.1 |
-| `kiwi-schema` | Kiwi 직렬화 codec (Evan Wallace) | 0.5.0 |
-| `tsx`, `typescript` | dev | latest |
-
-> `fig-kiwi@0.0.1` (npm)은 optional dependency로 설치되었지만 런타임에서 사용하지 않는다 (참고용). 그 패키지는 schema/data 둘 다 `inflateRaw`로 처리하나, **본 프로젝트의 실측에서 data 청크는 zstd**임을 발견함 — 그래서 자체 `decompress.ts`로 자동 분기 구현.
+Determinism verification (the V-05 slot) is handled by external round-trip scripts: [`specs/audit-harness.spec.md`](./specs/audit-harness.spec.md), [`HARNESS.md`](./HARNESS.md).
 
 ---
 
-## 5. CLI 사용법
+## 5. Module mapping (`src/`)
 
-### 5.1 추출 (extract)
+### 5.1 Modules covered by this SPEC (Stage 1~9)
+
+| File | Role | LOC† |
+|---|---|---:|
+| `src/cli.ts` | CLI entry point + 7-subcommand dispatcher | 961 |
+| `src/container.ts` | Stage 1 — ZIP / raw auto-branch | 107 |
+| `src/archive.ts` | Stage 2 — fig-kiwi chunk split | 62 |
+| `src/decompress.ts` | Stage 3 — deflate-raw / deflate-zlib / zstd auto-detect | 67 |
+| `src/decoder.ts` | Stage 4 — Kiwi schema + message decode | 85 |
+| `src/tree.ts` | Stage 5 — parent-child tree reconstruction | 90 |
+| `src/assets.ts` | Stage 6 — image ref mapping + magic-based extensions | 131 |
+| `src/vector.ts` | Stage 7 — `commandsBlob` → SVG path decoder | 480 |
+| `src/normalize.ts` | Stage 8 — REST API-compatible aliases | 134 |
+| `src/export.ts` | Stage 8 — disk export of outputs | 352 |
+| `src/intermediate.ts` | Intermediate dumper (`extracted/.../_info.json` etc.) | 385 |
+| `src/verify.ts` | Stage 9 — automated verification + report writer | 339 |
+| `src/types.ts` | Shared type definitions (`ContainerResult`, `FigArchive`, `BuildTreeResult`, etc.) | — |
+
+† LOC is a snapshot at the time of v2.0 (2026-05-08). Verify exact numbers with `wc -l`.
+
+### 5.2 Modules covered by sibling docs (cross-ref)
+
+| File | Sibling doc |
+|---|---|
+| `src/repack.ts` | [`SPEC-repack.md`](./SPEC-repack.md) — byte / kiwi / json 3 modes |
+| `src/pen-export.ts` | [`SPEC-figma-to-pencil.md`](./SPEC-figma-to-pencil.md) — pencil.dev coordinates · ID · variant |
+| `src/instanceOverrides.ts`, `src/masterIndex.ts` | [`specs/expansion-context.spec.md`](./specs/expansion-context.spec.md) — INSTANCE expansion |
+| `src/effectiveVisibility.ts` | [`CONTEXT.md`](../CONTEXT.md) — 3-mechanism visibility composition |
+| `src/fractional-index.ts` | [`specs/parent-index-position.spec.md`](./specs/parent-index-position.spec.md) |
+| `src/html-export.ts`, `src/html-export-templates.ts` | [`specs/html-dashboard.spec.md`](./specs/html-dashboard.spec.md) |
+| `src/editable-html.ts`, `src/editable-html-css.ts` | [`specs/editable-html.spec.md`](./specs/editable-html.spec.md) |
+| `src/tokens.ts` | [`specs/tokens.spec.md`](./specs/tokens.spec.md) |
+| `web/**` (Web editor — Clean+Hexagonal) | [`SPEC-architecture.md`](./SPEC-architecture.md) |
+
+---
+
+## 6. Dependencies
+
+Runtime deps — just 4:
+
+| Package | Purpose | Version |
+|---|---|---|
+| `adm-zip` | ZIP container read/write | ^0.5.17 |
+| `pako` | deflate / inflate | ^2.1.0 |
+| `fzstd` | zstd decompression (decode-only) | ^0.1.1 |
+| `kiwi-schema` | Kiwi serialization codec (Evan Wallace) | ^0.5.0 |
+
+> `fig-kiwi@0.0.1` (npm) is installed via `optionalDependencies` but is not used at runtime. That package handles both schema and data via `inflateRaw`, but **in our measurements the data chunk is zstd** — hence the custom `decompress.ts` with auto-branching.
+
+---
+
+## 7. CLI
+
+### 7.1 `extract` (the subcommand defined by this document)
 
 ```bash
-# 기본
+# Default
 figma-reverse extract <input.fig> [output-dir]
-figma-reverse <input.fig> [output-dir]    # 'extract' 생략 가능
+figma-reverse <input.fig> [output-dir]    # 'extract' is optional (backwards-compat)
 
-# 실용 권장 (output 사이즈 90% 절약)
+# Recommended (saves ~30% output size)
 figma-reverse extract design.fig --no-document --minify
 
 # npm scripts
 npm run extract -- design.fig ./out
-npm run extract:sample          # docs/메타리치 화면 UI Design.fig 추출
+npm run extract:sample          # docs/sample fig
+npm run extract:bvp             # docs/bvp.fig
 ```
 
-| 옵션 | 효과 |
+| Option | Effect |
 |---|---|
-| `--minify` | JSON 들여쓰기 제거 (~30% 감소) |
-| `--no-document` | `output/document.json` 생략 (페이지 파일과 중복 회피) |
-| `--include-raw-message` | `extracted/04_decoded/message.json` 포함 (~150 MB) |
-| `--no-vector` | 벡터 SVG 추출 skip |
-| `--no-intermediate` | `extracted/` 생성 안함 |
-| `--extracted-dir <path>` | extracted 위치 변경 (default: `./extracted`) |
+| `--minify` | Strips JSON indentation (~30% reduction) |
+| `--no-document` | Skip `output/<figName>/document.json` (avoid duplicating page files) |
+| `--include-raw-message` | Include `extracted/.../04_decoded/message.json` (~150 MB) |
+| `--no-vector` | Skip vector SVG extraction |
+| `--no-intermediate` | Do not generate `extracted/` |
+| `--extracted-dir <path>` | Change the extracted location (default: `./extracted`) |
+| `--verbose` | Stage-by-stage progress logs |
 
-### 5.2 재패키징 (repack)
+### 7.2 The other 6 subcommands (index only)
+
+| Subcommand | Role | Details |
+|---|---|---|
+| `repack` | Regenerate `.fig` from `extracted/` (byte / kiwi / json — 3 modes) | [`SPEC-repack.md`](./SPEC-repack.md) |
+| `pen-export` | `.fig` → pencil.dev `.pen` + `.pen.json` (per page) | [`SPEC-figma-to-pencil.md`](./SPEC-figma-to-pencil.md) |
+| `editable-html` | `.fig` → single HTML (with embedded `.fig`) | [`specs/editable-html.spec.md`](./specs/editable-html.spec.md) |
+| `html-report` | `extracted/` + `output/` → browser dashboard | [`specs/html-dashboard.spec.md`](./specs/html-dashboard.spec.md) |
+| `round-trip-html` | `extracted/06_report/figma-round-trip.html` viewer | [`SPEC-roundtrip.md`](./SPEC-roundtrip.md) |
+| `tokens` | `.fig` → design tokens JSON (colors / typography / spacing) | [`specs/tokens.spec.md`](./specs/tokens.spec.md) |
+
+Full options live in each subcommand's `--help`.
+
+### 7.3 First run through
 
 ```bash
-# (a) byte mode — 안전 (canvas.fig 1:1 보존)
-figma-reverse repack ./extracted ./out.fig
-
-# (b) kiwi mode — binary roundtrip (decode→encode, deflate-raw 압축)
-figma-reverse repack ./extracted ./out.fig --mode kiwi
-
-# (c) json mode — extracted/04_decoded/message.json 편집 후 재인코드
-#   (extract 시 --include-raw-message 필요)
-figma-reverse repack ./extracted ./out.fig --mode json
-
-# 원본과 자동 비교
-figma-reverse repack ./extracted ./out.fig --original docs/design.fig
+npm install                                          # 1. dependencies
+npm run typecheck                                    # 2. typecheck (baseline 0)
+npm run extract:sample                               # 3. extract sample fig
+#  → output/<figName>/, extracted/<figName>/
+#  → verify verification_report.md PASS
+npx tsx src/cli.ts extract /path/to/your.fig ./out   # 4. arbitrary file
 ```
 
-JSON 라운드트립(`message.json` ⇄ `.fig`)은 무손실:
-- `Uint8Array` → `{__bytes: "base64..."}`
-- `bigint` → `{__bigint: "123"}`
-- `NaN`/`Infinity` → `{__num: "NaN"|"Infinity"|"-Infinity"}` (JSON에서 손실되는 값들)
-
-자세한 검토: [docs/JSON_TO_FIG_FEASIBILITY.md](JSON_TO_FIG_FEASIBILITY.md)
+Tests: `npm test` (CLI) + `cd web && npm test` (Web). For counts / coverage, see [`README.md`](../README.md).
 
 ---
 
-## 6. 검증 (V-01 ~ V-08)
+## 8. Non-functional: async / performance
 
-| ID | 항목 | 결과 (sample 기준) |
+The extract pipeline runs as asynchronously and non-blocking as possible. This is a core non-functional requirement: it determines not just the single-`.fig` processing time but also the throughput when running multiple `.fig`s concurrently. The rules in this section apply across `src/`, but the verification criteria target the extract pipeline (see sibling SPECs for the performance SLAs of other subcommands).
+
+### 8.1 Required rules (MUST)
+
+| Rule | Targets | Implementation |
 |---|---|---|
-| V-01 | canvas.fig magic 재확인 | 🟢 `fig-kiwi` (✓), 3,924,602 bytes |
-| V-02 | 스키마 round-trip | 🟢 byte-level identical (64,341 bytes) |
-| V-03 | 트리 일관성 (parent 존재, 사이클 없음) | 🟢 35,660 nodes, orphans=0, cycles=0 |
-| V-04 | 에셋 일관성 (imageRef ↔ images/) | 🟢 12/12 일치, missing=0, unused=0 |
-| V-06 | meta.json 일치 | 🟢 file_name, background_color 일치 |
-| V-07 | Kiwi 스키마 sanity | 🟢 568 defs, schema=deflate-raw, **data=zstd** |
-| V-08 | Export 산출물 | 🟢 1,621 files, 83 MB |
+| **File I/O must be async** | `.fig` reads, JSON writes, image · vector extraction | `fs/promises` (`readFile` / `writeFile`) — `*Sync` only in single-file guaranteed contexts |
+| **Parallelize pages · images · vectors** | Stage 7 SVG extraction, Stage 8 page split, asset writes | `Promise.all` to process pages · resources concurrently |
+| **Concurrency limit for CPU-heavy work** | Stage 4 kiwi decode, Stage 5 tree build | Page-level splits to avoid event-loop block; `worker_threads` as needed |
+| **Pool-parallel for multiple `.fig`s** | `npm run extract:all`, round-trip verification | `Promise.all` + per-file workers. Cap with `os.availableParallelism()` under memory pressure |
+| **Blocking hash · encode via streams** | manifest sha256, deflate-raw encoding | Prefer `crypto.createHash` / `zlib.createDeflateRaw` stream APIs; batch hash only for < 10 MB |
+
+### 8.2 Anti-patterns (MUST NOT)
+
+- `readFileSync` / `writeFileSync` inside per-page · per-image loops
+- Promise chaining without `await` followed by fire-and-forget — errors are lost
+- Unbounded nested `Promise.all` outside of per-page · per-`.fig` granularity — risks file descriptor exhaustion
+- `JSON.stringify` on huge objects → blocks the main thread; for large payloads use stream JSON or a worker
+
+### 8.3 Verification criteria (extract pipeline)
+
+- Single `.fig` end-to-end ≤ 1 s (35,660-node sample baseline)
+- Multiple `.fig`s wall-clock ≤ **1.5 N times** (parallel gain, not flat N× serial)
+- No stage in 1~9 runs a per-page · per-image sync I/O loop
 
 ---
 
-## 7. PRD 가설 검증 결과
+## 9. Known limitations (extract pipeline only)
 
-| PRD §6.3 가설 | 결과 |
-|---|---|
-| #1 ZIP 컨테이너 외부 래핑 | ✅ ZIP STORE 확인 |
-| #2 8B magic + 4B LE version + chunks | ✅ archive v106 |
-| #3 Schema chunk 디코드 (~534 type) | ✅ 568개 (가설보다 많음 — 최신 스키마) |
-| #4 Data chunk = NodeChanges | ✅ rootType=NODE_CHANGES 확인 |
-| #5 parent ID 트리 빌드 | ✅ 35660 노드, orphan 0 |
-| #6 이미지 ↔ imageRef 매핑 | ✅ 12/12 모두 매칭 |
-| #7 REST API 호환 정규화 | ✅ fills/strokes/absoluteBoundingBox 별칭 |
-| #8 commandsBlob → SVG | ✅ 1599/1681 (95%) |
-| #9 G1~G6 검증 | ✅ V-01~V-08 모두 PASS |
+| Limitation | Stage | Impact | Disposition |
+|---|---|---|---|
+| Vector decode is best-effort | Stage 7 | Of the sample's 1,681 vectors, 82 (≈ 5%) — typically `BOOLEAN_OPERATION` and other composites — lack `fillGeometry` → no SVG output | Documented as a v1 limitation. The `commandsBlob` decoder itself is deterministic (95% are byte-level identical) |
+| 3 unknown node types | Stage 5 | `VARIABLE_SET` (sample 6), `BRUSH` (25), `CODE_LIBRARY` (1) | Included in the tree but raw-preserved in normalization. Lossless as JSON |
+| `--include-raw-message` ~150 MB memory | Stage 4 | OOM possible on large figs | Off by default. Enable only when debugging |
+| Stage 7 fallback offset(0/1) heuristic | Stage 7 | If a new fig-kiwi version introduces a different prefix, both attempts may fail | For the sample (v106) trying 0/1 is sufficient. Update `vector-decode.spec.md` on violation |
 
-> **추가 발견**: PRD §1.2.3에서 추정만 했던 "이중 압축 (deflate + zstd)"가 실증됨. fig-kiwi npm 패키지가 가정하는 단일 deflate-raw와 다름 — 본 프로젝트의 자동 감지 로직이 결정적.
+**Cross-domain limitations (repack / pen-export / cloud import)** are delegated to sibling SPECs:
+- `fzstd@0.1.1` decode-only → repack size impact: [`SPEC-repack.md`](./SPEC-repack.md)
+- `.pen` match 99.6% (5 mismatches): [`SPEC-figma-to-pencil.md`](./SPEC-figma-to-pencil.md) · [`specs/audit-oracle.spec.md`](./specs/audit-oracle.spec.md)
+- Figma Cloud import verification of repacked `.fig`: [`SPEC-roundtrip.md`](./SPEC-roundtrip.md)
 
 ---
 
-## 7.5 성능 / 비동기 처리 원칙
+## 10. References (external · supplementary)
 
-본 파이프라인은 가능한 한 비동기·non-blocking으로 동작해야 한다. 단일 `.fig` 파일 처리 시간뿐 아니라 다중 `.fig`/페이지/검증 작업을 동시 실행할 때의 처리량을 결정짓는 핵심 비기능 요구사항.
+The OUT-of-scope table in §0 carries all cross-refs to sibling SPECs · CONTEXT · fig-format · HARNESS · archive. This section only collects external · supplementary material not covered there.
 
-### 7.5.1 적용 규칙 (MUST)
-
-| 규칙 | 적용 대상 | 구현 방법 |
-|---|---|---|
-| **파일 I/O는 async** | `.fig` 읽기, `.pen.json`/`.json` 쓰기, 이미지 추출 | `fs/promises` (`readFile` / `writeFile`) — `*Sync`는 단일 파일 보장 컨텍스트만 |
-| **페이지·이미지·벡터는 병렬화** | pen-export 페이지 변환, vector SVG 추출, asset 배치 | `Promise.all` 로 페이지/리소스를 동시 처리 |
-| **CPU-heavy 작업의 컨커런시 한계** | kiwi 디코드, 트리 빌드 등 단일 페이지 내부 | event-loop block을 피하기 위해 페이지 단위로 split하고, 필요 시 `worker_threads` 도입 |
-| **다중 `.fig` / 다중 검증은 풀-병렬** | `npm run extract:all`, 매칭 비교, round-trip 검증 | Promise.all + 파일별 worker. 단, 메모리 압박 시 concurrency cap (예: `os.availableParallelism()`) |
-| **블로킹 hash·encode는 stream으로 분할** | sha256, deflate-raw 인코딩 | `crypto.createHash`/`zlib.createDeflateRaw` 의 stream API 우선, 한 번에 전체 버퍼 hash는 < 10MB 때만 |
-
-### 7.5.2 회피 패턴 (MUST NOT)
-
-- `readFileSync`/`writeFileSync`를 페이지·이미지 루프 안에서 사용 (한 번에 하나만 처리됨)
-- `await` 없이 Promise 체이닝 후 fire-and-forget — 에러 lost
-- 페이지·.fig 단위 외 nested Promise.all 폭주 — file descriptor 고갈 위험
-- `JSON.stringify` 대용량 객체 → main thread block; 대용량은 stream JSON or worker
-
-### 7.5.3 매칭/비교 (`.pen` ↔ reference) 병렬 처리
-
-`_tmp_pen_diff.cjs` 등 매칭 스크립트는 다음 원칙을 따른다:
-
-```
-COMPARISONS.map(comp => compareAsync(comp))  // Promise.all 로 병렬 실행
-  ↓
-각 comp 내부:
-  await Promise.all([readFile(ref), readFile(ours)])  // 두 파일 동시 읽기
-  ↓
-  buildMap → diff (CPU; 페이지당 < 50ms 이내라 worker 불필요)
-```
-
-### 7.5.4 검증 기준
-
-- pen-export 4페이지 동시 변환 시 `Promise.all` 병렬 실행 (서로 독립)
-- 매칭 비교는 페이지 수만큼 병렬 (현재 단일 페이지지만 향후 6페이지 모두 비교 시 병렬)
-- 단일 `.fig` end-to-end 시간 ≤ 1초 (35660 노드 기준), 다중 `.fig` 시 wall-clock 시간이 최대 N배가 아니라 1.5N배 미만
-
----
-
-## 8. 알려진 제약
-
-| 제약 | 영향 | 대응 |
-|---|---|---|
-| `fzstd@0.1.1`이 decode-only | repack kiwi 모드는 deflate-raw로 통일 (사이즈 +18%) | zstd encoder 추가 가능 (`@bokuweb/zstd-wasm` 등) |
-| Vector 디코드 95% 성공 | 82개 노드는 fillGeometry 없이 BOOLEAN_OPERATION 등 합성 | v1 best-effort |
-| Figma 클라우드 임포트 미검증 | repack한 .fig를 Figma가 받아주는지 미확인 | 사용자 임포트 시도 후 결과 공유 |
-| 알 수 없는 노드 타입 3종 | `VARIABLE_SET`(6), `BRUSH`(25), `CODE_LIBRARY`(1) | 데이터는 raw 보존, 트리에는 포함 |
-| `.pen` 매칭 99.6% (1397 중 5 mismatch) | (a) 1개 Button INSTANCE의 `fit_content(48)` trigger 미식별, (b) 1개 Vector path scaling 차이, (c) breadscrum frame의 master 표현 차이 | 모두 데이터로 식별 가능한 차이가 없거나 매우 specific한 edge case. 운영 영향 미미 → 후속 PR로 보류 |
-
----
-
-## 9. 빠른 시작 체크리스트
-
-```bash
-# 1. 의존성 설치
-npm install
-
-# 2. 타입체크
-npm run typecheck
-
-# 3. 추출 (sample)
-npm run extract:sample
-#  → output/ + extracted/ 생성, verification_report.md PASS 확인
-
-# 4. 임의 파일 추출
-npx tsx src/cli.ts extract /path/to/your.fig ./my-output
-
-# 5. 재패키징 (byte mode)
-npx tsx src/cli.ts repack ./extracted ./repacked.fig
-#  → 자동 round-trip 검증 (35660 노드 / 568 defs / v106 일치)
-
-# 6. 도움말
-npx tsx src/cli.ts --help
-```
-
----
-
-## 10. 참고
-
-- [PRD.md](./PRD.md) — 원본 요구사항
+- [`adr/`](./adr/) — 0001 pen ID format · 0002 round-trip equality tiers · 0003 rendering strategy · 0004 shared modules
+- [`dev-guide.html`](./dev-guide.html) — single-file developer guide (Korean · English, 8 mermaid diagrams)
+- [`PRD.md`](./PRD.md) — original requirements
 - Evan Wallace, [Kiwi schema-based binary format](https://github.com/evanw/kiwi)
 - Albert Sikkema (2026-01), [Reverse-Engineering Figma Make Files](https://albertsikkema.com/ai/development/tools/reverse-engineering/2026/01/23/reverse-engineering-figma-make-files.html)
-- npm, [`fig-kiwi`](https://www.npmjs.com/package/fig-kiwi) — 참고용 (런타임 미사용)
+- npm, [`fig-kiwi`](https://www.npmjs.com/package/fig-kiwi) — reference only (unused at runtime)

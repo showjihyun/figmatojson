@@ -1,26 +1,20 @@
 # spec/verification-report
 
-| 항목 | 값 |
+| Field | Value |
 |---|---|
-| 상태 | Approved |
-| 구현 | `src/verify.ts` (`runVerification`, 7 check functions, `renderReport`) |
-| 출력 | `<outputDir>/verification_report.md` |
-| 테스트 | `test/verify.test.ts` (있는 한도 내) — check 별 PASS/FAIL/WARN/SKIP 분류 단위 |
-| 형제 | `SPEC.md §Stage 9` (CLI 파이프라인 source), `PRD.md §7` (검증 전략 source), `round-trip-invariants.spec.md` (전체 파이프라인 invariant 검증), `audit-harness.spec.md` (web 측 round-trip 검증) |
+| Status | Approved |
+| Implementation | `src/verify.ts` (`runVerification`, 7 check functions, `renderReport`) |
+| Output | `<outputDir>/verification_report.md` |
+| Tests | `test/verify.test.ts` (within available scope) — per-check PASS/FAIL/WARN/SKIP classification |
+| Siblings | `SPEC.md §Stage 9` (CLI pipeline source), `PRD.md §7` (verification-strategy source), `round-trip-invariants.spec.md` (whole-pipeline invariant verification), `audit-harness.spec.md` (web-side round-trip verification) |
 
-## 1. 목적
+## 1. Goal
 
-CLI 의 마지막 stage — 추출 결과가 *알려진 invariant* 를 만족하는지 검사
-하여 사람이 읽을 수 있는 `verification_report.md` 를 emit. PRD §7 의 V-01~V-06
-이 *목표 invariant* 라면, 본 spec 은 *현재 구현된 7 check 의 입력 / 통과
-기준 / 결과 해석* 을 single source 로 둔다.
+The CLI's last stage — check whether the extraction result satisfies the *known invariants* and emit a human-readable `verification_report.md`. Where PRD §7's V-01..V-06 describes the *target invariants*, this spec holds the *input / pass criteria / interpretation* of the *7 checks currently implemented* as the single source.
 
-**중요**: PRD 가 정의한 V-01~V-06 중 V-05 (결정성 — 동일 입력 2회 처리 →
-SHA-256 동일) 는 **현재 미구현**. 추가로 V-07 (schema sanity) / V-08 (export
-artifacts) 가 *PRD 외* 추가됨. 본 spec 이 *현실 구현* 을 source 로 다룸 —
-PRD 와 차이는 §6 비대상에서 명시.
+**Important**: V-05 of the PRD-defined V-01..V-06 (determinism — same input processed twice → identical SHA-256) is **currently unimplemented**. Additionally, V-07 (schema sanity) / V-08 (export artifacts) have been added *outside the PRD*. This spec sources the *actual implementation* — the differences from the PRD are listed under §6 non-goals.
 
-## 2. 진입점
+## 2. Entry point
 
 ```ts
 function runVerification(inputs: VerifyInputs): {
@@ -30,189 +24,137 @@ function runVerification(inputs: VerifyInputs): {
 };
 
 interface VerifyInputs {
-  outputDir:   string;                           // verification_report.md 출력 위치
-  container:   ContainerResult;                  // Stage 1 산출물
-  decoded:     DecodedFig;                       // Stage 2-4 산출물
-  tree:        BuildTreeResult;                  // Stage 5 산출물
-  imageRefs:   Map<string, Set<string>>;         // Stage 6 산출물
-  artifacts:   ExportArtifacts;                  // Stage 8 산출물
+  outputDir:   string;                           // where to write verification_report.md
+  container:   ContainerResult;                  // Stage 1 output
+  decoded:     DecodedFig;                       // Stage 2-4 output
+  tree:        BuildTreeResult;                  // Stage 5 output
+  imageRefs:   Map<string, Set<string>>;         // Stage 6 output
+  artifacts:   ExportArtifacts;                  // Stage 8 output
 }
 ```
 
-- I-E1 7 check 가 *고정 순서* 로 실행: V-01 → V-02 → V-03 → V-04 → V-06 →
-  V-07 → V-08. (V-05 미실행 — §I-V5)
-- I-E2 한 check 의 fail 이 다음 check 를 막지 않는다 — *모든* check 를 끝까지
-  돌리고 종합 판정.
-- I-E3 `overall` 종합 룰: `FAIL` 이 하나라도 있으면 `FAIL` / `WARN` 만 있으면
-  `WARN` / 모두 `PASS` (또는 `SKIP`) 면 `PASS`.
-- I-E4 출력은 markdown 파일 1개 — `outputDir/verification_report.md`. 별도
-  JSON / structured artifact 미생성 (PR diff 용 markdown 만 carry).
+- I-E1 The 7 checks run in *fixed order*: V-01 → V-02 → V-03 → V-04 → V-06 → V-07 → V-08. (V-05 not run — §I-V5.)
+- I-E2 A failure in one check does not block the next — *all* checks run to completion, then a combined verdict is computed.
+- I-E3 `overall` combine rule: any `FAIL` → `FAIL` / only `WARN` → `WARN` / all `PASS` (or `SKIP`) → `PASS`.
+- I-E4 Output is a single markdown file — `outputDir/verification_report.md`. No separate JSON / structured artifact is produced (only markdown is carried, for PR diffs).
 
-## 3. CheckResult 형태
+## 3. CheckResult shape
 
 ```ts
 interface CheckResult {
-  id:      string;                               // "V-01" 등 PRD 명명
-  name:    string;                               // 한국어 검사 이름
+  id:      string;                               // e.g., "V-01" — PRD naming
+  name:    string;                               // human-readable name
   status:  'PASS' | 'FAIL' | 'WARN' | 'SKIP';
-  detail:  string;                               // markdown table cell 에 그대로 들어감
+  detail:  string;                               // goes into the markdown table cell as-is
 }
 ```
 
-- I-R1 `id` 는 PRD §7 의 V-XX 명명 그대로. V-05 가 *건너뛰는* 만큼 V-07/V-08
-  은 PRD 에 없는 검사.
-- I-R2 `status` 4 종:
-  - `PASS` — invariant 만족.
-  - `FAIL` — 근본적 corruption (트리 부재, schema 미디코드, 산출물 0).
-  - `WARN` — 검증 실패지만 *비치명적* (asset orphan, message round-trip 미보장
-    등 알려진 한계).
-  - `SKIP` — invariant 적용 불가능한 상황 (raw fig-kiwi 입력에 meta.json
-    부재 등).
-- I-R3 `detail` 은 *한 줄 markdown* — table cell 호환을 위해 `|` 가 `\|`
-  로 escape, newline 미허용.
+- I-R1 `id` follows the V-XX naming of PRD §7 as-is. Because V-05 is *skipped*, V-07/V-08 are checks not in the PRD.
+- I-R2 4 statuses:
+  - `PASS` — invariant satisfied.
+  - `FAIL` — fundamental corruption (missing tree, undecoded schema, zero artifacts).
+  - `WARN` — verification failed but *non-fatal* (asset orphans, message round-trip not guaranteed, etc. — known limitations).
+  - `SKIP` — situations where the invariant is not applicable (e.g., raw fig-kiwi input without meta.json).
+- I-R3 `detail` is *a single line of markdown* — `|` is escaped to `\|` for table-cell compatibility, and newlines are not allowed.
 
-## 4. 검사 목록
+## 4. Check list
 
-### 4.1 V-01 — 입력 파일 무결성
+### 4.1 V-01 — Input file integrity
 
-- I-V1 `container.canvasFig` 의 첫 8 byte 가 `"fig-kiwi"` ASCII (`66 69 67
-  2d 6b 69 77 69`) 와 일치하는지 검사.
-- I-V2 PASS 시 detail: `'canvas.fig magic = "fig-kiwi" (✓), ZIP wrapped: <bool>,
-  canvas.fig size: <N> bytes'`.
-- I-V3 FAIL 시 detail: `'canvas.fig magic invalid: <hex bytes>'`. 주된 원인 =
-  비-Figma 파일 또는 corruption.
-- I-V4 *ZIP CRC 검증은 본 검사 미포함* — adm-zip 이 `loadContainer` 단계
-  에서 implicit 검증 (CRC mismatch 시 throw). 명시적 ZIP CRC 보고는 별도
-  enhancement.
+- I-V1 Check whether the first 8 bytes of `container.canvasFig` match the `"fig-kiwi"` ASCII (`66 69 67 2d 6b 69 77 69`).
+- I-V2 On PASS, detail: `'canvas.fig magic = "fig-kiwi" (✓), ZIP wrapped: <bool>, canvas.fig size: <N> bytes'`.
+- I-V3 On FAIL, detail: `'canvas.fig magic invalid: <hex bytes>'`. Main causes = non-Figma file or corruption.
+- I-V4 *ZIP CRC verification is not included in this check* — adm-zip verifies implicitly during `loadContainer` (throws on CRC mismatch). Explicit ZIP CRC reporting is a separate enhancement.
 
-### 4.2 V-02 — 디코딩 round-trip
+### 4.2 V-02 — Decoding round-trip
 
-- I-V5 schema 측 byte-equal 검증: `kiwi.encodeBinarySchema(decoded.schema)`
-  vs `decoded.rawSchemaBytes` byte-by-byte 비교. PASS 시 `bytesMatch = true`.
-- I-V6 message 측은 *encode 가능 여부* 만 검증 (byte-equal 아님). 원본
-  data bytes (`decoded.rawDataBytes`) 와 re-encoded message bytes 의 *길이
-  비교* + deflate 압축 사이즈 비교 — diagnostic only.
-- I-V7 status 룰:
-  - schema match + message encode 성공 → PASS.
-  - schema match + message encode 실패 → WARN ("message round-trip not
-    guaranteed").
-  - schema mismatch → WARN.
-  - throw → WARN (graceful degrade).
-- I-V8 *FAIL 으로 escalate 안 함* — kiwi 의 일부 encoding 차이 (default 값
-  explicit emit 등) 는 semantic 에 영향 없는 회귀 noise. round-trip 이
-  진짜 깨지는 경우는 별도 raw byte diff 검사 (e.g. `audit-roundtrip-canvas-diff.mjs`).
+- I-V5 Schema-side byte-equality check: `kiwi.encodeBinarySchema(decoded.schema)` vs `decoded.rawSchemaBytes` byte-by-byte. On PASS, `bytesMatch = true`.
+- I-V6 Message side: only checks whether *encoding is possible* (not byte-equal). Compares the *length* of the original data bytes (`decoded.rawDataBytes`) against the re-encoded message bytes + compares deflate-compressed sizes — diagnostic only.
+- I-V7 Status rules:
+  - Schema match + message encode succeeds → PASS.
+  - Schema match + message encode fails → WARN ("message round-trip not guaranteed").
+  - Schema mismatch → WARN.
+  - Throws → WARN (graceful degrade).
+- I-V8 *Does not escalate to FAIL* — minor kiwi encoding differences (e.g., explicit emission of defaults) are regression noise without semantic impact. Real round-trip breakage is caught by a separate raw byte-diff check (e.g., `audit-roundtrip-canvas-diff.mjs`).
 
-### 4.3 V-03 — 트리 일관성
+### 4.3 V-03 — Tree consistency
 
-- I-V9 `tree.allNodes` 의 모든 node 에 대해:
-  - `parentGuid` 부재 또는 `allNodes` 에 존재 → 정상.
-  - `parentGuid` 있는데 `allNodes` 에 미존재 → `dangling++`.
-- I-V10 DFS 사이클 검출: `stack` set 에 들어있는 노드를 다시 만나면
-  `cycles++`. visited set 으로 중복 walk 방지.
-- I-V11 `tree.document` 부재 → DOCUMENT root 미생성, 치명적.
-- I-V12 status 룰:
+- I-V9 For every node in `tree.allNodes`:
+  - `parentGuid` absent, or present in `allNodes` → normal.
+  - `parentGuid` present but absent from `allNodes` → `dangling++`.
+- I-V10 DFS cycle detection: when a node already in the `stack` set is encountered again, `cycles++`. A visited set prevents duplicate walks.
+- I-V11 `tree.document` absent → DOCUMENT root not produced; fatal.
+- I-V12 Status rules:
   - dangling=0, cycles=0, document=true → PASS.
   - dangling=0, cycles=0, document=false → WARN.
-  - dangling>0 또는 cycles>0 → FAIL.
-- I-V13 detail 은 `nodes / document / dangling / cycles / orphans` 카운트.
-  `orphans` 는 `tree.orphans.length` (root 가 아닌데 parent 도 없는 노드).
+  - dangling>0 or cycles>0 → FAIL.
+- I-V13 detail carries the counts `nodes / document / dangling / cycles / orphans`. `orphans` is `tree.orphans.length` (non-root nodes that have no parent either).
 
-### 4.4 V-04 — 에셋 일관성
+### 4.4 V-04 — Asset consistency
 
-`container.images` (디스크 상의 image hash → bytes) vs `imageRefs` (트리
-에서 walk 한 hash → owner 노드 set) 양방향 검사.
+Bidirectional check between `container.images` (image hashes on disk → bytes) and `imageRefs` (hashes walked from the tree → owner-node set).
 
-- I-V14 `imagesLower` / `refsLower` 모두 lowercase 정규화 — Kiwi 가 case-mix
-  hash 를 carry 하는 wire 변동 흡수.
-- I-V15 `missing` = ref 에 있는데 disk 에 없는 hash. orphan reference.
-- I-V16 `unused` = disk 에 있는데 ref 에 없는 hash. unused image.
-- I-V17 status 룰:
-  - 둘 다 0 → PASS.
-  - 둘 중 하나라도 > 0 → WARN. *FAIL 으로 escalate 안 함* — 디자인 의도일
-    수 있음 (예: 임시로 hide 된 image).
-- I-V18 SKIP: `container.images.size === 0 && refs.size === 0` (raw fig-kiwi
-  + 이미지 없는 디자인).
+- I-V14 Both `imagesLower` / `refsLower` are normalized to lowercase — absorbs wire variation where kiwi carries case-mixed hashes.
+- I-V15 `missing` = hash present in refs but missing on disk. Orphan reference.
+- I-V16 `unused` = hash present on disk but missing in refs. Unused image.
+- I-V17 Status rules:
+  - Both 0 → PASS.
+  - Either > 0 → WARN. *Does not escalate to FAIL* — may be the designer's intent (e.g., a temporarily hidden image).
+- I-V18 SKIP: `container.images.size === 0 && refs.size === 0` (raw fig-kiwi + design with no images).
 
-### 4.5 V-06 — meta.json 일치
+### 4.5 V-06 — meta.json alignment
 
-- I-V19 `container.metaJson` 부재 시 SKIP (raw fig-kiwi 입력).
-- I-V20 PASS 항상 — *검증* 이 아니라 *요약 emit*. detail 에:
+- I-V19 SKIP when `container.metaJson` is absent (raw fig-kiwi input).
+- I-V20 Always PASS — this is a *summary emit* rather than verification. The detail contains:
   - `file_name`
-  - `client_meta.background_color` (4 자리 소수 rgba)
+  - `client_meta.background_color` (4-decimal rgba)
   - `client_meta.render_coordinates` (`<width>x<height> @ (<x>, <y>)`)
   - `exported_at`
-  - `pages in tree` (CANVAS type 자식 카운트)
-- I-V21 진짜 invariant 검증은 *user-confirm* (PRD §7.2 U-01~U-04) 영역 —
-  자동 검증 부재. 본 check 는 *시각 비교 입력* 만 제공.
+  - `pages in tree` (count of CANVAS-typed children)
+- I-V21 True invariant verification belongs to *user-confirm* (PRD §7.2 U-01..U-04) — no automation. This check provides only the *inputs for visual comparison*.
 
-### 4.6 V-07 — Kiwi 스키마 sanity
+### 4.6 V-07 — Kiwi schema sanity
 
-(PRD 외 추가 검사)
+(Check added outside the PRD.)
 
-- I-V22 `decoded.schemaStats.definitionCount` 검사:
-  - `> 100` → PASS (Figma 의 wire 가 normally ~568 type).
-  - `> 0` → WARN (수상함, 그러나 디코드 자체는 작동).
-  - `0` → FAIL (스키마 파싱 실패 가능성).
-- I-V23 detail: definition count + root type + archive version + 압축 알고리즘
-  (schema/data) 4 항목 carry.
+- I-V22 `decoded.schemaStats.definitionCount` check:
+  - `> 100` → PASS (Figma wire normally carries ~568 types).
+  - `> 0` → WARN (suspicious, but decoding itself works).
+  - `0` → FAIL (likely a schema parse failure).
+- I-V23 detail carries definition count + root type + archive version + 4 compression-algorithm items (schema/data).
 
 ### 4.7 V-08 — Export artifacts
 
-(PRD 외 추가 검사)
+(Check added outside the PRD.)
 
 - I-V24 `artifacts.files.length > 0` → PASS, `0` → FAIL.
-- I-V25 detail: 파일 수 + 총 byte (formatBytes) + 노드 수 + 페이지 수.
+- I-V25 detail: file count + total bytes (`formatBytes`) + node count + page count.
 
-## 5. Report 렌더링
+## 5. Report rendering
 
-`renderReport(overall, checks, artifacts)` 가 markdown 문자열 emit.
+`renderReport(overall, checks, artifacts)` emits a markdown string.
 
-- I-W1 헤더: `# Verification Report` + overall badge (`🟢 PASS` / `🟡 WARN` /
-  `🔴 FAIL`) + 생성 timestamp (ISO 8601).
-- I-W2 검사 결과 테이블: `| ID | Check | Status | Detail |` 헤더, check 별
-  한 행. detail 의 `|` 는 `\|` 로 escape.
-- I-W3 추출 통계 섹션:
-  - `artifacts.stats.totalNodes`, `pages`, `topLevelFrames`, `imagesReferenced`,
-    `imagesUnused`, `vectorsConverted`, `vectorsFailed`.
-- I-W4 *알 수 없는 노드 타입* 섹션 (forward-compat) — `unknownTypes` map 이
-  비어있지 않을 때만 emit. 새 Figma type 등장 시 carry.
-- I-W5 *산출물 목록* 섹션: 파일 별 한 줄 `- `<rel-path>` — <size> (sha256:
-  <16 chars>…)`. relative path 변환은 `outputDir` prefix 제거 + Windows
-  backslash → forward slash.
-- I-W6 footer: `--- Generated by figma-reverse v0.1.0`.
-- I-W7 status badge 매핑: `PASS=🟢`, `FAIL=🔴`, `WARN=🟡`, `SKIP=⚪`.
+- I-W1 Header: `# Verification Report` + overall badge (`🟢 PASS` / `🟡 WARN` / `🔴 FAIL`) + generation timestamp (ISO 8601).
+- I-W2 Check-result table: header `| ID | Check | Status | Detail |`, one row per check. `|` in detail is escaped to `\|`.
+- I-W3 Extraction-statistics section:
+  - `artifacts.stats.totalNodes`, `pages`, `topLevelFrames`, `imagesReferenced`, `imagesUnused`, `vectorsConverted`, `vectorsFailed`.
+- I-W4 *Unknown node types* section (forward-compat) — emitted only when the `unknownTypes` map is non-empty. Carried when new Figma types appear.
+- I-W5 *Artifact list* section: one line per file as `- `<rel-path>` — <size> (sha256: <16 chars>…)`. Relative-path conversion strips the `outputDir` prefix + converts Windows backslashes to forward slashes.
+- I-W6 Footer: `--- Generated by figma-reverse v0.1.0`.
+- I-W7 Status badge mapping: `PASS=🟢`, `FAIL=🔴`, `WARN=🟡`, `SKIP=⚪`.
 
-## 6. 비대상 (PRD 와 다른 점)
+## 6. Non-goals (differences from the PRD)
 
-- ❌ **V-05 결정성 (동일 입력 2회 처리 → SHA-256 동일)** — *현재 미구현*.
-  `runVerification` 의 7 check 에서 빠짐. 구현 시 별도 round 후보 — `audit-roundtrip.mjs`
-  의 `outSha256` 비교를 CLI 측에 옮기는 자연스러운 path.
-- ❌ **V-CRC** (ZIP central directory CRC 명시적 검증) — adm-zip 이 implicit
-  하게 검증하지만 결과 보고 없음. 추가 시 `checkInputIntegrity` 확장.
-- ❌ **사용자 확인 검증** (PRD §7.2 U-01~U-04) — Figma 클라우드와의 시각
-  비교 등은 자동화 대상 아님 (`audit-oracle.spec.md` / `audit-harness.spec.md`
-  가 부분적으로 자동화).
-- ❌ **structured JSON output** — markdown 만. JSON 으로 CI 파이프라인 통합
-  은 별도 enhancement.
-- ❌ **회귀 baseline 비교** — 이전 verification report 와 diff 자동 비교
-  없음. 사람이 git diff 로 본다.
-- ❌ **performance budget** — 처리 시간 / 메모리 사용 검증 (PRD NF-01/NF-02)
-  은 본 spec 비대상.
+- ❌ **V-05 determinism (same input processed twice → identical SHA-256)** — *currently unimplemented*. Missing from the 7 checks of `runVerification`. Implementation is a candidate for a separate round — moving `audit-roundtrip.mjs`'s `outSha256` comparison to the CLI side is a natural path.
+- ❌ **V-CRC** (explicit verification of ZIP central directory CRC) — adm-zip verifies implicitly, but no result is reported. Add by extending `checkInputIntegrity`.
+- ❌ **User-confirm verification** (PRD §7.2 U-01..U-04) — visual comparison against the Figma cloud, etc., is not automated (`audit-oracle.spec.md` / `audit-harness.spec.md` partially automate it).
+- ❌ **Structured JSON output** — markdown only. JSON integration with CI pipelines is a separate enhancement.
+- ❌ **Regression baseline comparison** — no automatic diff against the previous verification report. Humans read the git diff.
+- ❌ **Performance budget** — verification of processing time / memory usage (PRD NF-01/NF-02) is out of scope.
 
 ## 7. Resolved questions
 
-- **V-02 가 schema match 시에도 message encode 실패면 WARN 인 이유?** 메타리치
-  의 일부 unknown type entry 가 kiwi 의 encode path 에 없는 경우가 있고,
-  그 자체가 디코드/렌더에는 영향 없음 — schema 호환만 보장되면 *후방 호환
-  의미는 보존*. 진짜 round-trip 깨짐은 audit-harness 의 byte-diff 가 잡음.
-- **왜 V-04 가 WARN 만 emit 하고 FAIL 안 되나?** 디자이너가 임시로 hide
-  한 이미지가 디스크에는 있는 케이스가 정상 패턴. orphan reference 도
-  Figma 가 임시 cache 로 carry 한 데이터일 수 있음. 사람이 보고 판단할
-  영역.
-- **`unknownTypes` 가 carry 되는 이유?** Figma 가 schema 를 자주 update —
-  새 type 이 우리 normalize / verify 코드 길에 등장해도 *crash 없이 carry*
-  하고 사람에게 *보고* 하는 forward-compat 정책. 발견 시 다음 라운드에
-  핸들링.
-- **`detail` 한 줄 제약은 진짜 강제인가?** markdown table cell 의 limitation
-  — `\n` 가 들어가면 table 깨짐. 다중 라인 정보는 별도 섹션으로 분리. 본
-  spec 의 7 check 모두 한 줄에 fit 하는 형태로 디자인.
+- **Why is V-02 a WARN when schema matches but message encode fails?** Some unknown-type entries in metarich lack a path through kiwi's encode, and that does not affect decoding/rendering — when schema compatibility is preserved, *forward-compat semantics are preserved*. True round-trip breakage is caught by the byte-diff of audit-harness.
+- **Why does V-04 only emit WARN, never FAIL?** Images temporarily hidden by the designer can legitimately remain on disk. Orphan references may be data Figma carries as a temporary cache. A region for human judgment.
+- **Why is `unknownTypes` carried?** Figma updates the schema frequently — when a new type appears in our normalize / verify code path, we *carry without crashing* and *report to humans*, a forward-compat policy. Once spotted, handle in the next round.
+- **Is the single-line constraint on `detail` actually enforced?** A markdown-table-cell limitation — `\n` breaks the table. Multi-line information is split into separate sections. All 7 checks in this spec are designed to fit one line.

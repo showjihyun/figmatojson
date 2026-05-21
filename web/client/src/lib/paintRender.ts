@@ -6,7 +6,7 @@
  *   - { kind: 'image' } — caller renders an ImageFill instead
  *   - null — paint unrenderable (e.g., gradient with no stops, hidden)
  *
- * Spec: docs/specs/web-render-fidelity-round6.spec.md §2.2
+ * Spec: docs/specs/archive/web-render-fidelity-round6.spec.md §2.2
  *
  * Each visible paint in fillPaints[] becomes one Konva element in the
  * stack. SOLID and gradient paints become Rects; IMAGE paints become
@@ -15,6 +15,7 @@
  */
 
 import { firstStopRgba, gradientFromPaint, type KonvaGradient } from './gradient';
+import { resolvePaintColor } from '@core/domain/colorStyleRef';
 
 interface FigmaColor {
   r?: number;
@@ -66,12 +67,14 @@ export function paintToRender(
   paint: FigmaPaint | undefined,
   width: number,
   height: number,
+  root?: unknown,
 ): PaintRender | null {
   if (!paint || paint.visible === false) return null;
   const layerOpacity = typeof paint.opacity === 'number' ? paint.opacity : 1;
 
   if (paint.type === 'SOLID') {
-    return { kind: 'solid', fill: rgba(paint.color, layerOpacity) };
+    const color = root ? (resolvePaintColor(paint, root) ?? paint.color) : paint.color;
+    return { kind: 'solid', fill: rgba(color, layerOpacity) };
   }
   if (paint.type === 'GRADIENT_LINEAR' || paint.type === 'GRADIENT_RADIAL') {
     const g = gradientFromPaint(paint as Parameters<typeof gradientFromPaint>[0], width, height);
@@ -98,12 +101,13 @@ export function paintLayers(
   fillPaints: FigmaPaint[] | undefined,
   width: number,
   height: number,
+  root?: unknown,
 ): Array<{ paint: FigmaPaint; render: PaintRender }> {
   if (!Array.isArray(fillPaints)) return [];
   const out: Array<{ paint: FigmaPaint; render: PaintRender }> = [];
   for (const paint of fillPaints) {
     if (!paint || paint.visible === false) continue;
-    const render = paintToRender(paint, width, height);
+    const render = paintToRender(paint, width, height, root);
     if (render) out.push({ paint, render });
   }
   return out;

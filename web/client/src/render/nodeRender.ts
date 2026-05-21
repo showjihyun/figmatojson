@@ -27,7 +27,7 @@
  * `RenderContext.measureText`.
  */
 
-import { rotationDegrees } from '../lib/transform.js';
+import { decomposeTransform } from '../lib/transform.js';
 import { konvaBlendMode } from '../lib/blendMode.js';
 import { konvaLineCap, konvaLineJoin } from '../lib/strokeCapJoin.js';
 import {
@@ -53,9 +53,10 @@ import {
   konvaVerticalAlign,
 } from '../lib/textStyle.js';
 import { applyTextCase, konvaTextDecoration } from '../lib/textTransform.js';
-import { effectiveTextStyle } from '@core/domain/colorStyleRef';
+import { effectiveTextStyle, resolvePaintColor } from '@core/domain/colorStyleRef';
 import { hasStyledRuns, splitTextRuns } from '../lib/textStyleRuns.js';
-import { solidFillCss, strokeFromPaints } from '@core/domain/color';
+import { solidFillCss, strokeFromPaints, rgbaToCss } from '@core/domain/color';
+import { pickTopPaint } from '../lib/paint.js';
 import { imageHashHex } from '@core/domain/image';
 
 /** Vector types that carry a precomputed `_path` SVG string after toClientNode. */
@@ -105,6 +106,16 @@ export interface RenderContext {
 export interface NodeOuterFrame {
   bbox: { x: number; y: number; w: number; h: number };
   rotation: number | undefined;
+  /**
+   * Axis-aligned scale extracted from the Figma transform matrix. Set
+   * when the matrix carries a mirror (`scaleX === -1` or `scaleY === -1`)
+   * or a uniform scale. `undefined` means "1" (Konva's identity). Used
+   * together with `rotation` so e.g. an hour-line variant stored as
+   * `R(120°) ∘ scale(1, -1)` renders rotated *and* flipped instead of
+   * being silently dropped to translation-only. Spec round 34.
+   */
+  scaleX: number | undefined;
+  scaleY: number | undefined;
   opacity: number | undefined;
   blendMode: GlobalCompositeOperation | undefined;
 }
@@ -277,6 +288,7 @@ export type NodeRenderPlan =
 function readOuter(node: Record<string, unknown>): NodeOuterFrame {
   const transform = node.transform as { m02?: number; m12?: number } | undefined;
   const size = node.size as { x?: number; y?: number } | undefined;
+  const { rotation, scaleX, scaleY } = decomposeTransform(node.transform as never);
   return {
     bbox: {
       x: transform?.m02 ?? 0,
@@ -284,7 +296,9 @@ function readOuter(node: Record<string, unknown>): NodeOuterFrame {
       w: size?.x ?? 0,
       h: size?.y ?? 0,
     },
-    rotation: rotationDegrees(node.transform as never),
+    rotation,
+    scaleX,
+    scaleY,
     opacity:
       typeof node.opacity === 'number' && node.opacity !== 1
         ? (node.opacity as number)
@@ -293,10 +307,11 @@ function readOuter(node: Record<string, unknown>): NodeOuterFrame {
   };
 }
 
-function planVector(node: Record<string, unknown>): NodeVectorPlan {
-  const pathFillRaw = solidFillCss(node as { fillPaints?: unknown });
+function planVector(node: Record<string, unknown>, ctx: RenderContext): NodeVectorPlan {
+  const root = ctx.documentRoot;
+  const pathFillRaw = solidFillCss(node as { fillPaints?: unknown }, root);
   const fill = pathFillRaw === 'transparent' ? 'transparent' : pathFillRaw;
-  const baseStroke = strokeFromPaints(node as { strokeWeight?: unknown; strokePaints?: unknown });
+  const baseStroke = strokeFromPaints(node as { strokeWeight?: unknown; strokePaints?: unknown }, root);
   // INSIDE strokeAlign emulation needs to know whether we have a visible
   // fill. With no fill the doubled stroke would just look thicker
   // (round 13 §3.3 — `pathFill === 'transparent'` ⇒ skip emulation).
@@ -341,20 +356,28 @@ function planVector(node: Record<string, unknown>): NodeVectorPlan {
  * when no usable SOLID paint exists — the same default Canvas's inline
  * branch has used since round 1, kept identical so 1B doesn't shift any
  * pixel that wasn't already shifted in 1A.
+ *
+ * Fixes vs the round-1 baseline:
+ *   - Picks the TOPMOST visible non-IMAGE paint (via `pickTopPaint`), not
+ *     the first — matches Figma's bottom-up paint stack. Multi-paint TEXT
+ *     nodes (e.g. M3 state-layered text) now render with the overlay color.
+ *   - Applies `paint.opacity` on top of `color.a`. The earlier branch
+ *     dropped `paint.opacity` entirely, so translucent text paints rendered
+ *     opaque.
  */
-function textBaseFillColor(node: Record<string, unknown>): string {
+function textBaseFillColor(node: Record<string, unknown>, root: unknown): string {
   const fills = node.fillPaints;
   if (!Array.isArray(fills)) return '#ddd';
-  const first = (fills as Array<Record<string, unknown>>).find(
-    (p) => (p as { type?: string }).type === 'SOLID' && (p as { visible?: boolean }).visible !== false,
-  );
-  if (!first || !first.color) return '#ddd';
-  const c = first.color as { r?: number; g?: number; b?: number; a?: number };
-  const r = Math.round((c.r ?? 0) * 255);
-  const g = Math.round((c.g ?? 0) * 255);
-  const b = Math.round((c.b ?? 0) * 255);
-  const a = c.a ?? 1;
-  return `rgba(${r},${g},${b},${a})`;
+  const top = pickTopPaint(fills as Array<{ type?: string; visible?: boolean }>);
+  if (!top || (top as { type?: string }).type !== 'SOLID') return '#ddd';
+  const p = top as { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number };
+  if (!p.color) return '#ddd';
+  const op = typeof p.opacity === 'number' ? p.opacity : 1;
+  // Follow paint.colorVar to the leaf VARIABLE's resolved color so M3
+  // on-primary text (filled / tonal buttons + selected date cell on
+  // Docked input date picker) renders white instead of the snapshot black.
+  const color = resolvePaintColor(p, root) ?? p.color;
+  return rgbaToCss(color, op);
 }
 
 function planTextSimple(node: Record<string, unknown>, ctx: RenderContext): NodeTextSimplePlan {
@@ -388,7 +411,7 @@ function planTextSimple(node: Record<string, unknown>, ctx: RenderContext): Node
   const lineHeight = konvaLineHeight((eff.lineHeight ?? node.lineHeight) as never, fontSize);
   const verticalAlign = konvaVerticalAlign(node.textAlignVertical as string | undefined);
   const align = konvaTextAlign(node.textAlignHorizontal as string | undefined);
-  const fill = textBaseFillColor(node);
+  const fill = textBaseFillColor(node, ctx.documentRoot);
   const shadow = shadowFromEffects(node.effects as never);
 
   // Auto-resize math (web-canvas-text-frame-fidelity.spec.md §2.1):
@@ -445,7 +468,7 @@ function planPaintStack(node: Record<string, unknown>, ctx: RenderContext): Node
   const fillsInput = isAncestorOfIsolated
     ? undefined
     : (node.fillPaints as Array<{ type?: string; visible?: boolean }> | undefined);
-  const layersRaw = paintLayers(fillsInput, w, h);
+  const layersRaw = paintLayers(fillsInput, w, h, ctx.documentRoot);
   const fillLayers: PaintStackLayer[] = layersRaw.map((layer) => {
     const paint = layer.paint as { blendMode?: string; imageScaleMode?: string };
     return {
@@ -484,7 +507,7 @@ function planPaintStack(node: Record<string, unknown>, ctx: RenderContext): Node
   // Per-side stroke (web-render-fidelity-high.spec.md §3.6) — non-uniform
   // border{T,R,B,L}Weight values + a base stroke ⇒ render Konva.Line per side
   // instead of a uniform Rect stroke.
-  const baseStroke = strokeFromPaints(node as never);
+  const baseStroke = strokeFromPaints(node as never, ctx.documentRoot);
   const bt = node.borderTopWeight as number | undefined;
   const brW = node.borderRightWeight as number | undefined;
   const bb = node.borderBottomWeight as number | undefined;
@@ -573,21 +596,17 @@ function planPaintStack(node: Record<string, unknown>, ctx: RenderContext): Node
 function resolveStyledRunFill(
   run: { override: { fillPaints?: unknown[] } },
   baseFill: string,
+  root: unknown,
 ): string {
   const fps = run.override.fillPaints;
   if (!Array.isArray(fps)) return baseFill;
-  const first = (fps as Array<Record<string, unknown>>).find(
-    (p) =>
-      (p as { type?: string }).type === 'SOLID' &&
-      (p as { visible?: boolean }).visible !== false,
-  );
-  if (!first || !first.color) return baseFill;
-  const c = first.color as { r?: number; g?: number; b?: number; a?: number };
-  const r = Math.round((c.r ?? 0) * 255);
-  const g = Math.round((c.g ?? 0) * 255);
-  const b = Math.round((c.b ?? 0) * 255);
-  const a = c.a ?? 1;
-  return `rgba(${r},${g},${b},${a})`;
+  const top = pickTopPaint(fps as Array<{ type?: string; visible?: boolean }>);
+  if (!top || (top as { type?: string }).type !== 'SOLID') return baseFill;
+  const p = top as { color?: { r?: number; g?: number; b?: number; a?: number }; opacity?: number };
+  if (!p.color) return baseFill;
+  const op = typeof p.opacity === 'number' ? p.opacity : 1;
+  const color = resolvePaintColor(p, root) ?? p.color;
+  return rgbaToCss(color, op);
 }
 
 function planTextStyled(node: Record<string, unknown>, ctx: RenderContext): NodeTextStyledPlan {
@@ -620,7 +639,7 @@ function planTextStyled(node: Record<string, unknown>, ctx: RenderContext): Node
   const lineHeight = konvaLineHeight((eff.lineHeight ?? node.lineHeight) as never, fontSize);
   const verticalAlign = konvaVerticalAlign(node.textAlignVertical as string | undefined);
 
-  const baseFill = textBaseFillColor(node);
+  const baseFill = textBaseFillColor(node, ctx.documentRoot);
   const chars = applyTextCase(
     textData.characters ?? '',
     (eff.textCase ?? node.textCase) as string | undefined,
@@ -638,7 +657,7 @@ function planTextStyled(node: Record<string, unknown>, ctx: RenderContext): Node
     runs.push({
       text: r.text,
       offsetX,
-      fill: resolveStyledRunFill(r, baseFill),
+      fill: resolveStyledRunFill(r, baseFill, ctx.documentRoot),
     });
     if (i < rawRuns.length - 1) {
       offsetX += ctx.measureText(r.text, fontSize, fontFamily, fontStyle, letterSpacing);
@@ -702,7 +721,7 @@ export function nodeRender(
     typeof node._path === 'string' &&
     (node._path as string).length > 0
   ) {
-    return planVector(node);
+    return planVector(node, ctx);
   }
 
   if (type === 'TEXT') {

@@ -23,7 +23,8 @@ import {
 import { Stage, Layer, Rect, Text as KText, Group, Path, Image as KImage, Line } from 'react-konva';
 import type Konva from 'konva';
 import { cornerDrag, groupBbox, projectMembers, type Corner } from './multiResize';
-import { guidStr } from '@core/domain/tree';
+import { buildAncestorIndexDeep, findByIdDeep, guidStr } from '@core/domain/tree';
+import { resolveDrillSelection } from '@core/domain/drillSelection';
 import type { DocumentNode } from '@core/domain/entities/Document';
 import {
   SelectionContext,
@@ -288,14 +289,25 @@ function ImageFill({
 
 interface NodeShapeProps {
   node: any;
-  onSelect: (g: string | null, mode?: 'replace' | 'toggle') => void;
+  /**
+   * Drill-aware click dispatcher. Canvas-level wrapper consumes
+   * `kind` ('click' | 'dblclick') to walk the ancestor chain and select
+   * either the topmost root-level container (single click) or one level
+   * deeper at the cursor (double click). Spec:
+   * docs/specs/web-canvas-drill-selection.spec.md §4.
+   */
+  onShapeSelect: (
+    g: string,
+    mode: 'replace' | 'toggle',
+    kind: 'click' | 'dblclick',
+  ) => void;
   onDragGroup?: (guid: string, dx: number, dy: number) => void;
   sessionId: string | null;
 }
 
 function NodeShapeImpl({
   node,
-  onSelect,
+  onShapeSelect,
   onDragGroup,
   sessionId,
 }: NodeShapeProps) {
@@ -370,12 +382,46 @@ function NodeShapeImpl({
   };
 
   const onShapeClick = (e: Konva.KonvaEventObject<MouseEvent | TouchEvent>): void => {
+    // Spec web-canvas-drill-selection v2 §4 I-E2: master-subtree clicks no
+    // longer bubble to the outer INSTANCE. The Canvas-level resolver
+    // receives the deep chain (`buildAncestorIndexDeep` walks
+    // `_renderChildren`) and decides what to select:
+    //   - initial click / unrelated selection → chain[0] = outer INSTANCE
+    //     (same end result as the old bubble-to-outer rule)
+    //   - drill state already established (current is anywhere in chain)
+    //     → preserve current, so the trailing click of a multi-step
+    //     double-click sequence does NOT wipe the drill state. Without
+    //     this, the SECOND double-click in a row would reset selection
+    //     to outer between dblclick events and the user could only ever
+    //     drill one level deep.
+    // Hover still bubbles for master subtrees (L337 keeps the
+    // `_isInstanceChild` guard there) so hover UX is unchanged.
+    if (!guid) return;
     e.cancelBubble = true;
     // shiftKey only exists on MouseEvent / KeyboardEvent — touch users get
     // single-select fallback, which is fine.
     const native = e.evt as { shiftKey?: boolean } | undefined;
     const shift = !!native?.shiftKey;
-    onSelect(guid, shift ? 'toggle' : 'replace');
+    onShapeSelect(guid, shift ? 'toggle' : 'replace', 'click');
+  };
+
+  // Figma-like double-click drill (spec web-canvas-drill-selection v2 §4).
+  //
+  // Unlike `onShapeClick` we intentionally do NOT short-circuit when
+  // `node._isInstanceChild` is true. The whole point of the drill gesture
+  // is to step *into* an INSTANCE's master subtree at the cursor — and the
+  // deep ancestor index already prefixes the chain with the page-resident
+  // outer INSTANCE, so the resolver hands the next-deeper master child to
+  // the App. Single-click keeps bubbling so it still selects the outer
+  // INSTANCE as a unit. cancelBubble here stops Konva from also calling
+  // the outer INSTANCE's onDblClick after this one (which would otherwise
+  // overwrite our drill result with a stale chain-of-one selection).
+  const onShapeDblClick = (e: Konva.KonvaEventObject<MouseEvent | TouchEvent>): void => {
+    if (!guid) return;
+    e.cancelBubble = true;
+    const native = e.evt as { shiftKey?: boolean } | undefined;
+    const shift = !!native?.shiftKey;
+    onShapeSelect(guid, shift ? 'toggle' : 'replace', 'dblclick');
   };
 
   // Slice 1B (#1) — single-style TEXT branch driven by nodeRender plan. The
@@ -387,6 +433,8 @@ function NodeShapeImpl({
         x={plan.drawX}
         y={plan.drawY}
         rotation={plan.outer.rotation}
+        scaleX={plan.outer.scaleX}
+        scaleY={plan.outer.scaleY}
         opacity={plan.outer.opacity}
         globalCompositeOperation={plan.outer.blendMode as never}
         text={plan.text}
@@ -410,6 +458,8 @@ function NodeShapeImpl({
         draggable={isSelected}
         onClick={onShapeClick}
         onTap={onShapeClick}
+        onDblClick={onShapeDblClick}
+        onDblTap={onShapeDblClick}
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
         onMouseEnter={onMouseEnter}
@@ -428,11 +478,15 @@ function NodeShapeImpl({
         x={plan.outer.bbox.x}
         y={plan.outer.bbox.y}
         rotation={plan.outer.rotation}
+        scaleX={plan.outer.scaleX}
+        scaleY={plan.outer.scaleY}
         opacity={plan.outer.opacity}
         globalCompositeOperation={plan.outer.blendMode as never}
         draggable={isSelected}
         onClick={onShapeClick}
         onTap={onShapeClick}
+        onDblClick={onShapeDblClick}
+        onDblTap={onShapeDblClick}
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
         onMouseEnter={onMouseEnter}
@@ -514,11 +568,15 @@ function NodeShapeImpl({
         x={plan.outer.bbox.x}
         y={plan.outer.bbox.y}
         rotation={plan.outer.rotation}
+        scaleX={plan.outer.scaleX}
+        scaleY={plan.outer.scaleY}
         opacity={plan.outer.opacity}
         globalCompositeOperation={plan.outer.blendMode as never}
         draggable={isSelected}
         onClick={onShapeClick}
         onTap={onShapeClick}
+        onDblClick={onShapeDblClick}
+        onDblTap={onShapeDblClick}
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
         onMouseEnter={onMouseEnter}
@@ -585,11 +643,15 @@ function NodeShapeImpl({
         x={plan.outer.bbox.x}
         y={plan.outer.bbox.y}
         rotation={plan.outer.rotation}
+        scaleX={plan.outer.scaleX}
+        scaleY={plan.outer.scaleY}
         opacity={plan.outer.opacity}
         globalCompositeOperation={plan.outer.blendMode as never}
         draggable={isSelected}
         onClick={onShapeClick}
         onTap={onShapeClick}
+        onDblClick={onShapeDblClick}
+        onDblTap={onShapeDblClick}
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
         onMouseEnter={onMouseEnter}
@@ -732,7 +794,7 @@ function NodeShapeImpl({
         {plan.stroke?.kind === 'per-side' && plan.stroke.sides.left && plan.stroke.sides.left > 0 && (
           <Line points={[0, 0, 0, planH]} stroke={plan.stroke.color} strokeWidth={plan.stroke.sides.left} lineCap={plan.lineCap} dash={plan.dashPattern} listening={false} />
         )}
-        {hasChildren && renderMaskedChildren(renderableChildren, onSelect, onDragGroup, sessionId)}
+        {hasChildren && renderMaskedChildren(renderableChildren, onShapeSelect, onDragGroup, sessionId)}
         {/* Variant property labels (round 10 §5) — Component Set / state group
             children get a small Figma-style label above each variant. */}
         {hasChildren && isVariantContainer(node) && renderVariantLabels(renderableChildren)}
@@ -770,8 +832,8 @@ function NodeShapeImpl({
  */
 function renderMaskedChildren(
   children: any[],
-  onSelect: any,
-  onDragGroup: any,
+  onShapeSelect: NodeShapeProps['onShapeSelect'],
+  onDragGroup: NodeShapeProps['onDragGroup'],
   sessionId: string | null,
 ): React.ReactNode {
   // Fast path: no isMask in this batch. Avoid allocating any extra wrappers
@@ -786,7 +848,7 @@ function renderMaskedChildren(
       <NodeShape
         key={i}
         node={c}
-        onSelect={onSelect}
+        onShapeSelect={onShapeSelect}
         onDragGroup={onDragGroup}
         sessionId={sessionId}
       />
@@ -803,7 +865,7 @@ function renderMaskedChildren(
         <NodeShape
           key={`m-${i}`}
           node={node}
-          onSelect={onSelect}
+          onShapeSelect={onShapeSelect}
           onDragGroup={onDragGroup}
           sessionId={sessionId}
         />,
@@ -820,7 +882,7 @@ function renderMaskedChildren(
               <NodeShape
                 key={k}
                 node={c}
-                onSelect={onSelect}
+                onShapeSelect={onShapeSelect}
                 onDragGroup={onDragGroup}
                 sessionId={sessionId}
               />
@@ -835,7 +897,7 @@ function renderMaskedChildren(
       <NodeShape
         key={i}
         node={node}
-        onSelect={onSelect}
+        onShapeSelect={onShapeSelect}
         onDragGroup={onDragGroup}
         sessionId={sessionId}
       />,
@@ -983,6 +1045,18 @@ function findAbsBounds(
   }
   if (Array.isArray(root.children)) {
     for (const c of root.children) {
+      const f = findAbsBounds(c, guid, ax, ay);
+      if (f) return f;
+    }
+  }
+  // Spec web-canvas-drill-selection v2 §5 — also walk INSTANCE master
+  // subtree expansions so the selection overlay can frame a drilled-in
+  // master child. Transforms accumulate the same way as `.children`
+  // because Konva draws _renderChildren nested inside the outer instance's
+  // Group (their master-local transforms are already relative to the
+  // instance's coord system).
+  if (Array.isArray(root._renderChildren)) {
+    for (const c of root._renderChildren) {
       const f = findAbsBounds(c, guid, ax, ay);
       if (f) return f;
     }
@@ -1469,6 +1543,38 @@ export function Canvas({ page, root, selectedGuids, onSelect, onMoveMany, onResi
   // so we no longer convert design-space bbox to browser-viewport
   // pixels here — Konva applies the Stage transform automatically.
 
+  // Canvas-level ancestor index (spec web-canvas-drill-selection §I-C4).
+  // Rebuilt only when the page changes; selection ticks read it via closure
+  // and never re-walk the tree. Master subtree descendants (_renderChildren)
+  // are intentionally NOT walked — their master-page guids aren't reachable
+  // through the current page and the drill resolver depends on chain entries
+  // being page-reachable.
+  const drillAncestorIndex = useMemo(
+    () => buildAncestorIndexDeep(page),
+    [page],
+  );
+
+  // Wrap App's `onSelect` with Figma-style drill semantics
+  // (spec web-canvas-drill-selection §3). NodeShape forwards `kind`
+  // ('click' for single click, 'dblclick' for the drill gesture); we
+  // resolve the ancestor chain at the hit, compare against the current
+  // single-selection, and call onSelect with the resulting guid.
+  //
+  // Reads current selection from `selectedGuidsRef` so a fresh click
+  // sequence (click → click → dblclick from Konva) sees the latest
+  // committed state without paying for a stale closure capture.
+  const onShapeSelect = useCallback<NodeShapeProps['onShapeSelect']>(
+    (guid, mode, kind) => {
+      const sel = selectedGuidsRef.current;
+      const current = sel.size === 1 ? [...sel][0]! : null;
+      const ancestors = drillAncestorIndex.get(guid) ?? [];
+      const chain = ancestors.length > 0 ? [...ancestors, guid] : [guid];
+      const next = resolveDrillSelection(chain, current, kind);
+      if (next) onSelect(next, mode);
+    },
+    [drillAncestorIndex, onSelect],
+  );
+
   // Stable callback so memoized NodeShapes don't re-render on every Canvas
   // state tick (size / scale / offset / spaceHeld). Reads selection from the
   // ref so the closure doesn't need to refresh.
@@ -1545,7 +1651,7 @@ export function Canvas({ page, root, selectedGuids, onSelect, onMoveMany, onResi
                   <NodeShape
                     key={(c.guid as { sessionID: number; localID: number }).sessionID + ':' + (c.guid as { sessionID: number; localID: number }).localID}
                     node={c}
-                    onSelect={onSelect}
+                    onShapeSelect={onShapeSelect}
                     onDragGroup={onDragGroup}
                     sessionId={sessionId}
                   />

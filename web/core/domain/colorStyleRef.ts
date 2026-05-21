@@ -2,7 +2,7 @@
  * Helpers that resolve Figma library color/text-style references on a node
  * back to the asset's display name.
  *
- * Spec: docs/specs/web-render-fidelity-round15.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round15.spec.md
  *
  * .fig nodes carry both raw RGBA *and* an optional alias guid into a
  * VARIABLE / style-asset node elsewhere in the document. These helpers
@@ -10,7 +10,8 @@
  * Inspector to label the fill/stroke color row (e.g. "Button/Primary/Default").
  */
 
-import { findById } from './tree.js';
+import { walk } from './tree.js';
+import type { DocumentNode } from './entities/Document';
 
 interface AliasGuid {
   sessionID?: unknown;
@@ -21,6 +22,41 @@ function readGuid(g: AliasGuid | null | undefined): string | null {
   if (!g || typeof g !== 'object') return null;
   if (typeof g.sessionID !== 'number' || typeof g.localID !== 'number') return null;
   return `${g.sessionID}:${g.localID}`;
+}
+
+/**
+ * `findById` is O(N) tree-walk every call. The resolvers in this file
+ * (`resolveVariableChain`, `resolvePaintColor`, `colorVarName`,
+ * `textStyleName`, `colorVarTrail`, `effectiveTextStyle`) are called
+ * per-paint-per-node during rendering, with up to 8 hops each through the
+ * variable alias chain. On a 35K-node Material 3 document where every
+ * paint is bound to a color VARIABLE, that's O(N²·hops) — multi-second
+ * hitch at document load.
+ *
+ * Cache lazily: on first lookup against a root, walk the tree once
+ * (O(N)) building a `Map<idString, node>`, stash it in a WeakMap keyed
+ * by root. Subsequent lookups are O(1). The WeakMap releases the index
+ * automatically when the root is garbage-collected.
+ *
+ * Read-only: if a caller MUTATES the tree (e.g., the server PATCH
+ * endpoint), they should keep using `findById` directly so they don't
+ * see a stale cache entry. All consumers in this file are render-side
+ * (read-only).
+ */
+const rootIndexCache = new WeakMap<object, Map<string, DocumentNode>>();
+
+function findByIdCached(root: unknown, id: string): DocumentNode | null {
+  if (!root || typeof root !== 'object') return null;
+  let idx = rootIndexCache.get(root);
+  if (!idx) {
+    idx = new Map();
+    walk(root, (n) => {
+      const ng = (n as { id?: unknown }).id;
+      if (typeof ng === 'string') idx!.set(ng, n);
+    });
+    rootIndexCache.set(root, idx);
+  }
+  return idx.get(id) ?? null;
 }
 
 /**
@@ -37,7 +73,7 @@ export function colorVarName(paint: unknown, root: unknown): string | null {
   const p = paint as { colorVar?: { value?: { alias?: { guid?: AliasGuid } } } };
   const id = readGuid(p.colorVar?.value?.alias?.guid);
   if (!id) return null;
-  const target = findById(root, id);
+  const target = findByIdCached(root, id);
   if (!target || (target as { type?: string }).type !== 'VARIABLE') return null;
   const name = (target as { name?: unknown }).name;
   return typeof name === 'string' ? name : null;
@@ -55,7 +91,7 @@ export function textStyleName(node: unknown, root: unknown): string | null {
   const n = node as { styleIdForText?: { guid?: AliasGuid } };
   const id = readGuid(n.styleIdForText?.guid);
   if (!id) return null;
-  const target = findById(root, id) as { type?: string; styleType?: string; name?: unknown } | null;
+  const target = findByIdCached(root, id) as { type?: string; styleType?: string; name?: unknown } | null;
   if (!target || target.type !== 'TEXT' || target.styleType !== 'TEXT') return null;
   return typeof target.name === 'string' ? target.name : null;
 }
@@ -101,7 +137,7 @@ function resolveStyleAsset(node: unknown, root: unknown): Record<string, unknown
   const n = node as { styleIdForText?: { guid?: AliasGuid } };
   const id = readGuid(n.styleIdForText?.guid);
   if (!id) return null;
-  const target = findById(root, id) as Record<string, unknown> | null;
+  const target = findByIdCached(root, id) as Record<string, unknown> | null;
   if (!target || target.type !== 'TEXT' || target.styleType !== 'TEXT') return null;
   return target;
 }
@@ -112,7 +148,7 @@ function resolveStyleAsset(node: unknown, root: unknown): Record<string, unknown
  * dead-end / depth-cap detection. Returns the last-resolved node + the
  * GUID trail + an end-state classification.
  *
- * Spec: docs/specs/web-render-fidelity-round18-A.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round18-A.spec.md
  *
  * Single-mode only — entries[0]. Multi-mode chain (light/dark themes)
  * is intentionally out of scope.
@@ -179,7 +215,7 @@ export function resolveVariableChain(
       return { leaf: cur, chain, end: { kind: 'cycle', cycledAt: aliasId } };
     }
 
-    const next = findById(root, aliasId) as Record<string, unknown> | null;
+    const next = findByIdCached(root, aliasId) as Record<string, unknown> | null;
     if (!next) return { leaf: cur, chain, end: { kind: 'dead-end' } };
     if ((next as { type?: string }).type !== 'VARIABLE') {
       chain.push(aliasId);
@@ -198,7 +234,7 @@ export function resolveVariableChain(
  * "A → B → C", together with the underlying chain end-state (cycle /
  * dead-end / depth-cap / leaf) for marker rendering.
  *
- * Spec: docs/specs/web-render-fidelity-round18-B.spec.md
+ * Spec: docs/specs/archive/web-render-fidelity-round18-B.spec.md
  *
  * Reuses `resolveVariableChain`. Adds round-15-style gating: returns null
  * when paint has no `colorVar` alias OR when the alias target isn't a
@@ -219,19 +255,70 @@ export function colorVarTrail(paint: unknown, root: unknown): ColorVarTrailResul
   const p = paint as { colorVar?: { value?: { alias?: { guid?: AliasGuid } } } };
   const id = readGuid(p.colorVar?.value?.alias?.guid);
   if (!id) return null;
-  const target = findById(root, id) as Record<string, unknown> | null;
+  const target = findByIdCached(root, id) as Record<string, unknown> | null;
   if (!target || target.type !== 'VARIABLE') return null;
 
   const chainResult = resolveVariableChain(target, root);
   if (!chainResult) return null;
 
   const entries: ColorVarTrailEntry[] = chainResult.chain.map((cid) => {
-    const node = findById(root, cid) as { name?: unknown } | null;
+    const node = findByIdCached(root, cid) as { name?: unknown } | null;
     const name = node && typeof node.name === 'string' ? node.name : null;
     return { id: cid, name };
   });
 
   return { entries, end: chainResult.end };
+}
+
+/**
+ * Resolve a paint's effective {r,g,b,a} color, following a `colorVar` alias
+ * chain (paint → VARIABLE → ALIAS → … → leaf VARIABLE with a COLOR entry)
+ * when present.
+ *
+ * Why this exists: in Figma a paint that's bound to a color variable
+ * carries BOTH a snapshot `paint.color` (the value at write time, often
+ * the master's design-time default — black for typical on-primary text)
+ * AND `paint.colorVar` (the actual binding). The renderer must follow the
+ * binding so a Material 3 filled button's label stays white on its primary
+ * background instead of falling back to the snapshot black.
+ *
+ * Returns `paint.color` when:
+ *   - The paint has no `colorVar`.
+ *   - The colorVar guid is incomplete / can't be resolved.
+ *   - The chain ends without a usable COLOR entry (e.g. dead-end, cycle,
+ *     non-VARIABLE leaf).
+ * Returns the leaf VARIABLE's entries[0].variableData.value.color when the
+ * chain resolves cleanly. Single-mode only (entries[0]) — matching the
+ * existing `resolveVariableChain` limit.
+ *
+ * Spec: docs/specs/web-render-fidelity-colorvar.spec.md (Material 3 filled
+ * button + selected-date-cell text on Docked input date picker).
+ */
+export interface ResolvedColor { r?: number; g?: number; b?: number; a?: number }
+
+export function resolvePaintColor(paint: unknown, root: unknown): ResolvedColor | undefined {
+  if (!paint || typeof paint !== 'object') return undefined;
+  const p = paint as {
+    color?: ResolvedColor;
+    colorVar?: { value?: { alias?: { guid?: AliasGuid } } };
+  };
+  if (!p.colorVar || !root) return p.color;
+  const id = readGuid(p.colorVar.value?.alias?.guid);
+  if (!id) return p.color;
+  const target = findByIdCached(root, id) as { type?: string } | null;
+  if (!target || target.type !== 'VARIABLE') return p.color;
+  const chain = resolveVariableChain(target, root);
+  if (!chain || !chain.leaf) return p.color;
+  // Leaf VARIABLE's entries[0] should carry the concrete color. The chain
+  // walker returns the leaf when entries[0] is NOT an ALIAS (== `leaf` kind)
+  // or when the alias target wasn't a VARIABLE (`non-variable` kind, rare).
+  const leaf = chain.leaf as { variableDataValues?: { entries?: unknown[] } };
+  const entry = leaf.variableDataValues?.entries?.[0];
+  if (!entry || typeof entry !== 'object') return p.color;
+  const data = (entry as { variableData?: { value?: { color?: ResolvedColor }; dataType?: string } })
+    .variableData;
+  if (data?.dataType === 'COLOR' && data.value?.color) return data.value.color;
+  return p.color;
 }
 
 export function effectiveTextStyle(node: unknown, root: unknown): EffectiveTextStyle {
